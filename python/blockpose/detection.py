@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 import open3d as o3d
@@ -72,7 +72,7 @@ def _remove_ground(pts: np.ndarray, params: DetectionParams) -> np.ndarray:
         ransac_n=3,
         num_iterations=params.ground_ransac_iters,
     )
-    a, b, c, d = float(plane_model[0]), float(plane_model[1]), float(plane_model[2]), float(plane_model[3])
+    a, b, c, d = (float(value) for value in plane_model)
     normal_len = np.sqrt(a * a + b * b + c * c)
 
     if normal_len < 1e-8 or abs(c / normal_len) < params.ground_normal_min_z:

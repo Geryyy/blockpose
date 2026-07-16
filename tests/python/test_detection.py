@@ -6,8 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-
-from blockpose.detection import DetectionParams, detect_blocks
+from blockpose.detection import detect_blocks
 from blockpose.evaluate import evaluate
 from blockpose.io import load_snapshot
 
@@ -104,7 +103,9 @@ def test_dimension_gating_rejects_tall_cluster() -> None:
     ground = _make_flat_ground(n=3000)
     pts = np.vstack([ground, xyz]).astype(np.float64)
     result = detect_blocks(pts)
-    assert len(result) == 0, f"Expected 0 detections, got {len(result)}: {[p.position for p in result]}"
+    assert len(result) == 0, (
+        f"Expected 0 detections, got {len(result)}: {[p.position for p in result]}"
+    )
 
 
 def test_dimension_gating_rejects_wide_cluster() -> None:
@@ -116,7 +117,9 @@ def test_dimension_gating_rejects_wide_cluster() -> None:
     ground = _make_flat_ground(n=3000)
     pts = np.vstack([ground, xyz]).astype(np.float64)
     result = detect_blocks(pts)
-    assert len(result) == 0, f"Expected 0 detections, got {len(result)}: {[p.position for p in result]}"
+    assert len(result) == 0, (
+        f"Expected 0 detections, got {len(result)}: {[p.position for p in result]}"
+    )
 
 
 def test_dimension_gating_rejects_high_altitude_cluster() -> None:
@@ -128,4 +131,6 @@ def test_dimension_gating_rejects_high_altitude_cluster() -> None:
     ground = _make_flat_ground(n=3000)
     pts = np.vstack([ground, xyz]).astype(np.float64)
     result = detect_blocks(pts)
-    assert len(result) == 0, f"Expected 0 detections, got {len(result)}: {[p.position for p in result]}"
+    assert len(result) == 0, (
+        f"Expected 0 detections, got {len(result)}: {[p.position for p in result]}"
+    )

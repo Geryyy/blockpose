@@ -16,6 +16,9 @@ docker/Dockerfile.ros2   FROM blockpose-core + ROS 2 Jazzy, colcon,
 
 ## Quick start
 
+Docker Compose requires a host dataset directory to be provided via
+`BLOCKPOSE_DATASET`; Compose mounts that path at `/data` inside the container.
+
 ```bash
 export BLOCKPOSE_DATASET=$HOME/data/block_perception_dataset   # host path
 make image          # build core image
@@ -27,7 +30,9 @@ make check          # C++ build + ctest (env_check) + pytest + lint
 
 Or open the repo in VS Code / Claude Code and use the devcontainer
 (`.devcontainer/devcontainer.json`) — same image, `postCreateCommand` runs
-`uv sync` and the CMake configure.
+`uv sync` and the CMake configure. Unlike Docker Compose, the devcontainer
+mounts the repo-local `data/` directory at `/data` and sets
+`BLOCKPOSE_DATASET=/data` automatically.
 
 ## Conventions and rationale
 

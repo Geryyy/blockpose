@@ -7,9 +7,7 @@
   "workspaceFolder": "/workspace",
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
   "mounts": [
-    // Dataset lives OUTSIDE the repo. Set BLOCKPOSE_DATASET on the host,
-    // e.g. in ~/.bashrc: export BLOCKPOSE_DATASET=$HOME/data/block_perception_dataset
-    "source=${localEnv:BLOCKPOSE_DATASET},target=/data,type=bind,consistency=cached"
+    "source=${localWorkspaceFolder}/data,target=/data,type=bind,consistency=cached"
   ],
   "containerEnv": {
     "BLOCKPOSE_DATASET": "/data"
@@ -28,7 +26,8 @@
       "settings": {
         "cmake.generator": "Ninja",
         "cmake.buildDirectory": "${workspaceFolder}/build",
-        "python.defaultInterpreterPath": "/workspace/.venv/bin/python"
+        "python.defaultInterpreterPath": "/workspace/.venv/bin/python",
+        "workbench.colorTheme": "Monokai Dimmed"
       }
     }
   },

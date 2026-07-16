@@ -73,7 +73,8 @@ to be committed intentionally.
 ## Development
 
 The supported environment uses Docker plus a uv-managed virtual environment;
-see `docs/ENVIRONMENT.md` for details.
+see `docs/ENVIRONMENT.md` for details. Docker Compose requires a host dataset
+path in `BLOCKPOSE_DATASET`, which it mounts at `/data` inside the container.
 
 ```bash
 export BLOCKPOSE_DATASET=/absolute/path/to/block_perception_dataset
@@ -84,8 +85,9 @@ make python-sync
 make check
 ```
 
-The devcontainer uses the same core image. The planned core path is ROS-free;
-the ROS 2 image exists for bag export and later integration only.
+The devcontainer uses the same core image and automatically mounts the repo-local
+`data/` directory at `/data` with `BLOCKPOSE_DATASET=/data`. The planned core path
+is ROS-free; the ROS 2 image exists for bag export and later integration only.
 
 ## Reference bag workflow
 

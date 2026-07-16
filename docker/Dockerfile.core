@@ -3,10 +3,6 @@
 # Phases P–5 live entirely in this image. CI uses it for build + unit +
 # synthetic regression. Dockerfile.ros2 extends it for the wrapper phase.
 
-FROM ubuntu:24.04
-
-ARG DEBIAN_FRONTEND=noninteractive
-
 # ---------------------------------------------------------------------------
 # Pinned versions (bump deliberately, in one place)
 # ---------------------------------------------------------------------------
@@ -15,6 +11,17 @@ ARG DEBIAN_FRONTEND=noninteractive
 # Python notebooks.
 ARG OPEN3D_VERSION=0.19.0
 ARG UV_VERSION=0.5.24
+ARG NODE_MAJOR=24
+ARG OPENCLAUDE_VERSION=0.24.0
+
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+
+FROM ubuntu:24.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG OPEN3D_VERSION
+ARG NODE_MAJOR
+ARG OPENCLAUDE_VERSION
 
 # ---------------------------------------------------------------------------
 # System toolchain + C++ dependencies (all ABI-consistent from Ubuntu 24.04)
@@ -30,8 +37,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ninja-build \
         ccache \
         git \
+        git-lfs \
         curl \
         ca-certificates \
+        gnupg \
         pkg-config \
         python3 \
         python3-dev \
@@ -46,6 +55,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgmock-dev \
         # runtime deps of the Open3D C++ SDK (headless OK; libgl for viz utils)
         libgl1 \
+        libglu1-mesa-dev \
         libgomp1 \
         libpng16-16 \
         libjpeg-turbo8 \
@@ -86,12 +96,30 @@ ENV Open3D_ROOT=/opt/open3d \
 # ---------------------------------------------------------------------------
 # uv — Python environment manager (venv + lockfile inside the container)
 # ---------------------------------------------------------------------------
-COPY --from=ghcr.io/astral-sh/uv:0.5.24 /uv /uvx /usr/local/bin/
+COPY --from=uv /uv /uvx /usr/local/bin/
 
 # ccache defaults
 ENV CCACHE_DIR=/workspace/.cache/ccache \
     CMAKE_C_COMPILER_LAUNCHER=ccache \
     CMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+# ---------------------------------------------------------------------------
+# Node.js + OpenClaude CLI
+# ---------------------------------------------------------------------------
+RUN install -d -m 0755 /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+        | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && chmod 0644 /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
+        > /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm install -g "@gitlawb/openclaude@${OPENCLAUDE_VERSION}" \
+    && npm cache clean --force \
+    && rm -rf /var/lib/apt/lists/*
+
+# Ensure Git LFS is initialized for both root during build and the dev user.
+RUN git lfs install --system
 
 # Ubuntu 24.04 ships a non-root 'ubuntu' user (uid 1000) — use it so files
 # created in mounted volumes belong to the host user.

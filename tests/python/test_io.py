@@ -5,8 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-import pytest
-
 from blockpose.io import (
     apply_transform,
     load_ground_truth,

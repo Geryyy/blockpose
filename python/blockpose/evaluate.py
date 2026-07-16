@@ -61,7 +61,7 @@ def match_detections(
 
     det_idx, gt_idx = linear_sum_assignment(cost)
     pairs = []
-    for di, gi in zip(det_idx, gt_idx):
+    for di, gi in zip(det_idx, gt_idx, strict=True):
         if cost[di, gi] <= max_dist:
             pairs.append((int(di), int(gi)))
     return pairs

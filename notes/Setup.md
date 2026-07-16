@@ -1,23 +1,15 @@
 
 # Preparation
 
-- [ ] generate test rosbags (trim existing bags)
-	- [ ] standalone
-	- [ ] standalone rotated
-	- [ ] gripped
-	- [ ] gripped rotated
-	- [ ] stacked
-	- [ ] stacked rotated
-	- [ ] pre-stacked
-	- [ ] wall
-	- [ ] wall2
-- [ ] ground truth for test rosbags (with existing perception pipeline)
-- [ ] block cs definition
-- [ ] camera lidar calib data
-- [ ] export PZS100 meshes
+- [x] generate test rosbags (trim existing bags)
+	- [ ] basic snapshots with groundtruth for early stage development
+- [x] ground truth for test rosbags (with existing perception pipeline)
+- [x] block cs definition
+- [x] camera lidar calib data
+- [x] export PZS100 meshes
 - [ ] synthetic data generation
 	- [ ] block cad
 	- [ ] seibersdorf mesh
-- [ ] setup development environment
-	- [ ] conda / docker?
-	- [ ] openclaude 
+- [x] setup development environment
+	- [x] conda / docker?
+	- [x] openclaude
