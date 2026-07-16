@@ -1,0 +1,44 @@
+<?xml version="1.0"?>
+
+<robot name="crane_model" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- Load parameters -->
+  <xacro:include filename="$(find epsilon_crane_description)/urdf/inc/parameters.xacro"/>
+
+  <!-- Include Crane and Truck Macros -->
+  <xacro:include filename="$(find epsilon_crane_description)/urdf/crane.urdf.xacro"/>
+  <xacro:include filename="$(find epsilon_crane_description)/urdf/truck.urdf.xacro"/>
+
+  <!-- Fix Crane on Truck -->
+  <joint name="mounting_on_truck" type="fixed">
+    <origin xyz="0 0.35 ${0.52+0.6207}" rpy="0 0 ${pi}"/>
+    <parent link="truck_rotated_roll"/>
+    <child link="K0_mounting_base"/>
+  </joint>
+
+  <!-- Uncomment this line to see the collision bodies defined in matlab -->
+  <!-- <xacro:include filename="$(find
+  epsilon_crane_description)/urdf/collision_bodies_truck_matlab.urdf.xacro"/> -->
+
+  <!-- load ros2_control settings -->
+  <!-- ensure that only one of these flags is active at a time -->
+  <xacro:if value="$(arg load_ros2_control)">
+    <xacro:if value="${sim}">
+      <xacro:include
+        filename="$(find epsilon_crane_description)/ros2_control/crane_hydraulic_sim.ros2_control.xacro"/>
+    </xacro:if>
+    <xacro:if value="${fake}">
+      <xacro:include
+        filename="$(find epsilon_crane_description)/ros2_control/crane_hydraulic_fake.ros2_control.xacro"/>
+    </xacro:if>
+    <xacro:if value="${real}">
+      <xacro:include
+        filename="$(find epsilon_crane_description)/ros2_control/crane_hardware_interface.ros2_control.xacro"/>
+    </xacro:if>
+    <xacro:if value="${bag}">
+      <xacro:include
+        filename="$(find epsilon_crane_description)/ros2_control/crane_bag_replay.ros2_control.xacro"/>
+    </xacro:if>
+    <xacro:crane_ros2_control/>
+  </xacro:if>
+</robot>

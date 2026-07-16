@@ -1,0 +1,69 @@
+<?xml version='1.0'?>
+<sdf version='1.7'>
+  <model name='concrete_block'>
+    <!-- 0.9 x 0.6 x 0.6 m concrete block                               -->
+    <!-- mass = 0.9 * 0.6 * 0.6 * 2400 kg/m^3 = 777.6 kg                -->
+    <!-- inertia (solid box): Ixx = m/12*(b^2+c^2), etc.                 -->
+    <!--   Ixx = 778/12*(0.6^2+0.6^2) = 46.7 kg*m^2                     -->
+    <!--   Iyy = 778/12*(0.9^2+0.6^2) = 75.5 kg*m^2                     -->
+    <!--   Izz = 778/12*(0.9^2+0.6^2) = 75.5 kg*m^2                     -->
+    <!-- Model origin is at box centre.                                   -->
+    <link name='link'>
+      <inertial>
+        <mass>80</mass>
+        <inertia>
+          <ixx>4.67</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>7.55</iyy>
+          <iyz>0</iyz>
+          <izz>7.55</izz>
+        </inertia>
+        <pose>0 0 0 0 0 0</pose>
+      </inertial>
+      <pose>0 0 0 0 0 0</pose>
+
+      <visual name='visual'>
+        <pose>0 0 0 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.9 0.6 0.6</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>0.6 0.6 0.6 1</ambient>
+          <diffuse>0.6 0.6 0.6 1</diffuse>
+          <specular>0.1 0.1 0.1 1</specular>
+        </material>
+      </visual>
+
+      <collision name='collision'>
+        <pose>0 0 0 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.9 0.6 0.6</size>
+          </box>
+        </geometry>
+        <surface>
+          <friction>
+            <ode>
+              <mu>100</mu>
+              <mu2>100</mu2>
+              <slip1>0</slip1>
+              <slip2>0</slip2>
+            </ode>
+          </friction>
+          <contact>
+            <ode>
+              <max_vel>0.1</max_vel>
+              <min_depth>0.001</min_depth>
+            </ode>
+            <collide_without_contact>0</collide_without_contact>
+            <collide_without_contact_bitmask>1</collide_without_contact_bitmask>
+            <collide_bitmask>1</collide_bitmask>
+          </contact>
+        </surface>
+      </collision>
+    </link>
+  </model>
+</sdf>

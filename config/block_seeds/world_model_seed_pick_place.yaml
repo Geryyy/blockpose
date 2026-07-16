@@ -1,0 +1,54 @@
+# Staging blocks for wall-assembly pick-and-place.
+#
+# ONE source of truth for both Gazebo and the world model:
+#   * world_model_node reads `world_model.initial_blocks` from here (markers + GetCoarseBlocks)
+#   * gazebo_block_spawner.py reads the same `initial_blocks` and spawns each in Gazebo
+#
+# FRAME: world. The whole CBS stack (wall_spec, wall plan, world model, viz) lives in
+# `world`; the single world -> K0_mounting_base conversion happens in the
+# GetNextAssemblyTask BT plugin. Keep this seed in the SAME frame as wall_spec_example.yaml.
+#
+# Block IDs are physical world-model IDs. The wall plan maps semantic slots
+# (c0_b0, c0_b1, ...) onto these IDs via block_bindings.
+# Block dimensions: 0.9 x 0.6 x 0.6 m (X=depth, Y, Z=height).
+# Positions are staged on flat terrain near the wall assembly workspace.
+world_model_node:
+  ros__parameters:
+    world_frame: world
+    world_model:
+      initial_blocks: |
+        - id: block_0
+          frame_id: world
+          position: [-13.0, 0.0, 0.3]
+          yaw_deg: 0.0
+          pose_status: POSE_PRECISE
+          task_status: TASK_FREE
+          confidence: 1.0
+        - id: block_1
+          frame_id: world
+          position: [-14.0, 0.0, 0.3]
+          yaw_deg: 0.0
+          pose_status: POSE_PRECISE
+          task_status: TASK_FREE
+          confidence: 1.0
+        - id: block_2
+          frame_id: world
+          position: [-15.0, 0.0, 0.3]
+          yaw_deg: 0.0
+          pose_status: POSE_PRECISE
+          task_status: TASK_FREE
+          confidence: 1.0
+        - id: block_3
+          frame_id: world
+          position: [-11.0, -1.5, 0.3]
+          yaw_deg: 0.0
+          pose_status: POSE_PRECISE
+          task_status: TASK_FREE
+          confidence: 1.0
+        - id: block_4
+          frame_id: world
+          position: [-13.0, -1.5, 0.3]
+          yaw_deg: 0.0
+          pose_status: POSE_PRECISE
+          task_status: TASK_FREE
+          confidence: 1.0

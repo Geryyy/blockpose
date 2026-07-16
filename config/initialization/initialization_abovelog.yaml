@@ -1,0 +1,33 @@
+# Initial values of main joints
+theta1_0: 1.34
+theta2_0: 0.82
+theta3_0: 0.34
+q4_0: 0.90
+theta6_0: 0.41
+theta7_0: 1.58
+theta8_0: 2.05
+theta10_0: 1.570000
+theta12_0: 1.675239
+q9_0: 0.210000
+q11_0: 0.210000
+# Initial forces of main joints' actuators
+tau2_0: 144122.566792
+tau3_0: 67504.536221
+tau4_0: -1950.881669
+# Singularity of arm joint
+q3_singularity_1: 1.933899
+q3_singularity_2: 1.759366
+# Initial values of joints within closed kinematic chain of boom cylinder
+boom_cylinder_piston_in_barrel_linear_joint: 2.014108
+boom_cylinder_mounting_on_slewing_column: 0.036681
+boom_cylinder_linkage_big_mounting_on_slewing_column: 0.572425
+boom_cylinder_linkage_small_mounting_on_boom: -0.409318
+# Initial values of joints within closed kinematic chain of arm cylinders
+angle_arm_cylinder_mounting_on_boom: -1.823467
+length_arm_cylinder_piston_in_barrel_linear_joint: 1.736685
+# Initial values for truck orientation
+truck_roll: 0.
+truck_pitch: 0.
+truck_pitch_clearance: 0. # m, to avoid collision with ground
+# gripper details (for 7040)
+pincer_cylinder_piston_in_barrel_linear_joint: 0.650131

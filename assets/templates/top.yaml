@@ -1,0 +1,8 @@
+template_name: top
+num_faces: 1
+faces:
+  - name: top
+    normal:
+      - 0
+      - 0
+      - 1

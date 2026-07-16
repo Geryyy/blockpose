@@ -1,0 +1,18 @@
+template_name: top_front_short_right
+num_faces: 3
+faces:
+  - name: top
+    normal:
+      - 0
+      - 0
+      - 1
+  - name: front
+    normal:
+      - 1
+      - 0
+      - 0
+  - name: right
+    normal:
+      - 0
+      - 1
+      - 0

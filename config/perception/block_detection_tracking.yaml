@@ -1,0 +1,23 @@
+block_detection_tracking_node:
+  ros__parameters:
+
+    detection:
+      # -------------------------
+      # Detection filtering (applied to each incoming detection first)
+      # -------------------------
+      min_confidence: 0.5      # Drop detections below this YOLO score (0-1)
+      min_bbox_area: 600.0     # Drop detections whose bbox is smaller than this (px^2)
+      # -------------------------
+      # Tracking & association
+      # -------------------------
+      iou_threshold: 0.35      # Min IoU (mask, else bbox) to match a detection to an existing track
+      containment_ratio: 0.3  # Suppress a new detection if this fraction of the smaller box lies inside a confirmed track (intersection / min-area, not IoU). Lower = more aggressive suppression of overlapping blocks
+      suppression_radius: 0.3  # Suppress a new detection whose center is within (radius * max(w,h)) px of a confirmed track. Lower = allow closer/overlapping blocks
+      confirm_age: 3           # Frames a track must survive before it can suppress others / be output
+      max_misses: 7            # Frames a track may go unmatched before it is deleted
+      max_output_misses: 0     # Max consecutive misses for a track to still be published (0 = only tracks seen this frame)
+      # -------------------------
+      # Debugging
+      # -------------------------
+      publish_debug_image: true  # Publish the annotated tracking debug image
+      bypass_tracking: false     # If true, skip all tracking/suppression and forward raw filtered detections

@@ -1,0 +1,106 @@
+# PZS100 concrete-block stack reference transforms.
+#
+# Generated from:
+#   xacro src/epsilon_crane_description/urdf/timber_loader_AIT.urdf.xacro \
+#     gazebo:=false load_ros2_control:=false rigid:=true sim_hydraulics:=false \
+#     initial_pose:=1 tool:=pzs100_description post_setup:=134
+#
+# Dynamic joint assumption for the world_* reference transforms:
+#   epsilon_crane_description/config/initialization_horizontal.yaml
+#   theta1_0 = 0.785 rad
+#
+# Convention:
+#   T_parent_child maps points from child coordinates into parent coordinates.
+#   rpy is roll, pitch, yaw in radians.
+
+reference:
+  ros_world_frame: world
+  gazebo_world_frame: world
+  default_pzs100_launches:
+    - concrete_block_behavior_tree/launch/gazebo_wall_assembly_pzs100.launch.py
+    - concrete_block_behavior_tree/launch/gazebo_basic_pick_and_place_pzs100.launch.py
+  default_initial_pose_id: 1
+  initial_pose_file: initialization_horizontal.yaml
+
+transforms:
+  - name: T_world_K0_mounting_base
+    parent: world
+    child: K0_mounting_base
+    xyz: [-6.93852, 0.35, 1.1407]
+    rpy: [0.0, 0.0, 3.14159265359]
+    quaternion_xyzw: [0.0, 0.0, 1.0, 0.0]
+    matrix:
+      - [-1.0, -0.0, 0.0, -6.93852]
+      - [0.0, -1.0, 0.0, 0.35]
+      - [0.0, 0.0, 1.0, 1.1407]
+      - [0.0, 0.0, 0.0, 1.0]
+
+  - name: T_world_sensor_konsole
+    parent: world
+    child: sensor_konsole
+    xyz: [-6.669296185975, -0.11184795979, 3.7057]
+    rpy: [-0.025213, 0.421023, -2.33918465359]
+    quaternion_xyzw: [-0.187537263876, -0.092947029971, 0.899168379499, -0.384300467845]
+    matrix:
+      - [-0.634285850144, 0.725963721199, -0.265815981106, -6.669296185975]
+      - [-0.656239594454, -0.687348000067, -0.311291377128, -0.11184795979]
+      - [-0.408694329516, -0.023008744144, 0.912381248555, 3.7057]
+      - [0.0, 0.0, 0.0, 1.0]
+
+  - name: T_world_seyond
+    parent: world
+    child: seyond
+    xyz: [-6.648975908127, -0.1627913209, 3.644314724347]
+    rpy: [1.408702414222, 0.392923636184, -2.787634429383]
+    quaternion_xyzw: [-0.258236114637, 0.598974861855, 0.757952531011, -0.007154348131]
+    matrix:
+      - [-0.8665258488, -0.298508569634, -0.400031982741, -6.648975908127]
+      - [-0.320199194728, -0.282355860337, 0.904294002982, -0.1627913209]
+      - [-0.382890884008, 0.911684047238, 0.149086447926, 3.644314724347]
+      - [0.0, 0.0, 0.0, 1.0]
+
+  - name: T_world_blackfly_rotated
+    parent: world
+    child: blackfly_rotated
+    xyz: [-6.531169455945, -0.279629709938, 3.655694895365]
+    rpy: [-1.991787528283, -0.01756545607, 2.36576985612]
+    quaternion_xyzw: [0.313016418563, 0.778666715255, -0.500545321057, -0.212492940665]
+    matrix:
+      - [-0.713734943755, 0.274746238512, -0.644280167697, -6.531169455945]
+      - [0.700195627342, 0.302950206557, -0.646488403453, -0.279629709938]
+      - [0.017564552794, -0.91254352048, -0.408602263472, 3.655694895365]
+      - [0.0, 0.0, 0.0, 1.0]
+
+  - name: T_sensor_konsole_seyond
+    parent: sensor_konsole
+    child: seyond
+    xyz: [0.04563, 0.05118, -0.04555]
+    rpy: [1.609954, 0.019332, -0.411782]
+    quaternion_xyzw: [0.706927245307, -0.140797890136, -0.148516162047, 0.677032328317]
+    matrix:
+      - [0.916237807488, 0.002032756728, -0.400629689401, 0.04563]
+      - [-0.400168215205, -0.043606361094, -0.915403673147, 0.05118]
+      - [-0.019330795877, 0.999046722217, -0.039140352049, -0.04555]
+      - [0.0, 0.0, 0.0, 1.0]
+
+  - name: T_seyond_blackfly_rotated
+    parent: seyond
+    child: blackfly_rotated
+    xyz: [-0.069028141629, 0.008198888695, -0.151085973897]
+    rpy: [3.0695132488, -1.171457197975, 0.080757015097]
+    quaternion_xyzw: [0.832893692359, 0.013714369232, 0.553209470893, 0.007700299946]
+    matrix:
+      - [0.387542394782, 0.014325465539, 0.921740567233, -0.069028141629]
+      - [0.031364980975, -0.999505242915, 0.002346775385, 0.008198888695]
+      - [0.921318148207, 0.028000900402, -0.387799973391, -0.151085973897]
+      - [0.0, 0.0, 0.0, 1.0]
+
+dynamic_chain_to_seyond:
+  - world_fixed
+  - truck_pitch
+  - truck_roll
+  - mounting_on_truck
+  - theta1_slewing_joint
+  - root_sensor_to_konsole
+  - seyond_joint
+

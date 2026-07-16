@@ -1,0 +1,220 @@
+world_model_node:
+  ros__parameters:
+    # ----------------------------------
+    # World model (minimal)
+    # ----------------------------------
+    world_model:
+      # Physical block size used for markers, planning objects, and coarse poses.
+      block_dimensions_m: [0.9, 0.6, 0.6]
+      # Default max distance for matching an incoming observation to a known block.
+      association_max_distance_m: 0.45
+      # Default max age for a known block to be considered for association.
+      association_max_age_s: 20.0
+      # Ignore updates below this confidence unless explicitly targeted.
+      min_update_confidence: 0.25
+      # Max distance for selecting an existing block as a refine target.
+      refine_target_max_distance_m: 1.2
+      # Fixed obstacles published with the world markers and planning scene.
+      static_scene_objects: |
+        # - id: post_right_1
+        #   frame_id: world
+        #   position: [-5.558000, 1.652500, 1.097000]
+        #   dimensions: [0.140000, 0.152500, 1.060000]
+        # - id: post_right_2
+        #   frame_id: world
+        #   position: [-2.574000, 1.652500, 1.097000]
+        #   dimensions: [0.140000, 0.152500, 1.060000]
+        # - id: post_right_3
+        #   frame_id: world
+        #   position: [-1.361500, 1.652500, 1.097000]
+        #   dimensions: [0.140000, 0.152500, 1.060000]
+        # - id: post_left_1
+        #   frame_id: world
+        #   position: [-5.558000, -0.952500, 1.097000]
+        #   dimensions: [0.140000, 0.152500, 1.060000]
+        # - id: post_left_2
+        #   frame_id: world
+        #   position: [-2.574000, -0.952500, 1.097000]
+        #   dimensions: [0.140000, 0.152500, 1.060000]
+        # - id: post_left_3
+        #   frame_id: world
+        #   position: [-1.361500, -0.952500, 1.097000]
+        #   dimensions: [0.140000, 0.152500, 1.060000]
+        # - id: truck_main
+        #   frame_id: world
+        #   position: [-7.384000, 0.350000, 0.563000]
+        #   dimensions: [1.150000, 1.455000, 1.844000]
+        # - id: truck_rear
+        #   frame_id: world
+        #   position: [-0.315000, 0.350000, -0.334500]
+        #   dimensions: [0.200000, 2.460000, 0.846500]
+        # - id: truck_bed
+        #   frame_id: world
+        #   position: [-3.158000, 0.350000, -0.548150]
+        #   dimensions: [3.158000, 1.255000, 0.662850]
+        # - id: slewing_column
+        #   frame_id: world
+        #   position: [0.000000, 0.000000, 1.212500]
+        #   dimensions: [0.450000, 0.650000, 1.512500]
+
+      # ---- Overlap-merge of duplicate detections (one-shot scene discovery) ----
+      # Collapses strongly-overlapping detection boxes on the same block into a
+      # single detection with the union bounding box, so the registration cutout
+      # keeps every face (a nested duplicate box would clip the front face away).
+      scene_discovery_merge:
+        # Merge overlapping detections before building registration candidates.
+        enable: true
+        # Merge if intersection / smaller-box-area >= this (catches nested boxes).
+        containment_ratio: 0.3
+        # ...or if IoU >= this (catches partially-overlapping duplicates).
+        iou_threshold: 0.5
+
+      # ---- Advanced / experimental scene-discovery fallback ----
+      # Kept visible for ablation; normal operation should rely on registered
+      # detections instead of inserting coarse fallback poses.
+      scene_discovery_coarse_fallback:
+        # Allow scene discovery to insert coarse poses when registration fails.
+        enable: true
+        # Minimum cutout points required for a coarse fallback pose.
+        min_points: 120
+        surface_shape:
+          # BBox max(w,h)/min(w,h) <= threshold means square front face.
+          square_ratio_thresh: 1.35
+        center_offset:
+          # Shift coarse centroid away from camera along viewing ray.
+          square_m: 0.45
+          rect_m: 0.30
+
+    # ----------------------------------
+    # Grasped / lifted block tracking
+    # ----------------------------------
+    task_move:
+      # Once a block is marked TASK_MOVE, its world pose is owned by FK:
+      # T_world_block = T_world_tcp * refine_grasped.tcp_to_block.
+      fk_tracking:
+        # Update TASK_MOVE blocks from TCP FK between vision refinements.
+        enabled: true
+
+    # ----------------------------------
+    # Registration gating
+    # ----------------------------------
+    # Minimum registration fitness accepted by the world model.
+    min_fitness: 0.3
+    # Maximum registration RMSE accepted by the world model.
+    max_rmse: 0.05
+    # ----------------------------------
+    # Input synchronization gating
+    # ----------------------------------
+    sync:
+      # Max timestamp delta between synchronized image/cloud inputs.
+      max_delta_s: 0.08
+
+    # ----------------------------------
+    # Runtime debug/perf controls
+    # ----------------------------------
+    debug:
+      # Publish image overlays with detections and masks.
+      publish_detection_overlay: true
+      # Dump scene-discovery datasets for standalone development.
+      # One folder per one-shot frame: rgb.png, cloud.pcd, masks, metadata.yaml,
+      # and registrations.yaml.
+      scene_discovery_dump:
+        enable: true
+        dir: scene_discovery_dump
+
+    perf:
+      # Emit periodic perception timing logs and timing topics.
+      log_timing: true
+      # Log timing summary every N processed frames.
+      log_every_n_frames: 20
+
+    # ----------------------------------
+    # Object / template selection
+    # ----------------------------------
+    # Object class name expected from segmentation and registration.
+    object_class: "concrete_block"
+
+    # ----------------------------------
+    # REFINE_GRASPED robust mode (FK + ROI)
+    # ----------------------------------
+    refine_grasped:
+      # Crop segmentation around FK-predicted grasped block pose.
+      use_fk_roi: true
+      # TCP frame used to predict the grasped block center.
+      tcp_frame: "elastic/K8_tool_center_point"
+      # Optional override; if empty, use image.header.frame_id.
+      camera_frame: ""
+      # Camera intrinsics used to project FK ROI into image space.
+      camera_info_topic: "/blackfly_rotated/camera_info"
+      # Transform from TCP frame -> predicted block center used for ROI placement.
+      # Units: xyz in meters, rpy in radians.
+      # Frame: values are expressed in tcp_frame axes.
+      # "Move down from current TCP":
+      #   if TCP +Z points up  -> use negative z (e.g. [0, 0, -0.10])
+      #   if TCP +Z points down -> use positive z (e.g. [0, 0,  0.10])
+      # Nominal TCP->block offset. On TASK_MOVE the real offset is auto-captured from the
+      # block's registered pose and the current TCP (T_world_tcp^-1 * T_world_block); this
+      # nominal is only the fallback when no registered pose exists, and (when non-identity)
+      # a plausibility bound on the auto-capture.
+      tcp_to_block:
+        # Translation from TCP to block center.
+        xyz: [0.0, 0.0, 0.9]
+        # Rotation from TCP to block frame as roll, pitch, yaw.
+        rpy: [0.0, 0.0, 0.0]
+      grasp_offset_capture:
+        # Reject an auto-captured offset whose translation deviates from the nominal
+        # tcp_to_block by more than this (m). Only enforced when tcp_to_block is non-identity.
+        max_deviation_m: 1.0
+      # ROI size around predicted block center in meters: [x_width, y_height].
+      # Converted internally to pixels using camera intrinsics + predicted depth.
+      roi_size_m: [1.80, 1.5]
+      # Depth gate for predicted block center in camera frame [m].
+      # Rejects implausible projections before registration.
+      # Minimum allowed ROI center depth.
+      min_depth_m: 2.0
+      # Maximum allowed ROI center depth.
+      max_depth_m: 20.0
+      # Timeout for ROI segmentation service call [s].
+      segmentation_timeout_s: 3.0
+      segmentation_input:
+        # If true, use black background outside ROI.
+        # If false, use blurred original background outside ROI.
+        use_black_background: false
+        # Gaussian blur kernel (odd integer >= 1), only used when use_black_background=false.
+        blur_kernel_size: 31
+      pose_fusion:
+        # For REFINE_GRASPED:
+        # translation from registration, orientation from FK (TCP-based prediction).
+        # Fuse registered position with FK orientation.
+        enable: true
+        # Pose fusion strategy for grasped block refinement.
+        mode: "position_from_registration_orientation_from_fk"
+        # Safety gates for rejecting implausible registration jumps before world-model update.
+        # Max allowed position jump from FK prediction.
+        max_translation_jump_m: 0.35
+        # Max allowed vertical jump from FK prediction.
+        max_z_delta_m: 0.25
+        # Log pose-fusion accept/reject details.
+        debug_log: true
+
+    # ----------------------------------
+    # REFINE_BLOCK optional targeted ROI mode
+    # Uses target block pose from persistent world model as ROI seed.
+    # Falls back to full-image REFINE_BLOCK when ROI preconditions fail.
+    # ----------------------------------
+    refine_block:
+      # Use existing world pose to crop REFINE_BLOCK segmentation.
+      use_pose_roi: true
+      # ROI size around the target block pose.
+      roi_size_m: [1.20, 1.00]
+      # Minimum target depth for pose-based ROI projection.
+      min_depth_m: 0.5
+      # Maximum target depth for pose-based ROI projection.
+      max_depth_m: 30.0
+      # Max wait for ROI segmentation during REFINE_BLOCK.
+      segmentation_timeout_s: 3.0
+      segmentation_input:
+        # If true, black out pixels outside the ROI.
+        use_black_background: false
+        # Blur kernel for pixels outside ROI when not blacked out.
+        blur_kernel_size: 31

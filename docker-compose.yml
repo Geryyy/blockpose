@@ -1,0 +1,40 @@
+# Usage:
+#   export BLOCKPOSE_DATASET=$HOME/data/block_perception_dataset
+#   docker compose build core
+#   docker compose run --rm core          # dev shell, no ROS
+#   docker compose build ros2 && docker compose run --rm ros2
+
+services:
+  core:
+    image: blockpose-core
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.core
+    volumes:
+      - .:/workspace
+      - ${BLOCKPOSE_DATASET:?set BLOCKPOSE_DATASET to your dataset dir}:/data
+    environment:
+      - BLOCKPOSE_DATASET=/data
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    # host networking so rerun-sdk in the container can reach a Rerun
+    # viewer running on the host, and (later) ROS DDS discovery works.
+    network_mode: host
+
+  ros2:
+    image: blockpose-ros2
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.ros2
+    volumes:
+      - .:/workspace
+      - ${BLOCKPOSE_DATASET:?set BLOCKPOSE_DATASET to your dataset dir}:/data
+    environment:
+      - BLOCKPOSE_DATASET=/data
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    network_mode: host
+    ipc: host

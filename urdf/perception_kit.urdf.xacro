@@ -1,0 +1,154 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:include filename="$(find sensor_description)/urdf/inc/dummy_macros.xacro"/>
+
+  <xacro:macro name="perception_kit"
+    params="
+      parent
+      *origin">
+    <joint name="root_sensor_to_konsole" type="fixed">
+      <parent link="${parent}"/>
+      <child link="sensor_konsole"/>
+      <xacro:insert_block name="origin"/>
+    </joint>
+
+    <link name="sensor_konsole">
+      <xacro:dummy_inertial radius="0.1"/>
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://sensor_description/meshes/sensor_konsole.stl"/>
+        </geometry>
+        <material name="">
+          <color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/>
+        </material>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://sensor_description/meshes/sensor_konsole.stl"/>
+        </geometry>
+      </collision>
+    </link>
+
+    <link name="livox_frame">
+      <xacro:dummy_inertial/>
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://sensor_description/meshes/livox_frame.stl"/>
+        </geometry>
+        <material name="">
+          <color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1"/>
+        </material>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://sensor_description/meshes/livox_frame.stl"/>
+        </geometry>
+      </collision>
+    </link>
+    <joint name="livox_joint" type="fixed">
+      <origin xyz="0.08756 0.2115 0.047289" rpy="3.1416 0.0 0.0"/>
+      <parent link="sensor_konsole"/>
+      <child link="livox_frame"/>
+    </joint>
+
+    <link name="livox_frame_up"/>
+    <joint name="livox_frame_up_joint" type="fixed">
+      <origin xyz="0 0 0" rpy="3.14159 0 0"/>
+      <parent link="livox_frame"/>
+      <child link="livox_frame_up"/>
+    </joint>
+
+    <link name="hesai_frame">
+      <xacro:dummy_inertial/>
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://sensor_description/meshes/hesai_frame.stl"/>
+        </geometry>
+        <material name="">
+          <color rgba="0.752941176470588 0.752941176470588 0.752941176470588 1"/>
+        </material>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://sensor_description/meshes/hesai_frame.stl"/>
+        </geometry>
+      </collision>
+    </link>
+    <joint name="hesai_joint" type="fixed">
+      <origin xyz="-0.08319 0.18900 0.19885" rpy="-0.421168 -0.020435 1.567693"/>
+      <parent link="sensor_konsole"/>
+      <child link="hesai_frame"/>
+    </joint>
+
+    <link name="blackfly">
+      <xacro:dummy_inertial/>
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://sensor_description/meshes/blackfly.stl"/>
+        </geometry>
+        <material name="">
+          <color rgba="0.752941176470588 0.752941176470588 0.752941176470588 1"/>
+        </material>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://sensor_description/meshes/blackfly.stl"/>
+        </geometry>
+      </collision>
+    </link>
+
+    <joint name="blackfly_joint" type="fixed">
+      <origin xyz="0.04293 0.21675 -0.030111" rpy="-1.594930 -1.558579 -1.560625 "/>
+      <parent link="sensor_konsole"/>
+      <child link="blackfly"/>
+    </joint>
+
+    <link name="blackfly_rotated"/>
+    <joint name="blackfly_rotated_joint" type="fixed">
+      <origin xyz="0 0 0" rpy="0 0 1.5708"/>
+      <parent link="blackfly"/>
+      <child link="blackfly_rotated"/>
+    </joint>
+
+    <link name="seyond">
+      <xacro:dummy_inertial/>
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://sensor_description/meshes/seyond.stl"/>
+        </geometry>
+        <material name="">
+          <color rgba="0.752941176470588 0.752941176470588 0.752941176470588 1"/>
+        </material>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <mesh filename="package://sensor_description/meshes/seyond.stl"/>
+        </geometry>
+      </collision>
+    </link>
+
+    <joint name="seyond_joint" type="fixed">
+      <origin xyz="0.04563 0.05118 -0.04555" rpy="1.609954 0.019332 -0.411782"/>
+      <parent link="sensor_konsole"/>
+      <child link="seyond"/>
+    </joint>
+
+    <gazebo reference="root_sensor_to_konsole">
+      <preserveFixedJoint>true</preserveFixedJoint>
+    </gazebo>
+    <gazebo reference="livox_joint">
+      <preserveFixedJoint>true</preserveFixedJoint>
+    </gazebo>
+  </xacro:macro>
+</robot>

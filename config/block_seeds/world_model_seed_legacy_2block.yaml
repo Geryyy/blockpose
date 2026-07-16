@@ -1,0 +1,24 @@
+# Legacy 2-block staging (the original block_1/block_2 that worked previously).
+# Used to regression-test the A2B pipeline with the feasibility checker:
+#   ros2 launch concrete_block_assembly_planning feasibility_check.launch.py \
+#     seed_file:=<abs path to this file>
+# World frame. If these FAIL but worked before, a recent change broke the pipeline.
+world_model_node:
+  ros__parameters:
+    world_frame: world
+    world_model:
+      initial_blocks: |
+        - id: block_1
+          frame_id: world
+          position: [-11.439, 0.100, 0.181]
+          yaw_deg: 0.0
+          pose_status: POSE_PRECISE
+          task_status: TASK_FREE
+          confidence: 1.0
+        - id: block_2
+          frame_id: world
+          position: [-12.939, 0.100, 0.196]
+          yaw_deg: 0.0
+          pose_status: POSE_PRECISE
+          task_status: TASK_FREE
+          confidence: 1.0

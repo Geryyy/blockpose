@@ -1,0 +1,114 @@
+registration_node:
+  ros__parameters:
+
+    calib_yaml: calib_blackfly_to_seyond.yaml
+    world_frame: world
+    # ------------------------------------------------------------
+    # Calibration & templates
+    # ------------------------------------------------------------
+    # all paths are relative to package/config
+
+    template:
+      dir: "/templates"
+      cad_name: "ConcreteBlock.ply"
+      n_points: 2000
+      angle_deg: 30.0
+
+    # ------------------------------------------------------------
+    # Global registration (plane extraction)
+    # ------------------------------------------------------------
+    preproc:
+      max_pts: 1000
+      nb_neighbors: 20
+      std_dev: 2.0
+      # Keep only dominant spatial cluster from mask cutout to suppress ROI background/ground clutter.
+      enable_cluster_filter: false
+      # DBSCAN parameters [m]/[#pts]
+      cluster_eps: 0.08
+      cluster_min_points: 20
+      # Require minimum dominant-cluster size to apply the filter.
+      cluster_min_size: 120
+
+    # ------------------------------------------------------------
+    # Global registration (plane extraction)
+    # ------------------------------------------------------------
+    glob_reg:
+      # Distance threshold for plane inliers [m]
+      dist_thresh: 0.02
+      # Number of RANSAC plane candidates to extract before selecting the best top/front pair.
+      # Set to 2 for the previous tuned behavior.
+      max_planes: 5
+      # Minimum number of inliers per plane
+      min_inliers: 40
+      # Maximum angle (deg) between top-plane normal and world Z
+      angle_thresh_top_degree: 30.0
+      # Maximum tilt (deg) of a front/side-plane normal away from horizontal.
+      # Internally this is tested as abs(normal dot world_z) < sin(angle).
+      angle_thresh_front_degree: 20.0
+      # max distance between plane centers, i.e. segmentation mask off - abort if top plane and ground plane are visible
+      max_plane_center_dist: 0.6
+      # Whether to enable plane clipping (i.e. mask out points above the detected plane)
+      enable_plane_clipping: true
+      # Reject front planes that look TALL_VERTICAL (helps reject stacked-block fronts).
+      # Set false to tolerate partial-occlusion artifacts in grasped refinement.
+      reject_tall_vertical: false
+      # If plane-based global registration fails and the action provides a
+      # world-frame prior, seed local ICP from that prior instead of aborting.
+      enable_pose_prior_fallback: false
+      # Reject prior-fallback ICP if it drifts too far from the trusted prior.
+      pose_prior_fallback_max_translation_m: 0.25
+      pose_prior_fallback_max_orientation_rad: 0.80
+
+    # ------------------------------------------------------------
+    # Local registration (ICP)
+    # ------------------------------------------------------------
+    loc_reg:
+      # Max correspondence distance for ICP [m]
+      icp_dist: 0.04
+      # If true, do not require tpl.num_faces == glob.num_planes.
+      # Useful for partial occlusion in REFINE_GRASPED.
+      relax_num_faces_match: true
+      # Use FK-based translation seed (world) for local ICP init.
+      # Default false to avoid changing non-grasped behavior.
+      use_fk_translation_seed: true
+      # Adaptive ICP correspondence-distance scales applied to icp_dist.
+      # Tried in order until a valid fit is found.
+      icp_dist_multipliers: [1.0, 1.5, 2.0]
+      # If true, run point-to-point ICP fallback and then refine with point-to-plane.
+      enable_point_to_point_fallback: true
+      fk_seed:
+        tcp_frame: "elastic/K8_tool_center_point"
+        # Translation from tcp_frame origin to block center in tcp_frame coordinates [m].
+        # K8 -> grip contact (PZS100 rail length): 0.95 m
+        # grip contact -> block center (block_grip_z_offset, upward into block): -0.10 m
+        # net: 0.85 m along K8 Z-down axis
+        tcp_to_block_xyz: [0.0, 0.0, 0.85]
+        # Rotation from tcp_frame to block frame as RPY [rad] (roll, pitch, yaw).
+        tcp_to_block_rpy: [3.14159265, 0.0, 0.0]
+
+    debug:
+      publish_cutout: true
+      publish_mask: true
+      # Stage-level registration logs (cutout/preprocess/global/local) for diagnosis.
+      verbose_logs: true
+
+    gripper_filter:
+      # Visualization-only rail boxes for calibrating future gripper point removal.
+      # Disabled for current rosbags because they use the old gripper joint/frame naming.
+      debug_publish_boxes: false
+      boxes:
+        left:
+          frame: "K10_left_rail"
+          center_xyz: [0.0, 0.0, 0.0]
+          size_xyz: [1.4, 0.12, 0.12]
+        right:
+          frame: "K12_right_rail"
+          center_xyz: [0.0, 0.0, 0.0]
+          size_xyz: [1.4, 0.12, 0.12]
+
+    # dump goal inputs (mask, cloud) into dump dir for offline processing / development
+    dump:
+      enable: true
+      # When enabled, write extra *_fail_* package on registration failures.
+      failure_package: true
+      dir: dump

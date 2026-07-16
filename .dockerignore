@@ -1,0 +1,10 @@
+build/
+build-*/
+.venv/
+.cache/
+.git/
+*.mcap
+*.db3
+*.rrd
+*.npz
+dataset/

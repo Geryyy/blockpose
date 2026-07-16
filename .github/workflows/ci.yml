@@ -1,0 +1,71 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  core:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build core image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.core
+          tags: blockpose-core:ci
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: C++ configure + build + test (incl. env_check)
+        run: >
+          docker run --rm -v ${{ github.workspace }}:/workspace -w /workspace
+          blockpose-core:ci
+          bash -c "cmake --preset dev && cmake --build --preset dev && ctest --preset dev"
+
+      - name: Python env + tests
+        run: >
+          docker run --rm -v ${{ github.workspace }}:/workspace -w /workspace
+          blockpose-core:ci
+          bash -c "uv sync --all-extras && uv run pytest"
+
+      - name: Lint
+        run: >
+          docker run --rm -v ${{ github.workspace }}:/workspace -w /workspace
+          blockpose-core:ci
+          bash -c "uv run ruff check python tests"
+
+  # Proves the ROS image builds and the (future) colcon package compiles.
+  # Optional until Phase 6 — remove `continue-on-error` when the wrapper lands.
+  ros2:
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build core image (dependency of ros2 image)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.core
+          tags: blockpose-core:latest
+          load: true
+          cache-from: type=gha
+
+      - name: Build ros2 image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.ros2
+          tags: blockpose-ros2:ci
+          load: true
+
+      - name: colcon build (skipped until ros2/ package exists)
+        run: >
+          docker run --rm -v ${{ github.workspace }}:/workspace -w /workspace
+          blockpose-ros2:ci
+          bash -c "if [ -d ros2 ]; then source /opt/ros/jazzy/setup.bash && colcon build --base-paths ros2; else echo 'no ros2/ package yet'; fi"

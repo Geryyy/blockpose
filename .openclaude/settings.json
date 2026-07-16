@@ -1,0 +1,53 @@
+{
+    "agentModels": {
+        "fast": {
+            "model": "haiku"
+        },
+        "worker": {
+            "model": "sonnet"
+        },
+        "planner": {
+            "model": "opusplan"
+        },
+        "critic": {
+            "model": "opus"
+        }
+    },
+    "agentRouting": {
+        "Explore": "fast",
+        "general-purpose": "worker",
+        "Plan": "planner",
+        "verification": "critic",
+        "default": "worker"
+    },
+    "permissions": {
+        "defaultMode": "dontAsk",
+        "allow": [
+            "Read",
+            "Edit",
+            "Write",
+            "Glob",
+            "Grep",
+            "Agent",
+            "Bash(pwd)",
+            "Bash(ls:*)",
+            "Bash(find:*)",
+            "Bash(rg:*)",
+            "Bash(git status:*)",
+            "Bash(git diff:*)",
+            "Bash(cmake:*)",
+            "Bash(ninja:*)",
+            "Bash(make:*)",
+            "Bash(ctest:*)",
+            "Bash(colcon:*)"
+        ],
+        "deny": [
+            "Bash(rm:*)",
+            "Bash(rmdir:*)",
+            "Bash(unlink:*)",
+            "Bash(shred:*)",
+            "Bash(git clean:*)",
+            "Bash(git reset --hard:*)"
+        ]
+    }
+}

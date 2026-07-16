@@ -1,0 +1,39 @@
+{
+  "name": "blockpose-core",
+  "build": {
+    "dockerfile": "../docker/Dockerfile.core",
+    "context": ".."
+  },
+  "workspaceFolder": "/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
+  "mounts": [
+    // Dataset lives OUTSIDE the repo. Set BLOCKPOSE_DATASET on the host,
+    // e.g. in ~/.bashrc: export BLOCKPOSE_DATASET=$HOME/data/block_perception_dataset
+    "source=${localEnv:BLOCKPOSE_DATASET},target=/data,type=bind,consistency=cached"
+  ],
+  "containerEnv": {
+    "BLOCKPOSE_DATASET": "/data"
+  },
+  "remoteUser": "ubuntu",
+  "postCreateCommand": "uv sync --all-extras && cmake --preset dev",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools",
+        "ms-vscode.cmake-tools",
+        "ms-python.python",
+        "charliermarsh.ruff",
+        "llvm-vs-code-extensions.vscode-clangd"
+      ],
+      "settings": {
+        "cmake.generator": "Ninja",
+        "cmake.buildDirectory": "${workspaceFolder}/build",
+        "python.defaultInterpreterPath": "/workspace/.venv/bin/python"
+      }
+    }
+  },
+  // Rerun viewer runs on the HOST (rerun --serve or native app); the
+  // container only needs to reach it. Forward the default gRPC port both ways.
+  "forwardPorts": [9876],
+  "runArgs": ["--network=host"]
+}

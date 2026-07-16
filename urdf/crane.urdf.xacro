@@ -1,0 +1,79 @@
+<?xml version="1.0"?>
+<robot name="crane_model" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <!-- Load parameters -->
+  <xacro:include filename="$(find epsilon_crane_description)/urdf/inc/parameters.xacro"/>
+
+  <!-- Load Crane Description-->
+  <xacro:include filename="$(find epsilon_crane_description)/urdf/crane_description.urdf.xacro"/>
+
+  <!-- Gazebo Simulation Macros -->
+  <xacro:if value="${sim_hydraulics and sim}">
+    <!-- Gazebo macros closed kinematic chains -->
+    <xacro:include
+      filename="$(find epsilon_crane_description)/gazebo/crane_kinematic_chains.gazebo.xacro"/>
+    <xacro:include
+      filename="$(find ${tool})/gazebo/gripper_kinematic_chains.gazebo.xacro"/>
+
+    <!-- General Gazebo macros -->
+    <xacro:include filename="$(find epsilon_crane_description)/gazebo/crane.gazebo.xacro"/>
+    <xacro:include filename="$(find ${tool})/gazebo/gripper.gazebo.xacro"/>
+
+    <xacro:crane_gazebo
+      enable_logs_sim="$(arg enable_logs_sim)"
+      load_ros2_control="$(arg load_ros2_control)"/>
+    <xacro:gripper_gazebo/>
+  </xacro:if>
+
+  <!-- Include Perception Kit -->
+  <xacro:include filename="$(find sensor_description)/urdf/perception_kit.urdf.xacro"/>
+
+  <!-- camera origin partly derived from crane_dh_transformations.urdf.xacro -->
+  <xacro:perception_kit
+    parent="moved_with_q1">
+    <origin xyz="${0.13600} ${0.51700} ${2.56500}"
+      rpy="${-0.025213} ${0.421023} ${0.017408}"/>
+  </xacro:perception_kit>
+
+  <!-- include sensors -->
+  <xacro:include filename="$(find epsilon_crane_description)/urdf/inc/sensor_macros.xacro"/>
+
+  <!-- IMU11 posital -->
+  <joint name="imu11_mount" type="fixed">
+    <!-- the sensor-fixed frame of output data -->
+    <parent link="K0_mounting_base"/>
+    <child link="imu11_origin"/>
+    <origin xyz="0.15 -0.80 0.20" rpy="${pi} -${pi/2} 0"/>
+  </joint>
+
+  <xacro:posital_imu name="imu11_origin"/>
+
+  <!-- IMU12 posital -->
+  <joint name="imu12_mount" type="fixed">
+    <!-- the sensor-fixed frame of output data -->
+    <parent link="K2_boom"/>
+    <child link="imu12_origin"/>
+    <origin xyz="-3.22 0.1 -0.145" rpy="${pi} 0 ${pi/2-0.521363}"/>
+  </joint>
+
+  <xacro:posital_imu name="imu12_origin"/>
+
+  <!-- IMU13 posital -->
+  <joint name="imu13_mount" type="fixed">
+    <!-- the sensor-fixed frame of output data -->
+    <parent link="K2_boom"/>
+    <child link="imu13_origin"/>
+    <origin xyz="-0.80 -0.1 0.155" rpy="0 0 ${pi/2-0.237523}"/>
+  </joint>
+
+  <xacro:posital_imu name="imu13_origin"/>
+
+  <!-- IMU14 posital -->
+  <joint name="imu14_mount" type="fixed">
+    <!-- the sensor-fixed frame of output data -->
+    <parent link="K3_arm"/>
+    <child link="imu14_origin"/>
+    <origin xyz="0.2425 0.22 0.89" rpy="${pi/2} -0.041570 0"/>
+  </joint>
+
+  <xacro:posital_imu name="imu14_origin"/>
+</robot>
