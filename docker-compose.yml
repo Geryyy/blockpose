@@ -13,8 +13,11 @@ services:
     volumes:
       - .:/workspace
       - ${BLOCKPOSE_DATASET:?set BLOCKPOSE_DATASET to your dataset dir}:/data
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
     environment:
       - BLOCKPOSE_DATASET=/data
+      - DISPLAY=${DISPLAY:-}
+      - QT_X11_NO_MITSHM=1
     working_dir: /workspace
     stdin_open: true
     tty: true
@@ -30,8 +33,11 @@ services:
     volumes:
       - .:/workspace
       - ${BLOCKPOSE_DATASET:?set BLOCKPOSE_DATASET to your dataset dir}:/data
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
     environment:
       - BLOCKPOSE_DATASET=/data
+      - DISPLAY=${DISPLAY:-}
+      - QT_X11_NO_MITSHM=1
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
     working_dir: /workspace
     stdin_open: true

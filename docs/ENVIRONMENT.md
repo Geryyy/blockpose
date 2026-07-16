@@ -49,9 +49,11 @@ mounts the repo-local `data/` directory at `/data` and sets
   prove the core has no hidden ROS dependency.
 - **ccache** persists in `/workspace/.cache/ccache` (repo mount), so image
   rebuilds don't lose compilation caches.
-- **Rerun viewer runs on the host** (native app or `rerun --serve`); the
-  container connects to it (host networking). `.rrd` files written to
-  `/workspace` or `/data` can also be opened on the host directly.
+- **GUI visualization is available via host X11 forwarding.** Docker Compose
+  and the devcontainer pass `DISPLAY`, set `QT_X11_NO_MITSHM=1`, and mount the
+  host X socket. Rerun can still run on the host (native app or `rerun --serve`)
+  with the container connecting to it via host networking; `.rrd` files written
+  to `/workspace` or `/data` can also be opened on the host directly.
 - **`make check` == CI.** The agent's definition of done for any change is
   `make check` passing inside the core container.
 
@@ -62,7 +64,9 @@ mounts the repo-local `data/` directory at `/data` and sets
   `Dockerfile.core` (keep the version pin discipline).
 - `/tf_static` is latched at bag start: when trimming MCAPs, preserve the
   first messages or re-inject static transforms (see plan §data).
-- GUI-based Open3D visualization inside the container needs X forwarding —
-  don't bother; Rerun is the sole viewer (plan §2.5).
+- GUI-based Open3D visualization inside the container uses the host X server.
+  If windows fail to open, confirm `DISPLAY` is set before starting the
+  container. Some desktops may still require allowing local Docker clients to
+  connect to X11.
 - On the crane PC, deploy the ros2 image as-is; it is the deployment
   artifact, not a separate packaging step.

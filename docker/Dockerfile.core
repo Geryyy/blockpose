@@ -53,12 +53,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         pybind11-dev \
         libgtest-dev \
         libgmock-dev \
-        # runtime deps of the Open3D C++ SDK (headless OK; libgl for viz utils)
+        # runtime deps of the Open3D C++ SDK and GUI/X11 visualization tools
+        libdbus-1-3 \
+        libegl1 \
+        libglib2.0-0 \
         libgl1 \
+        libglx-mesa0 \
         libglu1-mesa-dev \
         libgomp1 \
-        libpng16-16 \
+        libice6 \
         libjpeg-turbo8 \
+        libpng16-16 \
+        libsm6 \
+        libx11-6 \
+        libxcb-cursor0 \
+        libxext6 \
+        libxfixes3 \
+        libxi6 \
+        libxinerama1 \
+        libxkbcommon-x11-0 \
+        libxrandr2 \
+        libxrender1 \
         # convenience
         less \
         jq \
@@ -129,5 +144,7 @@ WORKDIR /workspace
 # uv keeps its venv in-project (.venv) so it survives via the repo mount.
 ENV UV_PROJECT_ENVIRONMENT=/workspace/.venv \
     PATH=/workspace/.venv/bin:$PATH
+
+RUN printf '\nif [ -f /workspace/.venv/bin/activate ]; then\n    source /workspace/.venv/bin/activate\nfi\n' >> ~/.bashrc
 
 CMD ["/bin/bash"]
