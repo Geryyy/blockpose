@@ -1,17 +1,5 @@
 #!/usr/bin/env python3
-"""Visualize a registration snapshot in world frame using Rerun.
-
-Shows the world-frame point cloud, the sensor (seyond) origin, ground-truth
-block boxes and (optionally) detected block boxes in a single 3D scene, so the
-world transform can be inspected visually.
-
-Examples:
-    # Live viewer (needs a display / rerun viewer):
-    python tools/visualize_snapshot.py data/registration_snapshots/1783428578_018899200_seq1
-
-    # Headless: write an .rrd you can open later with `rerun scene.rrd`:
-    python tools/visualize_snapshot.py <snap> --save scene.rrd
-"""
+"""Visualize a registration snapshot point cloud and ground-truth blocks with Open3D."""
 
 from __future__ import annotations
 
@@ -20,113 +8,115 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import rerun as rr
+import open3d as o3d
 
-_REPO_ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(_REPO_ROOT / "python"))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PYTHON_DIR = REPO_ROOT / "python"
+if str(PYTHON_DIR) not in sys.path:
+    sys.path.insert(0, str(PYTHON_DIR))
 
-from blockpose.detection import DetectionParams, detect_blocks  # noqa: E402
-from blockpose.io import load_snapshot, load_T_world_seyond  # noqa: E402
-from blockpose.pose import rotmat_to_quat_xyzw  # noqa: E402
+from blockpose.io import load_snapshot  # noqa: E402
+from blockpose.pose import BlockPose  # noqa: E402
 
-_DEFAULT_TRANSFORM = _REPO_ROOT / "config" / "transforms_pzs100_initial_pose_1.yaml"
-BLOCK_DIMS = (0.6, 0.6, 0.9)  # x, y, z (m)
-
-
-def _height_colors(z: np.ndarray) -> np.ndarray:
-    """Map Z values to an RGB uint8 array via a simple viridis-like ramp."""
-    from matplotlib import colormaps
-
-    zmin, zmax = float(np.percentile(z, 2)), float(np.percentile(z, 98))
-    norm = np.clip((z - zmin) / max(zmax - zmin, 1e-6), 0.0, 1.0)
-    rgba = colormaps["viridis"](norm)
-    return (rgba[:, :3] * 255).astype(np.uint8)
+DEFAULT_CONFIG = REPO_ROOT / "config" / "transforms_pzs100_initial_pose_1.yaml"
+BLOCK_EXTENTS_M = np.array([0.6, 0.6, 0.9], dtype=np.float64)
+POINT_CLOUD_COLOR = [0.55, 0.55, 0.55]
+GROUND_TRUTH_COLOR = [0.0, 0.8, 0.0]
 
 
-def _log_box(path: str, position, quat_xyzw, color) -> None:
-    rr.log(
-        path,
-        rr.Boxes3D(
-            centers=[position],
-            half_sizes=[[BLOCK_DIMS[0] / 2, BLOCK_DIMS[1] / 2, BLOCK_DIMS[2] / 2]],
-            quaternions=[rr.Quaternion(xyzw=quat_xyzw)],
-            colors=[color],
-        ),
+def _repo_relative(path: Path) -> Path:
+    """Resolve relative paths against the repository root."""
+    path = path.expanduser()
+    if path.is_absolute():
+        return path
+    return REPO_ROOT / path
+
+
+def _validate_snapshot(snapshot: Path) -> None:
+    if not snapshot.exists():
+        raise FileNotFoundError(f"Snapshot directory does not exist: {snapshot}")
+    if not snapshot.is_dir():
+        raise NotADirectoryError(f"Snapshot path is not a directory: {snapshot}")
+    for filename in ("cloud.pcd", "registrations.yaml"):
+        path = snapshot / filename
+        if not path.is_file():
+            raise FileNotFoundError(f"Missing required snapshot file: {path}")
+
+
+def _make_point_cloud(pts_world: np.ndarray) -> o3d.geometry.PointCloud:
+    pts_world = np.asarray(pts_world, dtype=np.float64)
+    if pts_world.ndim != 2 or pts_world.shape[1] != 3:
+        raise ValueError(f"Expected point cloud with shape (N, 3), got {pts_world.shape}")
+    if pts_world.shape[0] == 0:
+        raise ValueError("Point cloud is empty")
+
+    point_cloud = o3d.geometry.PointCloud()
+    point_cloud.points = o3d.utility.Vector3dVector(pts_world)
+    point_cloud.paint_uniform_color(POINT_CLOUD_COLOR)
+    return point_cloud
+
+
+def _make_ground_truth_box(pose: BlockPose) -> o3d.geometry.OrientedBoundingBox:
+    """Create a world-frame oriented box from a ground-truth block pose."""
+    box = o3d.geometry.OrientedBoundingBox(
+        center=np.asarray(pose.position, dtype=np.float64),
+        R=np.asarray(pose.rotation, dtype=np.float64),
+        extent=BLOCK_EXTENTS_M,
     )
+    box.color = GROUND_TRUTH_COLOR
+    return box
 
 
-def _log_axes(path: str, T: np.ndarray, length: float = 0.5) -> None:
-    """Log a coordinate frame (3 RGB arrows) from a 4x4 transform."""
-    origin = T[:3, 3]
-    R = T[:3, :3]
-    rr.log(
-        path,
-        rr.Arrows3D(
-            origins=[origin, origin, origin],
-            vectors=[R[:, 0] * length, R[:, 1] * length, R[:, 2] * length],
-            colors=[[255, 0, 0], [0, 255, 0], [0, 0, 255]],
-        ),
+def _build_geometries(
+    pts_world: np.ndarray,
+    ground_truth: list[BlockPose],
+) -> list[o3d.geometry.Geometry]:
+    geometries: list[o3d.geometry.Geometry] = [
+        _make_point_cloud(pts_world),
+        o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5),
+    ]
+    geometries.extend(_make_ground_truth_box(pose) for pose in ground_truth)
+    return geometries
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("snapshot", type=Path, help="Snapshot directory to visualize.")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG,
+        help="Path to transforms YAML, resolved relative to the repository root when relative.",
     )
+    return parser.parse_args()
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("snapshot", type=Path, help="Snapshot directory")
-    ap.add_argument("--config", type=Path, default=_DEFAULT_TRANSFORM)
-    ap.add_argument("--detect", action="store_true", help="Also run and show the detector")
-    ap.add_argument("--save", type=Path, default=Path("snapshot.rrd"),
-                    help="Write an .rrd file (default: snapshot.rrd in CWD)")
-    ap.add_argument("--spawn", action="store_true",
-                    help="Launch the Rerun viewer GUI (requires a display).")
-    args = ap.parse_args()
+def main() -> int:
+    args = parse_args()
+    snapshot = args.snapshot.expanduser().resolve()
+    config = _repo_relative(args.config).resolve()
 
-    pts, gt = load_snapshot(args.snapshot, args.config)
-    T = load_T_world_seyond(args.config)
+    _validate_snapshot(snapshot)
+    if not config.is_file():
+        raise FileNotFoundError(f"Transform config does not exist: {config}")
 
-    rr.init("blockpose_snapshot", spawn=args.spawn)
-    if not args.spawn:
-        rr.save(str(args.save))
+    pts_world, ground_truth = load_snapshot(snapshot, config)
+    geometries = _build_geometries(pts_world, ground_truth)
 
-    # World frame: Z up, right-handed
-    rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
-    _log_axes("world/origin_axes", np.eye(4), length=1.0)
-
-    # Point cloud coloured by height
-    rr.log("world/points", rr.Points3D(pts, colors=_height_colors(pts[:, 2]), radii=0.01))
-
-    # Sensor (seyond) origin + axes
-    _log_axes("world/sensor_axes", T, length=0.8)
-    rr.log(
-        "world/sensor_origin",
-        rr.Points3D([T[:3, 3]], colors=[[255, 255, 0]], radii=0.1, labels=["seyond"]),
+    print(
+        f"Loaded {len(pts_world)} world-frame points and "
+        f"{len(ground_truth)} ground-truth block(s)."
     )
-
-    # Ground-truth boxes (green)
-    for i, pose in enumerate(gt):
-        q = rotmat_to_quat_xyzw(pose.rotation)
-        _log_box(f"world/gt/block_{i}", pose.position, q, [0, 200, 60])
-        rr.log(
-            f"world/gt/block_{i}_label",
-            rr.Points3D([pose.position], colors=[[0, 200, 60]], radii=0.06,
-                        labels=[f"GT{i} z={pose.position[2]:.2f}"]),
-        )
-
-    # Detections (blue)
-    if args.detect:
-        det = detect_blocks(pts, DetectionParams())
-        for i, pose in enumerate(det):
-            q = rotmat_to_quat_xyzw(pose.rotation)
-            _log_box(f"world/det/block_{i}", pose.position, q, [40, 120, 255])
-        print(f"Logged {len(det)} detections")
-
-    print(f"Point cloud: {len(pts)} pts, {len(gt)} GT blocks")
-    print(f"  X [{pts[:,0].min():.1f},{pts[:,0].max():.1f}]  "
-          f"Y [{pts[:,1].min():.1f},{pts[:,1].max():.1f}]  "
-          f"Z [{pts[:,2].min():.1f},{pts[:,2].max():.1f}]")
-    print(f"  sensor origin (world): {T[:3,3]}")
-    if not args.spawn:
-        print(f"Saved -> {args.save}   (open with:  rerun {args.save})")
+    o3d.visualization.draw_geometries(
+        geometries,
+        window_name=f"BlockPose snapshot: {snapshot.name}",
+    )
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        raise SystemExit(main())
+    except Exception as exc:  # noqa: BLE001 - top-level CLI error reporting
+        print(f"error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
