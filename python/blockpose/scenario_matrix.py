@@ -204,6 +204,33 @@ def scenario_registry() -> tuple[Scenario, ...]:
             (BlockSpec(0.0, 0.0, yaw_deg=33.0),),
             SynthParams(mixed_pixel_fraction=0.35, range_noise_std=0.02, dropout=0.2),
         ),
+        # Assembly geometry -- the actual target application. A wall course is a
+        # row of blocks in contact, so it hits the same missing-interface problem
+        # as `touching_row` but at the scale the robot actually works at. Tracked
+        # explicitly because the 3-block touching case understated it: on the
+        # config/scenes/wall.yaml scene the detector recovers 1 of 16 blocks.
+        Scenario(
+            "wall_course_single",
+            "assembly",
+            tuple(BlockSpec(0.0, 0.6 * i, yaw_deg=0.0) for i in range(5)),
+            SynthParams(az_fov_deg=120.0, look_at=(0.0, 1.2, 0.45)),
+        ),
+        Scenario(
+            "wall_two_courses",
+            "assembly",
+            tuple(
+                BlockSpec(0.0, 0.6 * i + (0.3 if course else 0.0), z=0.9 * course + 0.45)
+                for course in range(2)
+                for i in range(4)
+            ),
+            SynthParams(az_fov_deg=120.0, look_at=(0.0, 1.0, 0.9)),
+        ),
+        Scenario(
+            "spaced_row_10cm_gaps",
+            "assembly",
+            tuple(BlockSpec(0.0, 0.7 * i, yaw_deg=0.0) for i in range(4)),
+            SynthParams(az_fov_deg=120.0, look_at=(0.0, 1.05, 0.45)),
+        ),
         # The measured sensor profile, as opposed to the conservative default.
         Scenario(
             "measured_profile_near",

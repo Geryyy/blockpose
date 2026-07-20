@@ -23,6 +23,7 @@ dev = [
     "ruff>=0.6",
     "ipykernel",
     "jupyterlab",
+    "plotly>=5.20",
 ]
 
 # Phase 7 (gated) — do NOT install until the learned-component gate triggers.

@@ -22,9 +22,9 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "python"))
 
-from blockpose.detection import DetectionParams, detect_blocks  # noqa: E402
+from blockpose.detection import DetectionParams, detect_scene_sample  # noqa: E402
 from blockpose.pose import BlockPose  # noqa: E402
-from blockpose.scenes import load_and_generate  # noqa: E402
+from blockpose.scenes import generate_from_config, load_scene_config  # noqa: E402
 
 GT_COLOR = "#00e000"
 DET_COLOR = "#1e78ff"
@@ -71,10 +71,15 @@ def main() -> int:
         matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    cfg, pts, gt = load_and_generate(scene_path, np.random.default_rng(args.seed))
+    cfg = load_scene_config(scene_path)
+    sample = generate_from_config(cfg, np.random.default_rng(args.seed))
+    pts, gt = sample.points, sample.ground_truth
     dims = cfg.specs[0].dims if cfg.specs else (0.6, 0.6, 0.9)
 
-    det = detect_blocks(pts, DetectionParams()) if args.detect else None
+    # Pass the full sample, not just points: without the sensor origin and rays
+    # the detector loses range-adaptive density scaling and free-space evidence,
+    # which on the storage_yard scene drops recall from 9/9 to 1/9.
+    det = detect_scene_sample(sample, DetectionParams()) if args.detect else None
     msg = f"{cfg.name}: {len(pts)} pts, {len(gt)} blocks"
     if det is not None:
         msg += f", {len(det)} detected"
