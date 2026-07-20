@@ -31,6 +31,8 @@ htmlcov/
 # Runtime captures and generated diagnostics
 /reference_bag_export/
 /scene_discovery_dump/
+/python/blockpose/confidence_calibration.json
+/python/blockpose/confidence_calibration_report.json
 *.rrd
 *.mcap
 *.db3

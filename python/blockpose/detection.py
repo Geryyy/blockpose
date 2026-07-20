@@ -760,7 +760,7 @@ def _diagnostics(hypothesis: CuboidHypothesis) -> DetectionDiagnostics:
         - evidence.free_space_violations
         / max(evidence.supported_rays + evidence.free_space_violations, 1),
     }
-    return DetectionDiagnostics(evidence, observability, features)
+    return DetectionDiagnostics(evidence, observability, features, None)
 
 
 def detect_blocks_detailed(
@@ -773,7 +773,8 @@ def detect_blocks_detailed(
     poses, hypotheses = _detect_blocks_impl(
         pts_world, params, sensor_context=sensor_context
     )
-    return DetectionResult(poses, [_diagnostics(hypothesis) for hypothesis in hypotheses])
+    diagnostics = [_diagnostics(hypothesis) for hypothesis in hypotheses]
+    return DetectionResult(poses, diagnostics)
 
 
 def detect_blocks(

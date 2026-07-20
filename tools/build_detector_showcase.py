@@ -166,6 +166,22 @@ for family, values in metrics["diagnostics_stratified"].items():
         ),
         markdown(
             """
+## Validity calibration deferred
+
+Confidence estimates whether a returned detection is valid; it is separate from pose
+observability and must not filter detections until calibrated. The current selected-output
+synthetic corpus contains too few organic false positives to fit or evaluate a validity
+calibrator honestly. `calibrated_confidence` therefore remains `None`, and calibration is deferred
+until harder organic synthetic errors and real TF-aligned data are available.
+"""
+        ),
+        code(
+            """
+print("Calibration status: BLOCKED — insufficient selected-output organic negatives")
+"""
+        ),
+        markdown(
+            """
 ## Hard-negative improvement and honest named failures
 
 **Touching row:** the seamless row has no measured internal interface and is geometrically
