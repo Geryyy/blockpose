@@ -79,6 +79,21 @@ def scenario_registry() -> tuple[Scenario, ...]:
             SynthParams(look_at=(0.0, 0.0, 0.9)),
         ),
         Scenario(
+            "offset_two_stack",
+            "stack",
+            (BlockSpec(0.0, 0.0, z=0.45), BlockSpec(0.25, 0.0, z=1.35)),
+            SynthParams(look_at=(0.1, 0.0, 0.9)),
+        ),
+        Scenario(
+            "offset_two_stack_yaw30",
+            "stack",
+            (
+                BlockSpec(0.0, 0.0, z=0.45, yaw_deg=30.0),
+                BlockSpec(0.34641016, 0.2, z=1.35, yaw_deg=30.0),
+            ),
+            SynthParams(look_at=(0.15, 0.1, 0.9)),
+        ),
+        Scenario(
             "near_field_hard_negative",
             "clutter",
             (base,),

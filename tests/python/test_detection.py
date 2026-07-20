@@ -7,14 +7,18 @@ from pathlib import Path
 import numpy as np
 import pytest
 from blockpose.detection import (
+    CuboidHypothesis,
     DetectionParams,
+    HypothesisEvidence,
     _remove_ground,
+    _select_hypotheses,
     _split_connected_region,
     _synthesize_pose,
     detect_blocks,
 )
-from blockpose.evaluate import evaluate
+from blockpose.evaluate import evaluate, rotation_error_deg
 from blockpose.io import load_snapshot
+from blockpose.synth import BlockSpec, SynthParams, generate_scene
 
 REPO_ROOT = Path(__file__).parent.parent.parent
 SNAPSHOTS_DIR = REPO_ROOT / "data" / "registration_snapshots"
@@ -188,6 +192,63 @@ def test_continuous_elongated_cuboid_is_not_split_by_extent() -> None:
     cluster = np.vstack([top, side])
     regions = _split_connected_region(cluster, DetectionParams())
     assert len(regions) == 1
+
+
+def test_evidence_selection_collapses_duplicates_but_keeps_neighbors() -> None:
+    def hypothesis(position, score):
+        pose = _make_pose_for_selection(position)
+        return CuboidHypothesis(pose, HypothesisEvidence(100, 0.0, score))
+
+    candidates = [
+        hypothesis((0.0, 0.0, 0.45), 0.7),
+        hypothesis((0.03, 0.0, 0.45), 0.9),
+        hypothesis((0.6, 0.0, 0.45), 0.6),
+        hypothesis((0.0, 0.0, 1.35), 0.5),
+    ]
+    selected = _select_hypotheses(candidates)
+    assert [item.evidence.score for item in selected] == [0.9, 0.6, 0.5]
+
+
+def _make_pose_for_selection(position):
+    from blockpose.pose import BlockPose
+
+    return BlockPose(np.asarray(position, dtype=np.float64), np.eye(3))
+
+
+def test_detection_is_stable_under_point_permutation() -> None:
+    sample = generate_scene(
+        [BlockSpec(0.0, 0.0, yaw_deg=31.0)],
+        SynthParams(range_noise_std=0.0),
+        np.random.default_rng(17),
+    )
+    baseline = detect_blocks(sample.points)
+    shuffled = detect_blocks(np.random.default_rng(99).permutation(sample.points))
+    assert len(baseline) == len(shuffled) == 1
+    # Canonical ordering removes order-dependent voxel/DBSCAN behavior. Open3D
+    # RANSAC has no per-call RNG API, so retain a tight geometric tolerance for
+    # its remaining sampling variation rather than mutating its global RNG.
+    np.testing.assert_allclose(baseline[0].position, shuffled[0].position, atol=0.02)
+    assert rotation_error_deg(baseline[0], shuffled[0]) <= 2.0
+
+
+def test_adversarial_offset_stack_has_no_cross_layer_pairing_bias() -> None:
+    sample = generate_scene(
+        [
+            BlockSpec(0.0, 0.0, z=0.45, yaw_deg=30.0),
+            BlockSpec(0.34641016, 0.2, z=1.35, yaw_deg=30.0),
+        ],
+        SynthParams(look_at=(0.15, 0.1, 0.9)),
+        np.random.default_rng(23),
+    )
+    detections = detect_blocks(sample.points)
+    result = evaluate(detections, sample.ground_truth)
+    assert result.unmatched_det == 0
+    if result.matched:
+        assert max(result.translation_errors_m) <= 0.04
+    permuted = detect_blocks(np.random.default_rng(101).permutation(sample.points))
+    stability = evaluate(permuted, detections, max_match_dist=0.1)
+    assert stability.matched == len(detections)
+    assert max(stability.translation_errors_m, default=0.0) <= 0.03
 
 
 def test_dimension_gating_rejects_tall_cluster() -> None:

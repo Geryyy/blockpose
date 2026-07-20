@@ -53,3 +53,5 @@ def test_metrics_report_diagnostics() -> None:
     # precision takes precedence until genuine interface evidence exists.
     assert metrics["diagnostics_stratified"]["touching"]["false_positives"] == 0
     assert metrics["diagnostics_stratified"]["hard_negative"]["false_positives"] == 0
+    assert metrics["diagnostics_stratified"]["stack"]["recall"] >= 0.75
+    assert metrics["diagnostics_stratified"]["stack"]["precision"] >= 0.9

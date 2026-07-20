@@ -80,7 +80,8 @@ def _voxel_downsample(pts: np.ndarray, voxel_size: float) -> np.ndarray:
         o3c.Tensor(pts.astype(np.float32), dtype=o3c.float32)
     )
     down = pcd.voxel_down_sample(voxel_size)
-    return down.point.positions.numpy().astype(np.float64)
+    result = down.point.positions.numpy().astype(np.float64)
+    return result[np.lexsort((result[:, 2], result[:, 1], result[:, 0]))]
 
 
 def _remove_ground(
@@ -268,6 +269,54 @@ def _classify_planes(
     return top_candidate, top_centroid, side_candidate, side_centroid
 
 
+def _candidate_plane_sets(
+    planes: list[PlanePatch], params: DetectionParams, ground: GroundPlane | None = None
+) -> list[tuple[PlanePatch, PlanePatch | None]]:
+    """Pair observed tops with sides sharing the same layer boundary/support."""
+    up = ground.normal if ground is not None else np.array([0.0, 0.0, 1.0])
+    cos_top = np.cos(np.radians(params.top_plane_angle_deg))
+    sin_side = np.sin(np.radians(params.side_plane_angle_deg))
+    tops = [patch for patch in planes if abs(float(patch.normal @ up)) > cos_top]
+    sides = [patch for patch in planes if abs(float(patch.normal @ up)) < sin_side]
+    tops.sort(key=lambda patch: (-float(patch.centroid @ up), *patch.centroid[:2]))
+    candidates = []
+    for top in tops:
+        ranked: list[tuple[float, PlanePatch]] = []
+        top_height = float(top.centroid @ up)
+        for side in sides:
+            side_normal = side.normal - float(side.normal @ up) * up
+            norm = np.linalg.norm(side_normal)
+            if norm < 1e-8:
+                continue
+            side_normal /= norm
+            side_heights = side.points @ up
+            centroid_drop = top_height - float(side.centroid @ up)
+            if not 0.15 <= centroid_drop <= params.block_dims[2] - 0.1:
+                continue
+            # The side support must reach the top layer and extend materially
+            # below it; this prevents pairing a top with another stack layer.
+            if side_heights.max() < top_height - 0.15:
+                continue
+            if side_heights.min() > top_height - 0.3:
+                continue
+            plane_dist = np.abs((top.points - side.centroid) @ side_normal)
+            boundary_gap = float(plane_dist.min())
+            if boundary_gap > 0.1:
+                continue
+            tangent = np.cross(up, side_normal)
+            tangent /= np.linalg.norm(tangent)
+            top_range = np.array([np.min(top.points @ tangent), np.max(top.points @ tangent)])
+            side_range = np.array([np.min(side.points @ tangent), np.max(side.points @ tangent)])
+            overlap = min(top_range[1], side_range[1]) - max(top_range[0], side_range[0])
+            if overlap < 0.15:
+                continue
+            height_error = abs(centroid_drop - params.block_dims[2] / 2.0)
+            ranked.append((boundary_gap + height_error, side))
+        side = min(ranked, key=lambda item: (item[0], *item[1].centroid))[1] if ranked else None
+        candidates.append((top, side))
+    return candidates
+
+
 def _split_connected_region(cluster: np.ndarray, params: DetectionParams) -> list[np.ndarray]:
     """Split a long connected row into known-width spatial candidate regions.
 
@@ -327,6 +376,23 @@ def _make_hypothesis(
     height_error = abs(top_height - layer * params.block_dims[2])
     score = min(support_points / 500.0, 1.0) - 3.0 * height_error
     return CuboidHypothesis(pose, HypothesisEvidence(support_points, height_error, score))
+
+
+def _select_hypotheses(hypotheses: list[CuboidHypothesis]) -> list[CuboidHypothesis]:
+    """Greedy deterministic NMS: score governs selection; only duplicates collapse."""
+    ordered = sorted(
+        hypotheses,
+        key=lambda h: (-h.evidence.score, *np.round(h.pose.position, 9).tolist()),
+    )
+    selected: list[CuboidHypothesis] = []
+    for candidate in ordered:
+        duplicate = any(
+            np.linalg.norm(candidate.pose.position - accepted.pose.position) < 0.2
+            for accepted in selected
+        )
+        if not duplicate:
+            selected.append(candidate)
+    return selected
 
 
 def _synthesize_pose(
@@ -430,8 +496,9 @@ def detect_blocks(
 
     Returns:
         List of BlockPose, one per detected block, sorted by Z descending.
-        Note: stacked blocks that fall within the same DBSCAN cluster yield one
-        detection (the top block); the lower block will be unmatched (FN).
+        Multiple poses may be returned from one connected region only when
+        distinct top patches have compatible same-layer side/boundary support.
+        Fully buried stack interfaces remain unobservable and are not inferred.
     """
     if params is None:
         params = DetectionParams()
@@ -448,6 +515,7 @@ def detect_blocks(
     # but uninformative clouds.  Treat them as containing no detectable block.
     if len(pts) < 3:
         return []
+    pts = pts[np.lexsort((pts[:, 2], pts[:, 1], pts[:, 0]))]
 
     # Stage 1: Voxel downsample
     pts = _voxel_downsample(pts, params.voxel_size)
@@ -476,29 +544,33 @@ def detect_blocks(
             planes = _fit_planes(region, params)
             if not planes:
                 continue
-            top_n, top_c, side_n, side_c = _classify_planes(planes, params)
-            if top_n is None:
-                continue
-            if side_n is not None:
-                pose = _synthesize_pose(
-                    top_n, top_c, side_n, side_c, params.block_dims, region
+            for top, side in _candidate_plane_sets(planes, params, ground):
+                top_n = top.normal if top.normal[2] > 0 else -top.normal
+                if side is not None:
+                    local_support = np.vstack([top.points, side.points])
+                    pose = _synthesize_pose(
+                        top_n,
+                        top.centroid,
+                        side.normal,
+                        side.centroid,
+                        params.block_dims,
+                        local_support,
+                    )
+                    support = len(top.points) + len(side.points)
+                else:
+                    pose = _synthesize_pose_top_only(
+                        top_n, top.centroid, region, params.block_dims
+                    )
+                    support = len(top.points)
+                hypothesis = _make_hypothesis(
+                    pose, top.centroid, support, ground, params
                 )
-            else:
-                pose = _synthesize_pose_top_only(top_n, top_c, region, params.block_dims)
-            hypothesis = _make_hypothesis(pose, top_c, len(region), ground, params)
-            # A ground-supported concrete block's top must reach approximately
-            # one known block height. Shorter near-sized boxes are explicit
-            # hard negatives; higher tops remain eligible for stacks/elevated
-            # regions rather than forcing an integer-layer assumption.
-            if float(ground.height(top_c)) >= params.block_dims[2] - 0.08:
-                hypotheses.append(hypothesis)
+                # The observed top must reach one known block height. Higher
+                # top patches are retained as independently observed layers.
+                if float(ground.height(top.centroid)) >= params.block_dims[2] - 0.08:
+                    hypotheses.append(hypothesis)
 
-    # Deterministic evidence ordering is the initial selection policy. Candidate
-    # regions are disjoint; overlap-aware suppression belongs to the next slice.
-    hypotheses.sort(
-        key=lambda h: (-h.evidence.score, *np.round(h.pose.position, 9).tolist())
-    )
-    results = [hypothesis.pose for hypothesis in hypotheses]
+    results = [hypothesis.pose for hypothesis in _select_hypotheses(hypotheses)]
 
     # Filter out physically implausible poses (center below ground or above height cap)
     results = [
