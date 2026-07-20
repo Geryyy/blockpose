@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from blockpose.pose import BLOCK_DIMS, BlockPose, symmetry_equivalents
+from blockpose.pose import BLOCK_DIMS, BlockPose, frame_alignments
 
 
 def translation_error(det: BlockPose, gt: BlockPose) -> float:
@@ -16,16 +16,31 @@ def translation_error(det: BlockPose, gt: BlockPose) -> float:
 
 
 def rotation_error_deg(
-    det: BlockPose, gt: BlockPose, dims: tuple[float, float, float] = BLOCK_DIMS
+    det: BlockPose, gt: BlockPose, dims: tuple[float, float, float] | None = None
 ) -> float:
     """Symmetry-aware minimum rotation error in degrees.
 
     Minimum rotation angle over the block's symmetry group, which depends on
     `dims`: an upright 0.6x0.6x0.9 block and one laid down as 0.9x0.6x0.6 have
     different groups, and using the wrong one silently scores a 90 deg yaw error
-    as zero. Pass `dims` whenever the block is not the upright default.
+    as zero. Defaults to the ground-truth pose's own extents.
+
+    Returns NaN when the two poses describe boxes of different shape, which is a
+    shape mismatch rather than an orientation error.
     """
-    equivalents = symmetry_equivalents(det.rotation, dims)
+    # An explicit `dims` describes BOTH poses. Only when it is omitted does each
+    # pose supply its own extents, which is what lets a detection that labels a
+    # laid block (0.6, 0.9, 0.6) be compared against ground truth labelled
+    # (0.9, 0.6, 0.6) -- the same block, yawed 90 degrees.
+    if dims is None:
+        target = tuple(getattr(gt, "dims", None) or BLOCK_DIMS)
+        detected = tuple(getattr(det, "dims", None) or target)
+    else:
+        target = detected = tuple(dims)
+    alignments = frame_alignments(detected, target)
+    if not alignments:
+        return float("nan")  # not the same box; rotation error is undefined
+    equivalents = [det.rotation @ alignment for alignment in alignments]
     min_angle = np.inf
     for R_eq in equivalents:
         dR = R_eq.T @ gt.rotation
@@ -107,7 +122,7 @@ def evaluate(
     detected: list[BlockPose],
     ground_truth: list[BlockPose],
     max_match_dist: float = 0.5,
-    dims: tuple[float, float, float] = BLOCK_DIMS,
+    dims: tuple[float, float, float] | None = None,
 ) -> EvalResult:
     """Evaluate detections against ground truth.
 

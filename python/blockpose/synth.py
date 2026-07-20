@@ -513,7 +513,12 @@ def generate_scene(
         block_geometry_ids.append(scene.add_triangles(
             o3d.t.geometry.TriangleMesh.from_legacy(_box_mesh(center, R, spec.dims))
         ))
-        gt.append(BlockPose(position=center, rotation=R, confidence=1.0, source="synthetic"))
+        gt.append(
+            BlockPose(
+                position=center, rotation=R, confidence=1.0,
+                source="synthetic", dims=tuple(spec.dims),
+            )
+        )
 
     if params.ground:
         scene.add_triangles(

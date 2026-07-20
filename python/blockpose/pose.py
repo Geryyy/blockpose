@@ -23,10 +23,17 @@ class BlockPose:
     rotation: np.ndarray  # (3,3) float64 rotation matrix R_world_block
     confidence: float = 0.0
     source: str = ""
+    # Extents in the block's own frame. Carried on the pose because a pose alone
+    # does not say which way a non-cube block is lying, and the same physical
+    # block appears as (0.6, 0.6, 0.9) standing or (0.9, 0.6, 0.6) laid down.
+    # Downstream code needs this to pick the right symmetry group and to fit the
+    # right model, so it must travel with the pose rather than be assumed.
+    dims: tuple[float, float, float] = BLOCK_DIMS
 
     def __post_init__(self) -> None:
         self.position = np.asarray(self.position, dtype=np.float64)
         self.rotation = np.asarray(self.rotation, dtype=np.float64)
+        self.dims = tuple(float(value) for value in self.dims)
 
 
 def quat_xyzw_to_rotmat(q: np.ndarray) -> np.ndarray:
@@ -39,6 +46,44 @@ def rotmat_to_quat_xyzw(R: np.ndarray) -> np.ndarray:
     """Convert 3x3 rotation matrix to quaternion [x, y, z, w]."""
     R = np.asarray(R, dtype=np.float64)
     return Rotation.from_matrix(R).as_quat()
+
+
+@lru_cache(maxsize=32)
+def _signed_permutations() -> tuple[np.ndarray, ...]:
+    """The 24 proper rotations of a cube: signed permutations with det +1."""
+    matrices = []
+    for permutation in itertools.permutations(range(3)):
+        for signs in itertools.product((1.0, -1.0), repeat=3):
+            matrix = np.zeros((3, 3))
+            for axis, source in enumerate(permutation):
+                matrix[axis, source] = signs[axis]
+            if abs(np.linalg.det(matrix) - 1.0) < 1e-9:
+                matrices.append(matrix)
+    return tuple(matrices)
+
+
+@lru_cache(maxsize=32)
+def frame_alignments(
+    dims_from: tuple[float, float, float], dims_to: tuple[float, float, float]
+) -> tuple[np.ndarray, ...]:
+    """Rotations re-expressing a box described by `dims_from` in `dims_to`'s frame.
+
+    The same physical block can be described with its extents in different axis
+    orders -- a laid block is (0.9, 0.6, 0.6) or (0.6, 0.9, 0.6) yawed 90 degrees
+    -- so two poses are only comparable once both use the same ordering.
+    Comparing rotations directly across orderings reports a spurious 90 degrees.
+
+    Returns every ``S`` with ``rotation_from @ S`` expressed in the `dims_to`
+    convention. When the extents match this is exactly the symmetry group, so
+    `symmetry_equivalents` is the special case `dims_from == dims_to`.
+    """
+    source = np.asarray(dims_from, dtype=np.float64)
+    target = np.asarray(dims_to, dtype=np.float64)
+    return tuple(
+        matrix.T
+        for matrix in _signed_permutations()
+        if np.allclose(np.abs(matrix) @ source, target, atol=1e-9)
+    )
 
 
 @lru_cache(maxsize=8)

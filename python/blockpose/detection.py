@@ -42,6 +42,23 @@ class DetectionParams:
     side_plane_angle_deg: float = 20.0
     max_plane_center_dist: float = 0.6
     block_dims: tuple[float, float, float] = (0.6, 0.6, 0.9)
+    # Orientations to hypothesise when the block's resting pose is unknown. The
+    # same 0.6 x 0.6 x 0.9 block stands upright as (0.6, 0.6, 0.9) or lies on a
+    # long face as (0.9, 0.6, 0.6) -- every wall course in config/wall_plans.yaml
+    # is the latter, and a detector configured for one sees NONE of the other.
+    #
+    # Empty means "use block_dims only". Multi-orientation is NOT yet the default
+    # because the evidence model cannot reliably rank the two: `height_consistency`
+    # is blind wherever a top height is a common multiple of 0.9 and 0.6 (1.8 m,
+    # i.e. any two-course upright stack), and with that tie-breaker gone the
+    # remaining features let a laid hypothesis win on upright geometry -- measured
+    # as a 0.20 m centre error plus false positives on clutter. Ranking
+    # orientations needs a feature that penalises a box protruding into space the
+    # returns show is empty; see docs/detector-plan.md.
+    #
+    # Set explicitly to enable, e.g. ((0.9, 0.6, 0.6),) when a plan says the
+    # blocks are laid, or both entries to accept the current precision cost.
+    candidate_dims: tuple[tuple[float, float, float], ...] = ()
     # Model-based refinement (blockpose.refine). The closed-form pose uses a top
     # plane plus at most one side plane; refinement fits the exact cuboid to
     # every assigned return, which is what removes the single-plane yaw fragility.
@@ -474,10 +491,36 @@ def _classify_planes(
     return top_candidate, top_centroid, side_candidate, side_centroid
 
 
+def _candidate_dims(params: DetectionParams) -> tuple[tuple[float, float, float], ...]:
+    """Orientations to hypothesise, de-duplicated, defaulting to block_dims.
+
+    Each candidate with a non-square horizontal cross-section is expanded with
+    its yaw-swapped twin. `_synthesize_pose` constrains the centre using
+    ``dims[0] / 2`` along the observed side normal, which silently assumes the
+    footprint is square: for a laid 0.9 x 0.6 block the visible side may be the
+    long face or the short one, and guessing wrong puts the centre 0.15 m out
+    with a 90 degree yaw error. Both readings describe the same physical block,
+    so both are proposed and the evidence score picks.
+    """
+    candidates = tuple(params.candidate_dims or ()) or (tuple(params.block_dims),)
+    seen: list[tuple[float, float, float]] = []
+    for dims in candidates:
+        entry = tuple(float(value) for value in dims)
+        swapped = (entry[1], entry[0], entry[2])
+        for variant in (entry, swapped):
+            if variant not in seen:
+                seen.append(variant)
+    return tuple(seen)
+
+
 def _candidate_plane_sets(
-    planes: list[PlanePatch], params: DetectionParams, ground: GroundPlane | None = None
+    planes: list[PlanePatch],
+    params: DetectionParams,
+    ground: GroundPlane | None = None,
+    dims: tuple[float, float, float] | None = None,
 ) -> list[tuple[PlanePatch, PlanePatch | None]]:
     """Pair observed tops with sides sharing the same layer boundary/support."""
+    dims = tuple(dims) if dims is not None else tuple(params.block_dims)
     up = ground.normal if ground is not None else np.array([0.0, 0.0, 1.0])
     cos_top = np.cos(np.radians(params.top_plane_angle_deg))
     sin_side = np.sin(np.radians(params.side_plane_angle_deg))
@@ -496,7 +539,7 @@ def _candidate_plane_sets(
             side_normal /= norm
             side_heights = side.points @ up
             centroid_drop = top_height - float(side.centroid @ up)
-            if not 0.15 <= centroid_drop <= params.block_dims[2] - 0.1:
+            if not 0.15 <= centroid_drop <= dims[2] - 0.1:
                 continue
             # The side support must reach the top layer and extend materially
             # below it; this prevents pairing a top with another stack layer.
@@ -515,7 +558,7 @@ def _candidate_plane_sets(
             overlap = min(top_range[1], side_range[1]) - max(top_range[0], side_range[0])
             if overlap < 0.15:
                 continue
-            height_error = abs(centroid_drop - params.block_dims[2] / 2.0)
+            height_error = abs(centroid_drop - dims[2] / 2.0)
             ranked.append((boundary_gap + height_error, side))
         side = min(ranked, key=lambda item: (item[0], *item[1].centroid))[1] if ranked else None
         candidates.append((top, side))
@@ -607,18 +650,20 @@ def _make_hypothesis(
     params: DetectionParams,
     sensor_context: SensorContext | None = None,
     observed_geometry_faces: int = 1,
+    dims: tuple[float, float, float] | None = None,
 ) -> CuboidHypothesis:
+    dims = tuple(dims) if dims is not None else tuple(params.block_dims)
     top_height = float(ground.height(top_centroid))
-    layer = max(round(top_height / params.block_dims[2]), 1)
-    height_error = abs(top_height - layer * params.block_dims[2])
+    layer = max(round(top_height / dims[2]), 1)
+    height_error = abs(top_height - layer * dims[2])
     expected = covered = violations = supported_rays = incident_rays = 0
     if sensor_context is not None:
         expected, covered, violations, supported_rays, incident_rays = visibility_evidence(
-            pose, sensor_context, params.block_dims
+            pose, sensor_context, dims
         )
         # No-return beams crossing the volume are conclusive counter-evidence.
         violations += free_space_violations_from_misses(
-            pose, sensor_context.origin, sensor_context.miss_directions, params.block_dims
+            pose, sensor_context.origin, sensor_context.miss_directions, dims
         )
     evidence = HypothesisEvidence(
         support_points,
@@ -640,19 +685,66 @@ def _make_hypothesis(
     return CuboidHypothesis(pose, replace(evidence, score=score))
 
 
-def _select_hypotheses(hypotheses: list[CuboidHypothesis]) -> list[CuboidHypothesis]:
-    """Greedy deterministic NMS: score governs selection; only duplicates collapse."""
+def _boxes_overlap(first: BlockPose, second: BlockPose, shrink: float) -> bool:
+    """Separating-axis test between two oriented boxes, each shrunk by `shrink`.
+
+    Exact rather than a centre-distance heuristic, because competing hypotheses
+    are not near-coincident: an upright and a laid interpretation of the same
+    block sit ~0.21 m apart, just outside a 0.2 m radius, yet describe the same
+    physical object and cannot both be true.
+
+    Shrinking matters for the wall case: real courses sit 2 cm apart and touching
+    blocks merely abut, so neither must suppress its neighbour. Only genuine
+    interpenetration counts as a conflict.
+    """
+    half_a = np.maximum(np.asarray(first.dims, dtype=np.float64) / 2.0 - shrink, 1e-3)
+    half_b = np.maximum(np.asarray(second.dims, dtype=np.float64) / 2.0 - shrink, 1e-3)
+    rotation_a, rotation_b = first.rotation, second.rotation
+    relative = rotation_a.T @ (second.position - first.position)
+    coupling = rotation_a.T @ rotation_b
+    absolute = np.abs(coupling) + 1e-9
+
+    for axis in range(3):  # faces of the first box
+        if abs(relative[axis]) > half_a[axis] + float(absolute[axis] @ half_b):
+            return False
+    for axis in range(3):  # faces of the second box
+        reach = float(absolute[:, axis] @ half_a) + half_b[axis]
+        if abs(float(relative @ coupling[:, axis])) > reach:
+            return False
+    for i in range(3):  # edge-edge cross products
+        for j in range(3):
+            reach_a = sum(
+                half_a[k] * absolute[(i + offset) % 3, j]
+                for k, offset in (((i + 2) % 3, 1), ((i + 1) % 3, 2))
+            )
+            reach_b = sum(
+                half_b[k] * absolute[i, (j + offset) % 3]
+                for k, offset in (((j + 2) % 3, 1), ((j + 1) % 3, 2))
+            )
+            distance = abs(
+                relative[(i + 2) % 3] * coupling[(i + 1) % 3, j]
+                - relative[(i + 1) % 3] * coupling[(i + 2) % 3, j]
+            )
+            if distance > reach_a + reach_b:
+                return False
+    return True
+
+
+def _select_hypotheses(
+    hypotheses: list[CuboidHypothesis], overlap_shrink: float = 0.08
+) -> list[CuboidHypothesis]:
+    """Greedy deterministic NMS: highest score wins; interpenetrating rivals lose."""
     ordered = sorted(
         hypotheses,
         key=lambda h: (-h.evidence.score, *np.round(h.pose.position, 9).tolist()),
     )
     selected: list[CuboidHypothesis] = []
     for candidate in ordered:
-        duplicate = any(
-            np.linalg.norm(candidate.pose.position - accepted.pose.position) < 0.2
+        conflict = any(
+            _boxes_overlap(candidate.pose, accepted.pose, overlap_shrink)
             for accepted in selected
         )
-        if not duplicate:
+        if not conflict:
             selected.append(candidate)
     return selected
 
@@ -829,37 +921,37 @@ def _detect_blocks_impl(
             planes = _fit_planes(region, params)
             if not planes:
                 continue
-            for top, side in _candidate_plane_sets(planes, params, ground):
-                top_n = top.normal if top.normal[2] > 0 else -top.normal
-                if side is not None:
-                    local_support = np.vstack([top.points, side.points])
-                    pose = _synthesize_pose(
-                        top_n,
+            # One hypothesis set per candidate orientation. The wrong orientation
+            # puts faces where no returns are and leaves observed surface
+            # unexplained, so `surface_explained` and `free_space_consistency`
+            # separate them; selection then keeps the better-scoring one.
+            for dims in _candidate_dims(params):
+                for top, side in _candidate_plane_sets(planes, params, ground, dims):
+                    top_n = top.normal if top.normal[2] > 0 else -top.normal
+                    if side is not None:
+                        local_support = np.vstack([top.points, side.points])
+                        pose = _synthesize_pose(
+                            top_n, top.centroid, side.normal, side.centroid, dims, local_support
+                        )
+                        support = len(top.points) + len(side.points)
+                    else:
+                        pose = _synthesize_pose_top_only(top_n, top.centroid, region, dims)
+                        support = len(top.points)
+                    pose.dims = dims
+                    hypothesis = _make_hypothesis(
+                        pose,
                         top.centroid,
-                        side.normal,
-                        side.centroid,
-                        params.block_dims,
-                        local_support,
+                        support,
+                        ground,
+                        params,
+                        sensor_context,
+                        observed_geometry_faces=2 if side is not None else 1,
+                        dims=dims,
                     )
-                    support = len(top.points) + len(side.points)
-                else:
-                    pose = _synthesize_pose_top_only(
-                        top_n, top.centroid, region, params.block_dims
-                    )
-                    support = len(top.points)
-                hypothesis = _make_hypothesis(
-                    pose,
-                    top.centroid,
-                    support,
-                    ground,
-                    params,
-                    sensor_context,
-                    observed_geometry_faces=2 if side is not None else 1,
-                )
-                # The observed top must reach one known block height. Higher
-                # top patches are retained as independently observed layers.
-                if float(ground.height(top.centroid)) >= params.block_dims[2] - 0.08:
-                    hypotheses.append(hypothesis)
+                    # The observed top must reach one known block height. Higher
+                    # top patches are retained as independently observed layers.
+                    if float(ground.height(top.centroid)) >= dims[2] - 0.08:
+                        hypotheses.append(hypothesis)
 
     selected = _select_hypotheses(hypotheses)
 
@@ -871,7 +963,7 @@ def _detect_blocks_impl(
         refined = refine_poses(
             [hypothesis.pose for hypothesis in selected],
             pts,
-            params.block_dims,
+            None,  # per-pose extents; a mixed-orientation scene has no single dims
             band=params.refine_band,
             iterations=params.refine_iterations,
             min_points=params.refine_min_points,
@@ -881,12 +973,13 @@ def _detect_blocks_impl(
         selected = [
             _make_hypothesis(
                 pose,
-                pose.position + pose.rotation[:, 2] * (params.block_dims[2] / 2.0),
+                pose.position + pose.rotation[:, 2] * (pose.dims[2] / 2.0),
                 hypothesis.evidence.support_points,
                 ground,
                 params,
                 sensor_context,
                 hypothesis.evidence.observed_geometry_faces,
+                dims=pose.dims,
             )
             for hypothesis, pose in zip(selected, refined, strict=True)
         ]

@@ -85,6 +85,38 @@ Detection is byte-identical across repeated runs on all 25 scenarios. Cost is
 pure-numpy fitter competitive: a dominant plane at an 80% inlier ratio needs ~13
 trials rather than the nominal 1000.
 
+## Orientation handling (partly implemented)
+
+`BlockPose` now carries `dims`, and `DetectionParams.candidate_dims` lets the
+detector hypothesise several orientations, each expanded with its yaw-swapped
+twin (the closed-form pose constrains the centre with `dims[0]/2` along the
+observed side normal, which silently assumes a square footprint; for a laid
+0.9 x 0.6 block the visible side may be either face, and guessing wrong puts the
+centre 0.15 m out at 90 degrees of yaw).
+
+Selection moved from a fixed 0.2 m centre radius to an exact separating-axis
+overlap test. The two readings of one block sit ~0.21 m apart -- just outside the
+old radius -- so both used to survive as a false positive. Overlap is also the
+right criterion for walls: 2 cm-spaced and even touching courses do not
+interpenetrate, so neighbours never suppress each other.
+
+`evaluate.rotation_error_deg` compares poses via `pose.frame_alignments`, which
+re-expresses a detection in the ground truth's axis ordering before measuring.
+Without it a correct laid-block detection labelled (0.6, 0.9, 0.6) scored 90
+degrees against ground truth labelled (0.9, 0.6, 0.6) -- the same block.
+
+**Multi-orientation is off by default.** With both candidates enabled the
+evidence model cannot reliably rank them: `height_consistency` is blind wherever
+a top height is a common multiple of 0.9 and 0.6 (1.8 m, i.e. any two-course
+upright stack), and without that tie-breaker a laid hypothesis wins on upright
+geometry -- measured as a 0.20 m centre error plus false positives on clutter.
+Ranking needs a feature penalising a box that protrudes into space the returns
+show is empty. Until then, enable `candidate_dims` explicitly when the
+orientation is known from a plan.
+
+Measured effect on the plans: `basic_pick_and_place` 0/1 -> 1/1 once the laid
+candidate is enabled. The walls stay at 0 -- orientation was not their blocker.
+
 ## Known envelope and open weaknesses
 
 Measured on the stratified matrix (`diagnostics_stratified`), none gated yet:
@@ -103,7 +135,10 @@ Measured on the stratified matrix (`diagnostics_stratified`), none gated yet:
   stacked here: the gap is below the current spatial resolution, and even a
   resolved gap leaves the `touching_row` ambiguity against
   `elongated_full_height_negative`. The first is a resolution budget question;
-  the second needs scored hypotheses plus a scene prior.
+  the second needs scored hypotheses plus a scene prior. Confirmed by
+  experiment: `cluster_max_extent_xy` (1.5 m) discards a wall row outright, and
+  raising it alone takes `row3_middle_last` from 0 to 1 of 3 -- so the extent
+  guard and the interface splitter are both blockers, in that order.
 - **Touching rows are silently dropped** (recall 0). A flush 3-block row exceeds
   `cluster_max_extent_xy` with no density valley to split on, so the whole
   cluster is discarded to protect against the elongated-object hard negative.

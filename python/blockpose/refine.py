@@ -69,6 +69,15 @@ def surface_distance(pose: BlockPose, points: np.ndarray, dims) -> np.ndarray:
     return box_sdf((np.asarray(points, dtype=np.float64) - pose.position) @ pose.rotation, half)
 
 
+def _dims_for(pose: BlockPose, dims):
+    """Explicit `dims` wins; otherwise use the pose's own extents.
+
+    A scene can mix orientations -- upright staging blocks beside laid wall
+    courses -- so a single dims argument cannot describe every hypothesis.
+    """
+    return tuple(dims) if dims is not None else tuple(pose.dims)
+
+
 def assign_points(
     poses: list[BlockPose],
     points: np.ndarray,
@@ -86,7 +95,7 @@ def assign_points(
     if not poses or len(points) == 0:
         return [np.zeros((0, 3)) for _ in poses]
     distances = np.stack(
-        [np.abs(surface_distance(pose, points, dims)) for pose in poses], axis=1
+        [np.abs(surface_distance(pose, points, _dims_for(pose, dims))) for pose in poses], axis=1
     )
     owner = np.argmin(distances, axis=1)
     within = distances[np.arange(len(points)), owner] <= band
@@ -148,6 +157,7 @@ def refine_pose(
             rotation=rotation0 @ delta_rotation,
             confidence=pose.confidence,
             source=f"{pose.source}+sdf",
+            dims=pose.dims,
         ),
         True,
     )
@@ -173,7 +183,7 @@ def refine_poses(
     for _ in range(max(iterations, 1)):
         assigned = assign_points(current, points, dims, band)
         current = [
-            refine_pose(pose, owned, dims, **refine_kwargs)[0]
+            refine_pose(pose, owned, _dims_for(pose, dims), **refine_kwargs)[0]
             for pose, owned in zip(current, assigned, strict=True)
         ]
     return current
