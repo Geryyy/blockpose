@@ -19,6 +19,7 @@ from blockpose.synth import (
     generate_scene,
     seyond_measured,
 )
+from blockpose.wall_plans import load_wall_plans
 
 
 @dataclass(frozen=True)
@@ -244,7 +245,31 @@ def scenario_registry() -> tuple[Scenario, ...]:
             (BlockSpec(15.0, 0.0, yaw_deg=61.0),),
             seyond_measured(sensor_pos=(-5.0, 0.0, 4.0), look_at=(15.0, 0.0, 0.45)),
         ),
+        *wall_plan_scenarios(),
     )
+
+
+def wall_plan_scenarios() -> tuple[Scenario, ...]:
+    """Scenarios built from the robot's real plans in config/wall_plans.yaml.
+
+    These are the target task, not invented geometry. They use the laid-down
+    (0.9, 0.6, 0.6) block convention and the 2 cm course gaps the plans actually
+    specify -- five times tighter than the 10 cm the `assembly` family showed the
+    detector can resolve.
+    """
+    scenarios = []
+    for name, plan in load_wall_plans().items():
+        if not plan.specs:
+            continue
+        scenarios.append(
+            Scenario(
+                f"plan_{name}",
+                "wall_plan",
+                plan.specs,
+                SynthParams(az_fov_deg=70.0, el_fov_deg=50.0, **plan.sensor_params_kwargs()),
+            )
+        )
+    return tuple(scenarios)
 
 
 def generate_scenario_matrix(seed: int) -> list[tuple[Scenario, SceneSample]]:

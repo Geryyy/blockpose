@@ -1,0 +1,62 @@
+defaults:
+  block_size: [0.9, 0.6, 0.6]
+wall_plans:
+  basic_pick_and_place:
+    block_bindings: {c0_b0: block_0}
+    sequence:
+    - id: c0_b0
+      absolute_position: [-13.0, -3.0, 0.45]
+      yaw_deg: 0.0
+      gripper_yaw_offset_deg: 90.0
+  stack_block_1_on_block_2:
+    block_bindings: {c0_b0: block_1, c0_b1: block_2}
+    sequence:
+    - id: c0_b0
+      absolute_position: [-14.0, 0.0, 0.3]
+      yaw_deg: 0.0
+      gripper_yaw_offset_deg: 90.0
+    - id: c0_b1
+      relative_to_world_model: c0_b0
+      offset: [0.0, 0.0, 0.6]
+      fallback_absolute_position: [-14.0, 0.0, 0.9]
+      yaw_deg: 0.0
+      gripper_yaw_offset_deg: 90.0
+  example_wall:
+    block_bindings: {c0_b0: block_0, c0_b1: block_1, c0_b2: block_2, c1_b0: block_3,
+      c1_b1: block_4}
+    sequence:
+    - id: c0_b0
+      yaw_deg: 0.0
+      gripper_yaw_offset_deg: 90.0
+      absolute_position: [-15.0, -3.0, 0.3]
+    - id: c0_b1
+      yaw_deg: 0.0
+      gripper_yaw_offset_deg: 90.0
+      absolute_position: [-14.08, -3.0, 0.3]
+    - id: c0_b2
+      yaw_deg: 0.0
+      gripper_yaw_offset_deg: 90.0
+      absolute_position: [-13.16, -3.0, 0.3]
+    - id: c1_b0
+      yaw_deg: 0.0
+      gripper_yaw_offset_deg: 90.0
+      absolute_position: [-14.7, -3.0, 0.9]
+    - id: c1_b1
+      yaw_deg: 0.0
+      gripper_yaw_offset_deg: 90.0
+      absolute_position: [-13.78, -3.0, 0.9]
+  row3_middle_last:
+    block_bindings: {c0_b0: block_0, c0_b1: block_1, c0_b2: block_2}
+    sequence:
+    - id: c0_b0
+      yaw_deg: 0.0
+      gripper_yaw_offset_deg: 90.0
+      absolute_position: [-15.0, -3.0, 0.3]
+    - id: c0_b2
+      yaw_deg: 0.0
+      gripper_yaw_offset_deg: 90.0
+      absolute_position: [-13.16, -3.0, 0.3]
+    - id: c0_b1
+      yaw_deg: 0.0
+      gripper_yaw_offset_deg: 90.0
+      absolute_position: [-14.08, -3.0, 0.3]

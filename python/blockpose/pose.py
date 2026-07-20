@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+import itertools
 from dataclasses import dataclass
+from functools import lru_cache
 
 import numpy as np
 from scipy.spatial.transform import Rotation
+
+# Canonical block extents in the block frame. Lives here rather than in synth so
+# that pose utilities can default to it without importing the generator.
+# NOTE: config/wall_plans.yaml lays blocks down as (0.9, 0.6, 0.6); the two
+# orientations have DIFFERENT symmetry groups, so pass `dims` explicitly
+# whenever the block is not the upright default.
+BLOCK_DIMS = (0.6, 0.6, 0.9)
 
 
 @dataclass
@@ -32,17 +41,50 @@ def rotmat_to_quat_xyzw(R: np.ndarray) -> np.ndarray:
     return Rotation.from_matrix(R).as_quat()
 
 
-def symmetry_equivalents(R: np.ndarray) -> list[np.ndarray]:
-    """Return all 4 rotation matrices equivalent under 4-fold symmetry about block Z axis.
+@lru_cache(maxsize=8)
+def _cuboid_symmetry_group(dims: tuple[float, float, float]) -> tuple[np.ndarray, ...]:
+    """Proper rotations mapping a cuboid with these extents onto itself.
 
-    The concrete block (0.6x0.6x0.9 m) has a square cross-section, so rotations of
-    0, 90, 180, 270 degrees about the block's local Z axis are physically identical.
+    Derived from the extents rather than assumed, because the correct group
+    depends on which sides are equal:
+
+    * all three distinct -> D2, order 4 (identity + 180 deg about each axis)
+    * exactly two equal  -> D4, order 8 (a square prism)
+    * all three equal    -> O,  order 24 (a cube)
+
+    Assuming a fixed 4-fold group about local Z was wrong in both directions for
+    a block laid on its side (0.9 x 0.6 x 0.6): it treated a 90 deg yaw -- which
+    does *not* map that box onto itself -- as a free symmetry and scored it as
+    zero error, while penalising an end-for-end flip that genuinely is a symmetry
+    with a full 180 deg.
+    """
+    extents = np.asarray(dims, dtype=np.float64)
+    group = []
+    # The 24 proper rotations of a cube are the signed permutation matrices with
+    # determinant +1. Keep those that also preserve the extents.
+    for permutation in itertools.permutations(range(3)):
+        for signs in itertools.product((1.0, -1.0), repeat=3):
+            matrix = np.zeros((3, 3))
+            for axis, source in enumerate(permutation):
+                matrix[axis, source] = signs[axis]
+            if abs(np.linalg.det(matrix) - 1.0) > 1e-9:
+                continue
+            # matrix maps local coordinates; the box is invariant when the
+            # permuted extents match the originals.
+            if np.allclose(extents[list(permutation)], extents):
+                group.append(matrix)
+    return tuple(group)
+
+
+def symmetry_equivalents(
+    R: np.ndarray, dims: tuple[float, float, float] = BLOCK_DIMS
+) -> list[np.ndarray]:
+    """Rotations of `R` that describe the same physical block placement.
+
+    `dims` are the block's extents in its own frame and determine the symmetry
+    group; see `_cuboid_symmetry_group`. For the default upright 0.6x0.6x0.9
+    block this returns 8 rotations (4 about the long axis, each with an
+    end-for-end flip), not the 4 an earlier version assumed.
     """
     R = np.asarray(R, dtype=np.float64)
-    equivalents = []
-    for k in range(4):
-        angle = k * np.pi / 2.0
-        c, s = np.cos(angle), np.sin(angle)
-        Rz = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
-        equivalents.append(R @ Rz)
-    return equivalents
+    return [R @ symmetry for symmetry in _cuboid_symmetry_group(tuple(float(d) for d in dims))]

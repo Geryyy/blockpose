@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from blockpose.pose import BlockPose, symmetry_equivalents
+from blockpose.pose import BLOCK_DIMS, BlockPose, symmetry_equivalents
 
 
 def translation_error(det: BlockPose, gt: BlockPose) -> float:
@@ -15,13 +15,17 @@ def translation_error(det: BlockPose, gt: BlockPose) -> float:
     return float(np.linalg.norm(det.position - gt.position))
 
 
-def rotation_error_deg(det: BlockPose, gt: BlockPose) -> float:
+def rotation_error_deg(
+    det: BlockPose, gt: BlockPose, dims: tuple[float, float, float] = BLOCK_DIMS
+) -> float:
     """Symmetry-aware minimum rotation error in degrees.
 
-    Returns the minimum rotation angle (in degrees) over all 4 symmetry-equivalent
-    orientations of the detected block relative to the GT orientation.
+    Minimum rotation angle over the block's symmetry group, which depends on
+    `dims`: an upright 0.6x0.6x0.9 block and one laid down as 0.9x0.6x0.6 have
+    different groups, and using the wrong one silently scores a 90 deg yaw error
+    as zero. Pass `dims` whenever the block is not the upright default.
     """
-    equivalents = symmetry_equivalents(det.rotation)
+    equivalents = symmetry_equivalents(det.rotation, dims)
     min_angle = np.inf
     for R_eq in equivalents:
         dR = R_eq.T @ gt.rotation
@@ -103,6 +107,7 @@ def evaluate(
     detected: list[BlockPose],
     ground_truth: list[BlockPose],
     max_match_dist: float = 0.5,
+    dims: tuple[float, float, float] = BLOCK_DIMS,
 ) -> EvalResult:
     """Evaluate detections against ground truth.
 
@@ -110,6 +115,7 @@ def evaluate(
         detected: List of detected BlockPose objects.
         ground_truth: List of ground-truth BlockPose objects.
         max_match_dist: Maximum translation distance for a valid match (m).
+        dims: Block extents, which select the symmetry group for rotation error.
 
     Returns:
         EvalResult with match counts and error statistics.
@@ -119,7 +125,7 @@ def evaluate(
     matched_gt = {gi for _, gi in pairs}
 
     t_errors = [translation_error(detected[di], ground_truth[gi]) for di, gi in pairs]
-    r_errors = [rotation_error_deg(detected[di], ground_truth[gi]) for di, gi in pairs]
+    r_errors = [rotation_error_deg(detected[di], ground_truth[gi], dims) for di, gi in pairs]
 
     return EvalResult(
         matched=len(pairs),

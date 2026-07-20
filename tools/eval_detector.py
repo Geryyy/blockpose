@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -75,12 +76,22 @@ def _aggregate(scenes: list, params: DetectionParams) -> dict:
     exact_counts = 0
     for scene in scenes:
         pts, gt = scene
-        det = (
-            detect_scene_sample(scene, params)
-            if hasattr(scene, "sensor_origin")
-            else detect_blocks(pts, params)
+        # Block extents vary per scene: config/wall_plans.yaml lays blocks down
+        # as (0.9, 0.6, 0.6) while staging blocks stand upright as (0.6, 0.6, 0.9).
+        # The detector needs the right prior, and the evaluator needs the right
+        # symmetry group -- using the upright group on a laid block scores a
+        # 90 deg yaw error as zero.
+        manifest = getattr(scene, "manifest", {}) or {}
+        dims = tuple(manifest.get("params", {}).get("dims", params.block_dims))
+        scene_params = (
+            params if dims == tuple(params.block_dims) else replace(params, block_dims=dims)
         )
-        res = evaluate(det, gt, max_match_dist=0.5)
+        det = (
+            detect_scene_sample(scene, scene_params)
+            if hasattr(scene, "sensor_origin")
+            else detect_blocks(pts, scene_params)
+        )
+        res = evaluate(det, gt, max_match_dist=0.5, dims=dims)
         # Blocks that produced (almost) no returns are not detectable and must
         # not be scored as misses; a random dropout stripe can erase a target
         # outright, which otherwise turns the metric into a coin flip.

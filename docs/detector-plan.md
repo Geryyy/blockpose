@@ -8,13 +8,22 @@ long-term architectural target.
 
 ## Problem shape
 
-- Blocks are exact 0.6 × 0.6 × 0.9 m concrete boxes, resting on the 0.6 × 0.6
-  base so the 0.9 m long axis is roughly vertical (world Z).
+- Blocks are exact 0.6 × 0.6 × 0.9 m concrete boxes. **Both orientations occur**
+  and `config/wall_plans.yaml` is the authority: staging/pick-and-place stands a
+  block upright on its 0.6 × 0.6 end (centre z = 0.45, dims `(0.6, 0.6, 0.9)`),
+  while every wall course lays it down with the 0.9 m axis **horizontal**
+  (centre z = 0.3, 0.6 m course rise, dims `(0.9, 0.6, 0.6)`). An earlier version
+  of this plan claimed the long axis was always roughly vertical; that was wrong
+  for the target task.
 - They can **tilt a few degrees** in pitch/roll (uneven ground) → estimate full
   **6-DOF** pose; gravity is a strong *prior / initialization*, not a hard
   constraint.
-- Square cross-section → 4-fold yaw symmetry (already handled in
-  `pose.symmetry_equivalents` and `evaluate.rotation_error_deg`).
+- The symmetry group **depends on the orientation** and is now derived from the
+  extents in `pose.symmetry_equivalents`: order 8 for either square prism, but
+  about a *different* axis. Assuming a fixed 4-fold group about local Z scored a
+  90° yaw error on a laid block as zero, so any metric on wall geometry was
+  meaningless before this was fixed. Pass `dims` to `evaluate.rotation_error_deg`
+  whenever blocks are not the upright default.
 - The Seyond LiDAR sees only faces toward the sensor → partial visibility is the
   norm; the detector must work from a top + one/two side faces.
 
@@ -84,13 +93,17 @@ Measured on the stratified matrix (`diagnostics_stratified`), none gated yet:
   Real snapshots contain returns to ~31 m. Cause is point starvation against
   fixed `cluster_min_size` / `min_inliers`, not pose quality — errors stay small
   right up to the point of disappearing.
-- **Blocks in contact are not detected at all** — the largest gap, and it is in
-  the target application. A wall course scores 0 recall while a row with 10 cm
-  gaps scores 1.0 (`assembly` family); `config/scenes/wall.yaml` recovers 1 of
-  16. This is the `touching_row` problem at working scale. It is genuinely
-  ambiguous against `elongated_full_height_negative` — three flush blocks and
-  one 1.8 m solid produce the same measurement — so it needs scored hypotheses
-  plus a scene prior, not better geometry.
+- **Real wall plans are not detected at all** — the largest gap, and it is the
+  target application. Driven directly from `config/wall_plans.yaml` (family
+  `wall_plan`): `example_wall` 0 of 5, `row3_middle_last` 0 of 3, while the
+  single-block and stack plans work. The plans specify **2 cm** course gaps
+  (0.92 m centres, 0.9 m blocks) — five times tighter than the 10 cm the
+  `assembly` family shows the detector can resolve, and comparable to one voxel
+  (0.04 m) plus the clustering epsilon (0.06 m). Two separate problems are
+  stacked here: the gap is below the current spatial resolution, and even a
+  resolved gap leaves the `touching_row` ambiguity against
+  `elongated_full_height_negative`. The first is a resolution budget question;
+  the second needs scored hypotheses plus a scene prior.
 - **Touching rows are silently dropped** (recall 0). A flush 3-block row exceeds
   `cluster_max_extent_xy` with no density valley to split on, so the whole
   cluster is discarded to protect against the elongated-object hard negative.

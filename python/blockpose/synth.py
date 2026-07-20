@@ -18,11 +18,13 @@ from typing import Iterator
 import numpy as np
 import open3d as o3d
 
-from blockpose.pose import BlockPose
+from blockpose.pose import BLOCK_DIMS, BlockPose
 
-# Block frame convention (see docs/detector-plan.md): the 0.9 m long axis is
-# local Z, the 0.6 x 0.6 cross-section spans local X/Y.
-BLOCK_DIMS = (0.6, 0.6, 0.9)
+# BLOCK_DIMS is defined in blockpose.pose and re-exported here for compatibility.
+# Convention: extents are given in the block's own frame, so the orientation of
+# the long axis is encoded by WHICH component holds 0.9. Upright staging blocks
+# are (0.6, 0.6, 0.9); config/wall_plans.yaml lays them down as (0.9, 0.6, 0.6).
+__all__ = ["BLOCK_DIMS"]
 
 # ---------------------------------------------------------------------------
 # Measured sensor characteristics
