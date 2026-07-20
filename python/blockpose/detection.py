@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from enum import Enum
 
 import numpy as np
 import open3d as o3d
@@ -68,12 +69,33 @@ class HypothesisEvidence:
     covered_visible_faces: int = 0
     free_space_violations: int = 0
     supported_rays: int = 0
+    observed_geometry_faces: int = 0
 
 
 @dataclass(frozen=True)
 class CuboidHypothesis:
     pose: BlockPose
     evidence: HypothesisEvidence
+
+
+class Observability(str, Enum):
+    LIMITED = "limited"
+    PARTIAL = "partial"
+    FULL = "full"
+
+
+@dataclass(frozen=True)
+class DetectionDiagnostics:
+    evidence: HypothesisEvidence
+    observability: Observability
+    features: dict[str, float]
+    calibrated_confidence: float | None = None
+
+
+@dataclass(frozen=True)
+class DetectionResult:
+    poses: list[BlockPose]
+    diagnostics: list[DetectionDiagnostics]
 
 
 @dataclass(frozen=True)
@@ -459,6 +481,7 @@ def _make_hypothesis(
     ground: GroundPlane,
     params: DetectionParams,
     sensor_context: SensorContext | None = None,
+    observed_geometry_faces: int = 1,
 ) -> CuboidHypothesis:
     top_height = float(ground.height(top_centroid))
     layer = max(round(top_height / params.block_dims[2]), 1)
@@ -480,6 +503,7 @@ def _make_hypothesis(
             covered,
             violations,
             supported_rays,
+            observed_geometry_faces,
         ),
     )
 
@@ -590,12 +614,12 @@ def _synthesize_pose_top_only(
     )
 
 
-def detect_blocks(
+def _detect_blocks_impl(
     pts_world: np.ndarray,
     params: DetectionParams | None = None,
     *,
     sensor_context: SensorContext | None = None,
-) -> list[BlockPose]:
+) -> tuple[list[BlockPose], list[CuboidHypothesis]]:
     """Detect concrete blocks in a world-frame point cloud.
 
     Args:
@@ -627,18 +651,18 @@ def detect_blocks(
     # Open3D's voxel and RANSAC routines report opaque errors for these valid
     # but uninformative clouds.  Treat them as containing no detectable block.
     if len(pts) < 3:
-        return []
+        return [], []
     pts = pts[np.lexsort((pts[:, 2], pts[:, 1], pts[:, 0]))]
 
     # Stage 1: Voxel downsample
     pts = _voxel_downsample(pts, params.voxel_size)
     if len(pts) < 3:
-        return []
+        return [], []
 
     # Stage 2: Ground removal
     pts, ground = _remove_ground(pts, params)
     if len(pts) == 0:
-        return []
+        return [], []
 
     if sensor_context is not None:
         # Estimate angular-density loss from object-relevant, above-ground
@@ -692,21 +716,76 @@ def detect_blocks(
                     )
                     support = len(top.points)
                 hypothesis = _make_hypothesis(
-                    pose, top.centroid, support, ground, params, sensor_context
+                    pose,
+                    top.centroid,
+                    support,
+                    ground,
+                    params,
+                    sensor_context,
+                    observed_geometry_faces=2 if side is not None else 1,
                 )
                 # The observed top must reach one known block height. Higher
                 # top patches are retained as independently observed layers.
                 if float(ground.height(top.centroid)) >= params.block_dims[2] - 0.08:
                     hypotheses.append(hypothesis)
 
-    results = [hypothesis.pose for hypothesis in _select_hypotheses(hypotheses)]
-
-    # Filter out physically implausible poses (center below ground or above height cap)
-    results = [
-        p for p in results if 0.0 <= float(ground.height(p.position)) <= params.cluster_max_center_z
+    selected = _select_hypotheses(hypotheses)
+    selected = [
+        hypothesis
+        for hypothesis in selected
+        if 0.0
+        <= float(ground.height(hypothesis.pose.position))
+        <= params.cluster_max_center_z
     ]
-    results.sort(key=lambda p: p.position[2], reverse=True)
-    return results
+    selected.sort(key=lambda hypothesis: hypothesis.pose.position[2], reverse=True)
+    return [hypothesis.pose for hypothesis in selected], selected
+
+
+def _diagnostics(hypothesis: CuboidHypothesis) -> DetectionDiagnostics:
+    evidence = hypothesis.evidence
+    expected = evidence.expected_visible_faces
+    covered = evidence.covered_visible_faces
+    observed_faces = max(covered, evidence.observed_geometry_faces)
+    if observed_faces >= 3 and evidence.free_space_violations == 0:
+        observability = Observability.FULL
+    elif observed_faces >= 2:
+        observability = Observability.PARTIAL
+    else:
+        observability = Observability.LIMITED
+    features = {
+        "support": min(evidence.support_points / 500.0, 1.0),
+        "height_consistency": max(0.0, 1.0 - evidence.top_height_error_m / 0.2),
+        "visible_face_coverage": covered / expected if expected else 0.0,
+        "free_space_consistency": 1.0
+        - evidence.free_space_violations
+        / max(evidence.supported_rays + evidence.free_space_violations, 1),
+    }
+    return DetectionDiagnostics(evidence, observability, features)
+
+
+def detect_blocks_detailed(
+    pts_world: np.ndarray,
+    params: DetectionParams | None = None,
+    *,
+    sensor_context: SensorContext | None = None,
+) -> DetectionResult:
+    """Return poses plus normalized evidence and geometry observability."""
+    poses, hypotheses = _detect_blocks_impl(
+        pts_world, params, sensor_context=sensor_context
+    )
+    return DetectionResult(poses, [_diagnostics(hypothesis) for hypothesis in hypotheses])
+
+
+def detect_blocks(
+    pts_world: np.ndarray,
+    params: DetectionParams | None = None,
+    *,
+    sensor_context: SensorContext | None = None,
+) -> list[BlockPose]:
+    """Compatibility API returning only poses, sorted by descending world Z."""
+    return detect_blocks_detailed(
+        pts_world, params, sensor_context=sensor_context
+    ).poses
 
 
 def detect_scene_sample(sample, params: DetectionParams | None = None) -> list[BlockPose]:

@@ -87,6 +87,22 @@ def box_edges(pose, dims=BLOCK_DIMS):
     return [(corners[i], corners[j]) for i, j in edges]
 
 
+def set_equal_3d(ax, arrays, padding=0.06, min_span=0.5):
+    finite = [np.asarray(a, float).reshape(-1, 3) for a in arrays if np.asarray(a).size]
+    points = np.vstack(finite) if finite else np.zeros((1, 3))
+    points = points[np.all(np.isfinite(points), axis=1)]
+    if not len(points):
+        points = np.zeros((1, 3))
+    low, high = points.min(axis=0), points.max(axis=0)
+    spans = np.maximum(high - low, min_span)
+    spans *= 1.0 + 2.0 * padding
+    center = (low + high) / 2.0
+    ax.set_xlim(center[0] - spans[0] / 2, center[0] + spans[0] / 2)
+    ax.set_ylim(center[1] - spans[1] / 2, center[1] + spans[1] / 2)
+    ax.set_zlim(center[2] - spans[2] / 2, center[2] + spans[2] / 2)
+    ax.set_box_aspect(spans)
+
+
 def overlay(name, title):
     sample = CASES[name]
     detections = detect_scene_sample(sample, DetectionParams())
@@ -95,13 +111,17 @@ def overlay(name, title):
     ax = fig.add_subplot(111, projection="3d")
     stride = max(len(sample.points) // 10000, 1)
     shown = sample.points[::stride]
+    plotted = [shown]
     ax.scatter(shown[:, 0], shown[:, 1], shown[:, 2], s=0.35, c="0.55", alpha=0.35)
     for pose in sample.ground_truth:
         for a, b in box_edges(pose):
             ax.plot(*zip(a, b), color="tab:orange", linestyle="--", linewidth=1.2)
+            plotted.append(np.vstack([a, b]))
     for pose in detections:
         for a, b in box_edges(pose):
             ax.plot(*zip(a, b), color="tab:green", linewidth=1.8)
+            plotted.append(np.vstack([a, b]))
+    set_equal_3d(ax, plotted)
     ax.set(title=title, xlabel="world X [m]", ylabel="world Y [m]", zlabel="world Z [m]")
     ax.view_init(elev=24, azim=-58)
     print({"matched": result.matched, "FP": result.unmatched_det, "FN": result.unmatched_gt,

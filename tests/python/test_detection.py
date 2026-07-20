@@ -9,9 +9,12 @@ import numpy as np
 import pytest
 from blockpose.detection import (
     CuboidHypothesis,
+    DetectionDiagnostics,
     DetectionParams,
+    DetectionResult,
     GroundPlane,
     HypothesisEvidence,
+    Observability,
     SensorContext,
     _make_hypothesis,
     _remove_ground,
@@ -20,6 +23,7 @@ from blockpose.detection import (
     _synthesize_pose,
     _validate_sensor_context,
     detect_blocks,
+    detect_blocks_detailed,
     detect_scene_sample,
     visibility_evidence,
 )
@@ -384,6 +388,53 @@ def test_far_block_survives_nearby_nonoccluding_clutter() -> None:
     result = evaluate(detect_blocks(points, sensor_context=context), far.ground_truth)
     assert result.recall == 1.0
     assert result.unmatched_det == 0
+
+
+def test_detailed_api_preserves_pose_api_and_has_finite_normalized_features() -> None:
+    sample = generate_scene(
+        [BlockSpec(0.0, 0.0, yaw_deg=19.0)],
+        SynthParams(range_noise_std=0.0),
+        np.random.default_rng(71),
+    )
+    context = SensorContext(sample.sensor_origin, sample.ray_directions, sample.ranges)
+    detailed = detect_blocks_detailed(sample.points, sensor_context=context)
+    plain = detect_blocks(sample.points, sensor_context=context)
+    assert isinstance(detailed, DetectionResult)
+    assert len(detailed.poses) == len(detailed.diagnostics) == len(plain) == 1
+    np.testing.assert_allclose(detailed.poses[0].position, plain[0].position, atol=0.03)
+    for value in detailed.diagnostics[0].features.values():
+        assert np.isfinite(value)
+        assert 0.0 <= value <= 1.0
+    assert detailed.diagnostics[0].calibrated_confidence is None
+
+
+@pytest.mark.parametrize(
+    ("covered", "violations", "expected"),
+    [(1, 0, Observability.LIMITED), (2, 0, Observability.PARTIAL), (3, 0, Observability.FULL)],
+)
+def test_observability_is_geometry_derived(covered, violations, expected) -> None:
+    from blockpose.detection import _diagnostics
+
+    evidence = HypothesisEvidence(100, 0.0, 1.0, 3, covered, violations, 20)
+    hypothesis = CuboidHypothesis(_make_pose_for_selection((0.0, 0.0, 0.45)), evidence)
+    diagnostics = _diagnostics(hypothesis)
+    assert isinstance(diagnostics, DetectionDiagnostics)
+    assert diagnostics.observability is expected
+
+
+def test_detailed_observability_stable_under_permutation() -> None:
+    sample = generate_scene(
+        [BlockSpec(0.0, 0.0, yaw_deg=31.0)], SynthParams(), np.random.default_rng(81)
+    )
+    context = SensorContext(sample.sensor_origin, sample.ray_directions, sample.ranges)
+    first = detect_blocks_detailed(sample.points, sensor_context=context)
+    second = detect_blocks_detailed(
+        np.random.default_rng(82).permutation(sample.points), sensor_context=context
+    )
+    assert [item.observability for item in first.diagnostics] == [
+        item.observability for item in second.diagnostics
+    ]
+    np.testing.assert_allclose(first.poses[0].position, second.poses[0].position, atol=0.03)
 
 
 def test_dimension_gating_rejects_tall_cluster() -> None:
