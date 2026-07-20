@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from blockpose.synth import (
     BlockSpec,
     ClutterParams,
@@ -92,3 +93,111 @@ def test_clutter_deterministic() -> None:
     a, _ = generate_scene(specs, _WIDE, np.random.default_rng(7), clutter=ClutterParams())
     b, _ = generate_scene(specs, _WIDE, np.random.default_rng(7), clutter=ClutterParams())
     assert np.array_equal(a, b)
+
+
+def test_tilted_default_block_is_physically_settled() -> None:
+    sample = generate_scene(
+        [BlockSpec(0.0, 0.0, pitch_deg=12.0, roll_deg=-7.0)],
+        SynthParams(range_noise_std=0.0),
+        np.random.default_rng(4),
+    )
+    pose = sample.ground_truth[0]
+    half = np.asarray((0.6, 0.6, 0.9)) / 2
+    corners = np.array(
+        [
+            [x, y, z]
+            for x in (-half[0], half[0])
+            for y in (-half[1], half[1])
+            for z in (-half[2], half[2])
+        ]
+    )
+    world = (pose.rotation @ corners.T).T + pose.position
+    assert world[:, 2].min() == pytest.approx(0.0, abs=1e-9)
+
+
+def test_rich_sample_labels_and_legacy_unpacking() -> None:
+    sample = generate_scene(
+        [BlockSpec(0.0, 0.0)], SynthParams(range_noise_std=0.0), np.random.default_rng(2)
+    )
+    pts, gt = sample
+    assert pts is sample.points and gt is sample.ground_truth
+    assert sample.instance_ids.shape == (len(pts),)
+    assert sample.face_ids.shape == (len(pts),)
+    assert sample.ray_directions.shape == pts.shape
+    assert np.any(sample.instance_ids == 0)
+    assert sample.manifest["generator"] == "blockpose.synth.v2"
+
+
+def test_degradation_profile_is_deterministic_and_labeled() -> None:
+    params = SynthParams(
+        range_noise_std=0.0,
+        range_noise_slope=0.002,
+        dropout=0.1,
+        stripe_dropout=0.05,
+        outlier_fraction=0.01,
+    )
+    a = generate_scene([BlockSpec(0.0, 0.0)], params, np.random.default_rng(8))
+    b = generate_scene([BlockSpec(0.0, 0.0)], params, np.random.default_rng(8))
+    assert np.array_equal(a.points, b.points)
+    assert len(a.points) == len(a.instance_ids) == len(a.ranges)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("az_fov_deg", 0.0),
+        ("el_fov_deg", np.inf),
+        ("ang_res_deg", -0.1),
+        ("ground_size", 0.0),
+        ("range_noise_std", -0.1),
+        ("range_noise_slope", np.nan),
+        ("dropout", 1.1),
+        ("stripe_dropout", -0.1),
+        ("outlier_fraction", np.inf),
+        ("outlier_radius", 0.049),
+    ],
+)
+def test_invalid_synth_parameters_raise_clear_error(field: str, value: float) -> None:
+    params = SynthParams(**{field: value})
+    with pytest.raises(ValueError, match=field):
+        generate_scene([], params, np.random.default_rng(1))
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        SynthParams(sensor_pos=(0.0, np.nan, 1.0)),
+        SynthParams(look_at=(np.inf, 0.0, 0.0)),
+        SynthParams(sensor_pos=(1.0, 2.0, 3.0), look_at=(1.0, 2.0, 3.0)),
+    ],
+)
+def test_invalid_sensor_geometry_raises_clear_error(params: SynthParams) -> None:
+    with pytest.raises(ValueError, match="sensor_pos|look_at"):
+        generate_scene([], params, np.random.default_rng(1))
+
+
+def test_full_stripe_dropout_removes_every_azimuth_column() -> None:
+    sample = generate_scene(
+        [BlockSpec(0.0, 0.0)],
+        SynthParams(range_noise_std=0.0, stripe_dropout=1.0),
+        np.random.default_rng(3),
+    )
+    assert sample.points.shape == (0, 3)
+    assert sample.ray_directions.shape == (0, 3)
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        BlockSpec(np.nan, 0.0),
+        BlockSpec(0.0, 0.0, z=np.inf),
+        BlockSpec(0.0, 0.0, yaw_deg=np.nan),
+        BlockSpec(0.0, 0.0, pitch_deg=np.inf),
+        BlockSpec(0.0, 0.0, dims=(0.6, 0.6, 0.0)),
+        BlockSpec(0.0, 0.0, dims=(0.6, np.nan, 0.9)),
+        BlockSpec(0.0, 0.0, dims=(0.6, 0.9)),
+    ],
+)
+def test_invalid_block_specs_raise_before_mesh_construction(spec: BlockSpec) -> None:
+    with pytest.raises(ValueError, match=r"blocks\[0\]"):
+        generate_scene([spec], SynthParams(), np.random.default_rng(1))

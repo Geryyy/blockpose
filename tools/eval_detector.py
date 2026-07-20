@@ -26,6 +26,7 @@ sys.path.insert(0, str(REPO_ROOT / "python"))
 
 from blockpose.detection import DetectionParams, detect_blocks  # noqa: E402
 from blockpose.evaluate import evaluate  # noqa: E402
+from blockpose.scenario_matrix import generate_scenario_matrix  # noqa: E402
 from blockpose.synth import BlockSpec, SynthParams, generate_scene, random_scene  # noqa: E402
 
 DEFAULT_THRESHOLDS = REPO_ROOT / "config" / "detector_eval.yaml"
@@ -63,6 +64,9 @@ def _aggregate(scenes: list, params: DetectionParams) -> dict:
     total_gt = total_det = total_matched = 0
     t_errors: list[float] = []
     r_errors: list[float] = []
+    precision_per_scene: list[float] = []
+    recall_per_scene: list[float] = []
+    exact_counts = 0
     for pts, gt in scenes:
         det = detect_blocks(pts, params)
         res = evaluate(det, gt, max_match_dist=0.5)
@@ -71,8 +75,12 @@ def _aggregate(scenes: list, params: DetectionParams) -> dict:
         total_matched += res.matched
         t_errors.extend(res.translation_errors_m)
         r_errors.extend(res.rotation_errors_deg)
-    t = np.array(t_errors) if t_errors else np.array([0.0])
-    r = np.array(r_errors) if r_errors else np.array([0.0])
+        precision_per_scene.append(res.precision)
+        recall_per_scene.append(res.recall)
+        exact_counts += int(res.exact_count)
+    def percentile(values: list[float], q: float) -> float | None:
+        return float(np.percentile(values, q)) if values else None
+
     return {
         "n_scenes": len(scenes),
         "total_gt": total_gt,
@@ -80,10 +88,18 @@ def _aggregate(scenes: list, params: DetectionParams) -> dict:
         "total_matched": total_matched,
         "recall": total_matched / total_gt if total_gt else 0.0,
         "precision": total_matched / total_det if total_det else 0.0,
-        "translation_mean_m": float(t.mean()),
-        "translation_p95_m": float(np.percentile(t, 95)),
-        "rotation_mean_deg": float(r.mean()),
-        "rotation_p95_deg": float(np.percentile(r, 95)),
+        "macro_recall": float(np.mean(recall_per_scene)) if scenes else 0.0,
+        "macro_precision": float(np.mean(precision_per_scene)) if scenes else 0.0,
+        "exact_count_accuracy": exact_counts / len(scenes) if scenes else 0.0,
+        "translation_mean_m": float(np.mean(t_errors)) if t_errors else None,
+        "translation_p50_m": percentile(t_errors, 50),
+        "translation_p95_m": percentile(t_errors, 95),
+        "translation_max_m": max(t_errors) if t_errors else None,
+        "rotation_mean_deg": float(np.mean(r_errors)) if r_errors else None,
+        "rotation_p50_deg": percentile(r_errors, 50),
+        "rotation_p95_deg": percentile(r_errors, 95),
+        "rotation_max_deg": max(r_errors) if r_errors else None,
+        "false_positives": total_det - total_matched,
     }
 
 
@@ -97,6 +113,12 @@ def run_suite(seed: int) -> dict:
 
     metrics = {"seed": seed, **gate, "false_positives_empty": int(false_positives_empty)}
     metrics["diagnostics_multiblock"] = diagnostics
+    stratified: dict[str, list] = {}
+    for scenario, sample in generate_scenario_matrix(seed):
+        stratified.setdefault(scenario.family, []).append(sample)
+    metrics["diagnostics_stratified"] = {
+        family: _aggregate(samples, params) for family, samples in stratified.items()
+    }
     return metrics
 
 
@@ -117,12 +139,14 @@ def check_thresholds(metrics: dict, thresholds: dict) -> list[str]:
         f"precision {metrics['precision']:.3f} < {thresholds['precision_min']}",
     )
     fail_if(
-        metrics["translation_p95_m"] > thresholds["translation_p95_m"],
-        f"translation_p95_m {metrics['translation_p95_m']:.3f} > {thresholds['translation_p95_m']}",
+        metrics["translation_p95_m"] is None
+        or metrics["translation_p95_m"] > thresholds["translation_p95_m"],
+        f"translation_p95_m {metrics['translation_p95_m']} > {thresholds['translation_p95_m']}",
     )
     fail_if(
-        metrics["rotation_p95_deg"] > thresholds["rotation_p95_deg"],
-        f"rotation_p95_deg {metrics['rotation_p95_deg']:.2f} > {thresholds['rotation_p95_deg']}",
+        metrics["rotation_p95_deg"] is None
+        or metrics["rotation_p95_deg"] > thresholds["rotation_p95_deg"],
+        f"rotation_p95_deg {metrics['rotation_p95_deg']} > {thresholds['rotation_p95_deg']}",
     )
     fail_if(
         metrics["false_positives_empty"] > thresholds["false_positives_empty_max"],

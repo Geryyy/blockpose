@@ -63,6 +63,12 @@ def test_match_detections_empty_inputs() -> None:
     assert match_detections([], [_make_pose()]) == []
 
 
+@pytest.mark.parametrize("max_dist", [-0.1, np.nan, np.inf])
+def test_match_detections_rejects_invalid_cutoff(max_dist: float) -> None:
+    with pytest.raises(ValueError, match="non-negative and finite"):
+        match_detections([], [], max_dist=max_dist)
+
+
 def test_match_detections_exact_match() -> None:
     pose = _make_pose([1.0, 0.0, 0.5])
     pairs = match_detections([pose], [pose])
@@ -91,6 +97,14 @@ def test_match_detections_hungarian_beats_greedy() -> None:
     assert pair_dict.get(0) == 1  # det[0] (at 0.4,0,0) matches gt[1] (at 1,0,0)
 
 
+def test_match_maximizes_valid_cardinality_before_distance() -> None:
+    """An invalid cheap global assignment must not hide two valid matches."""
+    gt = [_make_pose([0.0, 0.0, 0.0]), _make_pose([0.3, 0.0, 0.0])]
+    det = [_make_pose([0.1, 0.0, 0.0]), _make_pose([-0.2, 0.0, 0.0])]
+    pairs = match_detections(det, gt, max_dist=0.25)
+    assert sorted(pairs) == [(0, 1), (1, 0)]
+
+
 def test_evaluate_all_matched() -> None:
     gt = [_make_pose([0.0, 0.0, 0.5]), _make_pose([1.0, 0.0, 0.5])]
     det = [_make_pose([0.05, 0.0, 0.5]), _make_pose([1.05, 0.0, 0.5])]
@@ -108,3 +122,12 @@ def test_evaluate_unmatched_detection() -> None:
     assert result.matched == 1
     assert result.unmatched_det == 1
     assert result.unmatched_gt == 0
+
+
+def test_evaluate_no_matches_has_undefined_pose_errors() -> None:
+    result = evaluate([_make_pose([10, 0, 0])], [_make_pose()], max_match_dist=0.5)
+    assert result.mean_translation_m is None
+    assert result.translation_p95_m is None
+    assert result.mean_rotation_deg is None
+    assert result.precision == 0.0
+    assert result.recall == 0.0

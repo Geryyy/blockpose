@@ -49,20 +49,34 @@ def match_detections(
     Returns:
         List of (det_idx, gt_idx) pairs for matched blocks.
     """
+    if not np.isfinite(max_dist) or max_dist < 0.0:
+        raise ValueError(f"max_dist must be non-negative and finite, got {max_dist}")
     if not detected or not ground_truth:
         return []
 
     n_det = len(detected)
     n_gt = len(ground_truth)
-    cost = np.zeros((n_det, n_gt), dtype=np.float64)
+    distances = np.zeros((n_det, n_gt), dtype=np.float64)
     for i, d in enumerate(detected):
         for j, g in enumerate(ground_truth):
-            cost[i, j] = translation_error(d, g)
+            distances[i, j] = translation_error(d, g)
+
+    # Include explicit unmatched rows/columns in the assignment.  Filtering a
+    # plain Hungarian assignment after the fact can discard an over-threshold
+    # pair even when a different assignment contains more valid matches.
+    unmatched_cost = max(float(max_dist), 0.0) + 1.0
+    invalid_cost = 3.0 * unmatched_cost
+    size = n_det + n_gt
+    cost = np.full((size, size), invalid_cost, dtype=np.float64)
+    cost[:n_det, :n_gt] = np.where(distances <= max_dist, distances, invalid_cost)
+    cost[:n_det, n_gt:] = unmatched_cost
+    cost[n_det:, :n_gt] = unmatched_cost
+    cost[n_det:, n_gt:] = 0.0
 
     det_idx, gt_idx = linear_sum_assignment(cost)
     pairs = []
     for di, gi in zip(det_idx, gt_idx, strict=True):
-        if cost[di, gi] <= max_dist:
+        if di < n_det and gi < n_gt and distances[di, gi] <= max_dist:
             pairs.append((int(di), int(gi)))
     return pairs
 
@@ -74,8 +88,15 @@ class EvalResult:
     unmatched_gt: int
     translation_errors_m: list[float] = field(default_factory=list)
     rotation_errors_deg: list[float] = field(default_factory=list)
-    mean_translation_m: float = 0.0
-    mean_rotation_deg: float = 0.0
+    mean_translation_m: float | None = None
+    mean_rotation_deg: float | None = None
+    translation_p50_m: float | None = None
+    translation_p95_m: float | None = None
+    rotation_p50_deg: float | None = None
+    rotation_p95_deg: float | None = None
+    precision: float = 0.0
+    recall: float = 0.0
+    exact_count: bool = False
 
 
 def evaluate(
@@ -106,6 +127,13 @@ def evaluate(
         unmatched_gt=len(ground_truth) - len(matched_gt),
         translation_errors_m=t_errors,
         rotation_errors_deg=r_errors,
-        mean_translation_m=float(np.mean(t_errors)) if t_errors else 0.0,
-        mean_rotation_deg=float(np.mean(r_errors)) if r_errors else 0.0,
+        mean_translation_m=float(np.mean(t_errors)) if t_errors else None,
+        mean_rotation_deg=float(np.mean(r_errors)) if r_errors else None,
+        translation_p50_m=float(np.percentile(t_errors, 50)) if t_errors else None,
+        translation_p95_m=float(np.percentile(t_errors, 95)) if t_errors else None,
+        rotation_p50_deg=float(np.percentile(r_errors, 50)) if r_errors else None,
+        rotation_p95_deg=float(np.percentile(r_errors, 95)) if r_errors else None,
+        precision=len(pairs) / len(detected) if detected else 0.0,
+        recall=len(pairs) / len(ground_truth) if ground_truth else 0.0,
+        exact_count=len(detected) == len(ground_truth),
     )

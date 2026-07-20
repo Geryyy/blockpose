@@ -24,6 +24,7 @@ class DetectionParams:
     cluster_max_size: int = 50000
     cluster_min_extent_xy: float = 0.3
     cluster_max_extent_xy: float = 1.5
+    region_max_extent_xy: float = 3.0
     cluster_min_extent_z: float = 0.3
     cluster_max_extent_z: float = 3.5
     cluster_max_center_z: float = 3.0
@@ -38,6 +39,39 @@ class DetectionParams:
     block_dims: tuple[float, float, float] = (0.6, 0.6, 0.9)
 
 
+@dataclass(frozen=True)
+class GroundPlane:
+    """Normalized upward-facing plane ``normal·point + offset = 0``."""
+
+    normal: np.ndarray
+    offset: float
+    source: str
+
+    def height(self, points: np.ndarray) -> np.ndarray:
+        return np.asarray(points) @ self.normal + self.offset
+
+
+@dataclass(frozen=True)
+class PlanePatch:
+    normal: np.ndarray
+    centroid: np.ndarray
+    points: np.ndarray
+    residual_mad: float
+
+
+@dataclass(frozen=True)
+class HypothesisEvidence:
+    support_points: int
+    top_height_error_m: float
+    score: float
+
+
+@dataclass(frozen=True)
+class CuboidHypothesis:
+    pose: BlockPose
+    evidence: HypothesisEvidence
+
+
 def _voxel_downsample(pts: np.ndarray, voxel_size: float) -> np.ndarray:
     """Downsample (N, 3) float64 points using Open3D tensor API. Returns (M, 3) float64."""
     import open3d.core as o3c
@@ -49,7 +83,9 @@ def _voxel_downsample(pts: np.ndarray, voxel_size: float) -> np.ndarray:
     return down.point.positions.numpy().astype(np.float64)
 
 
-def _remove_ground(pts: np.ndarray, params: DetectionParams) -> np.ndarray:
+def _remove_ground(
+    pts: np.ndarray, params: DetectionParams
+) -> tuple[np.ndarray, GroundPlane]:
     """Remove ground-level points using RANSAC plane fitting.
 
     Fits a dominant ground plane on a coarse downsampled copy, then removes
@@ -65,6 +101,16 @@ def _remove_ground(pts: np.ndarray, params: DetectionParams) -> np.ndarray:
     pcd_coarse = pcd_coarse.voxel_down_sample(0.1)
     coarse_pts = pcd_coarse.point.positions.numpy().astype(np.float64)
 
+    def percentile_fallback() -> tuple[np.ndarray, GroundPlane]:
+        ground_z = float(np.percentile(pts[:, 2], params.ground_z_percentile))
+        ground = GroundPlane(np.array([0.0, 0.0, 1.0]), -ground_z, "percentile")
+        return pts[ground.height(pts) >= params.ground_thickness], ground
+
+    # Tensor voxelization can collapse an otherwise valid cloud below the
+    # RANSAC sample size. Collinear samples also cannot define a plane.
+    if len(coarse_pts) < 3 or np.linalg.matrix_rank(coarse_pts - coarse_pts.mean(axis=0)) < 2:
+        return percentile_fallback()
+
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(coarse_pts)
     plane_model, _ = pcd.segment_plane(
@@ -77,19 +123,21 @@ def _remove_ground(pts: np.ndarray, params: DetectionParams) -> np.ndarray:
 
     if normal_len < 1e-8 or abs(c / normal_len) < params.ground_normal_min_z:
         # Degenerate or non-horizontal plane — fall back to percentile method
-        ground_z = float(np.percentile(pts[:, 2], params.ground_z_percentile))
-        return pts[pts[:, 2] >= ground_z + params.ground_thickness]
+        return percentile_fallback()
 
     # Ensure normal points upward (c > 0) so signed distance is positive above ground
     if c < 0:
         a, b, c, d = -a, -b, -c, -d
 
     # Signed distance from plane: positive = above ground
-    signed_dist = (a * pts[:, 0] + b * pts[:, 1] + c * pts[:, 2] + d) / normal_len
-    return pts[signed_dist >= params.ground_thickness]
+    ground = GroundPlane(np.array([a, b, c]) / normal_len, d / normal_len, "ransac")
+    signed_dist = ground.height(pts)
+    return pts[signed_dist >= params.ground_thickness], ground
 
 
-def _cluster_points(pts: np.ndarray, params: DetectionParams) -> list[np.ndarray]:
+def _cluster_points(
+    pts: np.ndarray, params: DetectionParams, ground: GroundPlane | None = None
+) -> list[np.ndarray]:
     """DBSCAN clustering. Returns list of (K_i, 3) arrays for accepted clusters."""
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pts)
@@ -112,14 +160,15 @@ def _cluster_points(pts: np.ndarray, params: DetectionParams) -> list[np.ndarray
         cmin = cluster.min(axis=0)
         cmax = cluster.max(axis=0)
         dx, dy, dz = cmax[0] - cmin[0], cmax[1] - cmin[1], cmax[2] - cmin[2]
-        z_center = (cmin[2] + cmax[2]) / 2.0
-        if not (params.cluster_min_extent_xy <= dx <= params.cluster_max_extent_xy):
+        center = (cmin + cmax) / 2.0
+        center_height = float(ground.height(center)) if ground is not None else float(center[2])
+        if not (params.cluster_min_extent_xy <= dx <= params.region_max_extent_xy):
             continue
-        if not (params.cluster_min_extent_xy <= dy <= params.cluster_max_extent_xy):
+        if not (params.cluster_min_extent_xy <= dy <= params.region_max_extent_xy):
             continue
         if not (params.cluster_min_extent_z <= dz <= params.cluster_max_extent_z):
             continue
-        if z_center > params.cluster_max_center_z:
+        if center_height > params.cluster_max_center_z:
             continue
         clusters.append(cluster)
     clusters.sort(key=len, reverse=True)
@@ -128,7 +177,7 @@ def _cluster_points(pts: np.ndarray, params: DetectionParams) -> list[np.ndarray
 
 def _fit_planes(
     pts: np.ndarray, params: DetectionParams
-) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+) -> list[PlanePatch]:
     """Iteratively fit planes using RANSAC.
 
     Returns list of (normal, centroid, inlier_pts) tuples.
@@ -155,7 +204,9 @@ def _fit_planes(
         normal /= norm_len
         inliers = remaining[inlier_idx]
         centroid = inliers.mean(axis=0)
-        planes.append((normal, centroid, inliers))
+        residuals = (inliers - centroid) @ normal
+        residual_mad = float(np.median(np.abs(residuals - np.median(residuals))))
+        planes.append(PlanePatch(normal, centroid, inliers, residual_mad))
         mask = np.ones(len(remaining), dtype=np.bool_)
         mask[inlier_idx] = False
         remaining = remaining[mask]
@@ -163,7 +214,7 @@ def _fit_planes(
 
 
 def _classify_planes(
-    planes: list[tuple[np.ndarray, np.ndarray, np.ndarray]],
+    planes: list[PlanePatch],
     params: DetectionParams,
 ) -> tuple[
     np.ndarray | None,
@@ -183,7 +234,8 @@ def _classify_planes(
     top_centroid = None
     top_dot = -1.0
 
-    for normal, centroid, _ in planes:
+    for patch in planes:
+        normal, centroid = patch.normal, patch.centroid
         dot = float(np.dot(normal, world_z))
         absdot = abs(dot)
         if absdot > cos_top and absdot > top_dot:
@@ -200,7 +252,8 @@ def _classify_planes(
     side_centroid = None
     best_dist = np.inf
 
-    for normal, centroid, _ in planes:
+    for patch in planes:
+        normal, centroid = patch.normal, patch.centroid
         dot = float(np.dot(normal, world_z))
         if abs(dot) >= sin_side:
             continue  # Too tilted — not a side plane
@@ -215,10 +268,72 @@ def _classify_planes(
     return top_candidate, top_centroid, side_candidate, side_centroid
 
 
+def _split_connected_region(cluster: np.ndarray, params: DetectionParams) -> list[np.ndarray]:
+    """Split a long connected row into known-width spatial candidate regions.
+
+    This deliberately handles only an observable horizontal repetition. Vertical
+    stacks with buried interfaces are left connected until stronger evidence is
+    available.
+    """
+    extents = np.ptp(cluster, axis=0)
+    axis = int(np.argmax(extents[:2]))
+    width = params.block_dims[axis]
+    count = int(round(extents[axis] / width))
+    if count < 2 or count > 8 or abs(extents[axis] - count * width) > 0.12:
+        return [cluster]
+    low = float(cluster[:, axis].min())
+    # Extent alone is not evidence of multiple objects: a continuous elongated
+    # cuboid has exactly the same outer dimensions as a seamless row. Require a
+    # repeatable return-density valley at every proposed interface.
+    values = cluster[:, axis]
+    valley_half_width = max(params.voxel_size * 1.5, 0.04)
+    shoulder_width = max(params.voxel_size * 3.0, 0.08)
+    for index in range(1, count):
+        boundary = low + index * width
+        valley = np.count_nonzero(np.abs(values - boundary) <= valley_half_width)
+        left = np.count_nonzero(
+            (values >= boundary - shoulder_width - valley_half_width)
+            & (values < boundary - valley_half_width)
+        )
+        right = np.count_nonzero(
+            (values > boundary + valley_half_width)
+            & (values <= boundary + shoulder_width + valley_half_width)
+        )
+        expected = (left + right) * valley_half_width / shoulder_width
+        if expected <= 0.0 or valley > 0.45 * expected:
+            return [cluster]
+    regions = []
+    for index in range(count):
+        lower = low + index * width
+        upper = low + (index + 1) * width
+        mask = (cluster[:, axis] >= lower - 1e-6) & (
+            cluster[:, axis] <= upper + (1e-6 if index == count - 1 else 0.0)
+        )
+        region = cluster[mask]
+        if len(region) >= params.cluster_min_size:
+            regions.append(region)
+    return regions if len(regions) == count else [cluster]
+
+
+def _make_hypothesis(
+    pose: BlockPose,
+    top_centroid: np.ndarray,
+    support_points: int,
+    ground: GroundPlane,
+    params: DetectionParams,
+) -> CuboidHypothesis:
+    top_height = float(ground.height(top_centroid))
+    layer = max(round(top_height / params.block_dims[2]), 1)
+    height_error = abs(top_height - layer * params.block_dims[2])
+    score = min(support_points / 500.0, 1.0) - 3.0 * height_error
+    return CuboidHypothesis(pose, HypothesisEvidence(support_points, height_error, score))
+
+
 def _synthesize_pose(
     top_normal: np.ndarray,
     top_centroid: np.ndarray,
     side_normal: np.ndarray,
+    side_centroid: np.ndarray,
     block_dims: tuple[float, float, float],
     cluster_pts: np.ndarray | None = None,
 ) -> BlockPose:
@@ -237,6 +352,12 @@ def _synthesize_pose(
         x_raw = x_raw - np.dot(x_raw, z_world) * z_world
         x_len = np.linalg.norm(x_raw)
     x_world = x_raw / x_len
+    if cluster_pts is not None and len(cluster_pts) > 0:
+        # Plane normals from RANSAC have arbitrary sign. Orient this axis from
+        # the observed side face toward the block interior.
+        inward_evidence = float(np.dot(cluster_pts.mean(axis=0) - side_centroid, x_world))
+        if inward_evidence < 0.0:
+            x_world = -x_world
     y_world = np.cross(z_world, x_world)
     y_world /= np.linalg.norm(y_world)
 
@@ -245,13 +366,11 @@ def _synthesize_pose(
     half_height = block_dims[2] / 2.0
     position = top_centroid - z_world * half_height
     if cluster_pts is not None and len(cluster_pts) > 0:
-        mn = cluster_pts.min(axis=0)
-        mx = cluster_pts.max(axis=0)
-        center = (mn + mx) / 2.0
-        ext = mx - mn
-        position[:2] = center[:2]
-        if ext[2] < block_dims[2] * 1.25:
-            position[2] = center[2]
+        # Constrain the center using the observed side-plane equation and the
+        # known half-width. The orthogonal horizontal direction remains
+        # partially constrained by the top-face centroid.
+        current = float(np.dot(position - side_centroid, x_world))
+        position += x_world * (block_dims[0] / 2.0 - current)
 
     return BlockPose(position=position, rotation=R, confidence=1.0, source="plane_fit")
 
@@ -317,35 +436,73 @@ def detect_blocks(
     if params is None:
         params = DetectionParams()
 
-    pts = np.asarray(pts_world, dtype=np.float64)
+    pts = np.asarray(pts_world)
+    if pts.ndim != 2 or pts.shape[1] != 3:
+        raise ValueError(f"pts_world must have shape (N, 3), got {pts.shape}")
+    if not np.issubdtype(pts.dtype, np.number) or np.iscomplexobj(pts):
+        raise ValueError("pts_world must contain real numeric coordinates")
+    pts = pts.astype(np.float64, copy=False)
+    if not np.all(np.isfinite(pts)):
+        raise ValueError("pts_world must contain only finite coordinates")
+    # Open3D's voxel and RANSAC routines report opaque errors for these valid
+    # but uninformative clouds.  Treat them as containing no detectable block.
+    if len(pts) < 3:
+        return []
 
     # Stage 1: Voxel downsample
     pts = _voxel_downsample(pts, params.voxel_size)
+    if len(pts) < 3:
+        return []
 
     # Stage 2: Ground removal
-    pts = _remove_ground(pts, params)
+    pts, ground = _remove_ground(pts, params)
     if len(pts) == 0:
         return []
 
     # Stage 3: DBSCAN clustering
-    clusters = _cluster_points(pts, params)
+    clusters = _cluster_points(pts, params, ground)
 
     # Stage 4–6: Per-cluster plane fitting and pose synthesis
-    results: list[BlockPose] = []
+    hypotheses: list[CuboidHypothesis] = []
     for cluster in clusters:
-        planes = _fit_planes(cluster, params)
-        if not planes:
+        regions = _split_connected_region(cluster, params)
+        if len(regions) == 1 and np.any(
+            np.ptp(cluster, axis=0)[:2] > params.cluster_max_extent_xy
+        ):
+            # A large connected footprint without internal boundary evidence is
+            # an elongated object, not a license to tile it with known boxes.
             continue
-        top_n, top_c, side_n, side_c = _classify_planes(planes, params)
-        if top_n is None:
-            continue
-        if side_n is not None:
-            pose = _synthesize_pose(top_n, top_c, side_n, params.block_dims, cluster)
-        else:
-            pose = _synthesize_pose_top_only(top_n, top_c, cluster, params.block_dims)
-        results.append(pose)
+        for region in regions:
+            planes = _fit_planes(region, params)
+            if not planes:
+                continue
+            top_n, top_c, side_n, side_c = _classify_planes(planes, params)
+            if top_n is None:
+                continue
+            if side_n is not None:
+                pose = _synthesize_pose(
+                    top_n, top_c, side_n, side_c, params.block_dims, region
+                )
+            else:
+                pose = _synthesize_pose_top_only(top_n, top_c, region, params.block_dims)
+            hypothesis = _make_hypothesis(pose, top_c, len(region), ground, params)
+            # A ground-supported concrete block's top must reach approximately
+            # one known block height. Shorter near-sized boxes are explicit
+            # hard negatives; higher tops remain eligible for stacks/elevated
+            # regions rather than forcing an integer-layer assumption.
+            if float(ground.height(top_c)) >= params.block_dims[2] - 0.08:
+                hypotheses.append(hypothesis)
+
+    # Deterministic evidence ordering is the initial selection policy. Candidate
+    # regions are disjoint; overlap-aware suppression belongs to the next slice.
+    hypotheses.sort(
+        key=lambda h: (-h.evidence.score, *np.round(h.pose.position, 9).tolist())
+    )
+    results = [hypothesis.pose for hypothesis in hypotheses]
 
     # Filter out physically implausible poses (center below ground or above height cap)
-    results = [p for p in results if 0.0 <= p.position[2] <= params.cluster_max_center_z]
+    results = [
+        p for p in results if 0.0 <= float(ground.height(p.position)) <= params.cluster_max_center_z
+    ]
     results.sort(key=lambda p: p.position[2], reverse=True)
     return results

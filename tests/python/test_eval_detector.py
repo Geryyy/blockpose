@@ -37,3 +37,19 @@ def test_metrics_report_diagnostics() -> None:
     # Multi-block diagnostics are reported (ungated Phase-C tracking).
     assert "diagnostics_multiblock" in metrics
     assert "recall" in metrics["diagnostics_multiblock"]
+    expected_families = {
+        "isolated_range",
+        "tilt",
+        "noise",
+        "dropout",
+        "multi_block",
+        "touching",
+        "stack",
+        "clutter",
+        "hard_negative",
+    }
+    assert set(metrics["diagnostics_stratified"]) == expected_families
+    # Seamless touching blocks are not distinguishable from one elongated solid;
+    # precision takes precedence until genuine interface evidence exists.
+    assert metrics["diagnostics_stratified"]["touching"]["false_positives"] == 0
+    assert metrics["diagnostics_stratified"]["hard_negative"]["false_positives"] == 0

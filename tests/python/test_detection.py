@@ -6,7 +6,13 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from blockpose.detection import detect_blocks
+from blockpose.detection import (
+    DetectionParams,
+    _remove_ground,
+    _split_connected_region,
+    _synthesize_pose,
+    detect_blocks,
+)
 from blockpose.evaluate import evaluate
 from blockpose.io import load_snapshot
 
@@ -92,6 +98,96 @@ def _make_flat_ground(n: int = 2000, z: float = 0.0, spread: float = 10.0) -> np
     xy = rng.uniform(-spread, spread, size=(n, 2))
     zs = np.full((n, 1), z)
     return np.hstack([xy, zs])
+
+
+@pytest.mark.parametrize("pts", [np.empty((0, 3)), np.zeros((1, 3)), np.zeros((2, 3))])
+def test_empty_and_sparse_clouds_return_no_detections(pts: np.ndarray) -> None:
+    assert detect_blocks(pts) == []
+
+
+@pytest.mark.parametrize("pts", [np.zeros((3,)), np.zeros((2, 2)), np.zeros((2, 3, 1))])
+def test_malformed_cloud_has_clear_error(pts: np.ndarray) -> None:
+    with pytest.raises(ValueError, match=r"shape \(N, 3\)"):
+        detect_blocks(pts)
+
+
+def test_nonfinite_cloud_has_clear_error() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        detect_blocks(np.array([[0.0, np.nan, 0.0]]))
+
+
+def test_complex_cloud_is_rejected() -> None:
+    with pytest.raises(ValueError, match="real numeric"):
+        detect_blocks(np.ones((3, 3), dtype=np.complex128))
+
+
+def test_ground_removal_returns_local_sloped_ground_frame() -> None:
+    grid = np.linspace(-3.0, 3.0, 45)
+    xx, yy = np.meshgrid(grid, grid)
+    zz = 1.2 + 0.08 * xx - 0.04 * yy
+    ground_points = np.column_stack([xx.ravel(), yy.ravel(), zz.ravel()])
+    object_points = ground_points[::8].copy()
+    object_points[:, 2] += 0.6
+    above, ground = _remove_ground(
+        np.vstack([ground_points, object_points]), DetectionParams(ground_ransac_iters=200)
+    )
+    assert ground.source == "ransac"
+    assert ground.normal[2] > 0.99
+    assert np.median(ground.height(ground_points)) == pytest.approx(0.0, abs=0.01)
+    assert len(above) >= len(object_points) * 0.9
+
+
+def test_ground_removal_exact_three_point_cloud_is_safe() -> None:
+    points = np.array([[0.0, 0.0, 0.0], [0.4, 0.0, 0.0], [0.0, 0.4, 0.0]])
+    above, ground = _remove_ground(points, DetectionParams())
+    assert above.shape == (0, 3)
+    assert ground.normal.shape == (3,)
+    assert detect_blocks(points) == []
+
+
+def test_ground_removal_falls_back_when_coarse_voxels_collapse() -> None:
+    # Distinct 4 cm detector voxels, but all points occupy fewer than three
+    # voxels at the 10 cm ground-RANSAC resolution.
+    points = np.array([[0.001, 0.001, 0.0], [0.045, 0.001, 0.0], [0.085, 0.001, 0.2]])
+    above, ground = _remove_ground(points, DetectionParams())
+    assert ground.source == "percentile"
+    assert above.shape == (1, 3)
+    assert detect_blocks(points) == []
+
+
+def test_side_plane_equation_recovers_known_dimension_center() -> None:
+    cluster = np.array(
+        [
+            [-0.3, -0.2, 0.3],
+            [-0.3, 0.2, 0.7],
+            [0.1, -0.2, 0.9],
+            [0.2, 0.2, 0.9],
+        ]
+    )
+    pose = _synthesize_pose(
+        np.array([0.0, 0.0, 1.0]),
+        np.array([0.08, 0.1, 0.9]),
+        np.array([-1.0, 0.0, 0.0]),
+        np.array([-0.3, 0.0, 0.5]),
+        (0.6, 0.6, 0.9),
+        cluster,
+    )
+    assert pose.position[0] == pytest.approx(0.0, abs=1e-9)
+    assert pose.position[2] == pytest.approx(0.45, abs=1e-9)
+
+
+def test_continuous_elongated_cuboid_is_not_split_by_extent() -> None:
+    rng = np.random.default_rng(91)
+    # Dense continuous top and two sides of a 0.6 x 1.8 x 0.9 cuboid.
+    top = np.column_stack(
+        [rng.uniform(-0.3, 0.3, 1000), rng.uniform(-0.9, 0.9, 1000), np.full(1000, 0.9)]
+    )
+    side = np.column_stack(
+        [np.full(800, -0.3), rng.uniform(-0.9, 0.9, 800), rng.uniform(0.15, 0.9, 800)]
+    )
+    cluster = np.vstack([top, side])
+    regions = _split_connected_region(cluster, DetectionParams())
+    assert len(regions) == 1
 
 
 def test_dimension_gating_rejects_tall_cluster() -> None:
