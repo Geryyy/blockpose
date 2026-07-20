@@ -3,7 +3,16 @@
 from __future__ import annotations
 
 import numpy as np
-from blockpose.synth import BlockSpec, SynthParams, generate_scene, random_scene
+from blockpose.synth import (
+    BlockSpec,
+    ClutterParams,
+    SynthParams,
+    generate_scene,
+    random_scene,
+)
+
+# Wide FOV so the side clutter is in view; no noise for exact comparisons.
+_WIDE = SynthParams(az_fov_deg=130.0, el_fov_deg=80.0, range_noise_std=0.0)
 
 
 def test_determinism_same_seed() -> None:
@@ -53,3 +62,33 @@ def test_random_scene_block_count() -> None:
     assert len(pts) > 1000
     for pose in gt:
         assert pose.source == "synthetic"
+
+
+def test_clutter_adds_side_objects_but_no_ground_truth() -> None:
+    specs = [BlockSpec(0.0, 0.0, yaw_deg=15.0)]
+    _, gt0 = generate_scene(specs, _WIDE, np.random.default_rng(1))
+    pts, gt = generate_scene(specs, _WIDE, np.random.default_rng(1), clutter=ClutterParams())
+    # Clutter never adds ground truth.
+    assert len(gt) == len(gt0) == 1
+    # Trees (canopies, z>1), logs (-Y, raised), and container (+Y, tall) all appear.
+    assert (pts[(np.abs(pts[:, 1]) > 2.5) & (pts[:, 2] > 1.0)]).shape[0] > 500  # trees
+    assert (pts[(pts[:, 1] < -3.0) & (pts[:, 2] > 0.1) & (pts[:, 2] < 0.45)]).shape[0] > 100  # logs
+    assert (pts[(pts[:, 1] > 3.0) & (pts[:, 2] > 0.5)]).shape[0] > 500  # container
+
+
+def test_clutter_keeps_working_area_free() -> None:
+    specs = [BlockSpec(0.0, 0.0, yaw_deg=15.0)]
+    pts0, _ = generate_scene(specs, _WIDE, np.random.default_rng(1))
+    pts1, _ = generate_scene(specs, _WIDE, np.random.default_rng(1), clutter=ClutterParams())
+    # With no range noise, clutter (all at |y| >= ~2.5) must not touch the central
+    # working band, so the block + ground points there are byte-identical.
+    wa0 = int((np.abs(pts0[:, 1]) < 1.5).sum())
+    wa1 = int((np.abs(pts1[:, 1]) < 1.5).sum())
+    assert wa0 == wa1
+
+
+def test_clutter_deterministic() -> None:
+    specs = [BlockSpec(0.0, 0.0)]
+    a, _ = generate_scene(specs, _WIDE, np.random.default_rng(7), clutter=ClutterParams())
+    b, _ = generate_scene(specs, _WIDE, np.random.default_rng(7), clutter=ClutterParams())
+    assert np.array_equal(a, b)
