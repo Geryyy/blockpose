@@ -9,6 +9,7 @@ import numpy as np
 import open3d as o3d
 
 from blockpose.pose import BlockPose
+from blockpose.ransac import segment_plane
 from blockpose.refine import refine_poses
 
 
@@ -33,6 +34,8 @@ class DetectionParams:
     ransac_dist_thresh: float = 0.02
     ransac_n: int = 3
     ransac_num_iterations: int = 1000
+    # Seed for the in-repo deterministic RANSAC (blockpose.ransac).
+    ransac_seed: int = 0
     max_planes: int = 5
     min_inliers: int = 40
     top_plane_angle_deg: float = 30.0
@@ -296,6 +299,11 @@ def _remove_ground(
     )
     pcd_coarse = pcd_coarse.voxel_down_sample(0.1)
     coarse_pts = pcd_coarse.point.positions.numpy().astype(np.float64)
+    # Open3D's voxel downsample does not guarantee output ordering, and seeded
+    # RANSAC samples by index, so an unsorted cloud reintroduces exactly the
+    # nondeterminism the seeded fitter removes. `_voxel_downsample` already
+    # sorts for this reason; the coarse pass must too.
+    coarse_pts = coarse_pts[np.lexsort((coarse_pts[:, 2], coarse_pts[:, 1], coarse_pts[:, 0]))]
 
     def percentile_fallback() -> tuple[np.ndarray, GroundPlane]:
         ground_z = float(np.percentile(pts[:, 2], params.ground_z_percentile))
@@ -307,12 +315,12 @@ def _remove_ground(
     if len(coarse_pts) < 3 or np.linalg.matrix_rank(coarse_pts - coarse_pts.mean(axis=0)) < 2:
         return percentile_fallback()
 
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(coarse_pts)
-    plane_model, _ = pcd.segment_plane(
+    plane_model, _ = segment_plane(
+        coarse_pts,
         distance_threshold=params.ground_ransac_dist,
         ransac_n=3,
         num_iterations=params.ground_ransac_iters,
+        seed=params.ransac_seed,
     )
     a, b, c, d = (float(value) for value in plane_model)
     normal_len = np.sqrt(a * a + b * b + c * c)
@@ -380,15 +388,17 @@ def _fit_planes(
     """
     remaining = pts.copy()
     planes = []
-    for _ in range(params.max_planes):
+    for index in range(params.max_planes):
         if len(remaining) < params.min_inliers:
             break
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(remaining)
-        plane_model, inlier_idx = pcd.segment_plane(
+        # Vary the seed per extraction so successive planes are not drawn from
+        # the same sample sequence, while staying reproducible overall.
+        plane_model, inlier_idx = segment_plane(
+            remaining,
             distance_threshold=params.ransac_dist_thresh,
             ransac_n=params.ransac_n,
             num_iterations=params.ransac_num_iterations,
+            seed=params.ransac_seed + index,
         )
         inlier_idx = list(inlier_idx)
         if len(inlier_idx) < params.min_inliers:

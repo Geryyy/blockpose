@@ -62,6 +62,20 @@ fit converges to the same optimum regardless of which RANSAC plane seeded it.
 Gate thresholds were ratcheted accordingly: translation p95 0.15 → 0.025 m,
 rotation p95 2.0 → 1.0°.
 
+## Reproducibility (resolved)
+
+`blockpose/ransac.py` replaces Open3D 0.19's `segment_plane`, which takes no seed
+and returns different planes on identical input (`o3d.utility.random.seed` does
+not reach it). A second, subtler source was `_remove_ground`'s coarse voxel pass:
+Open3D does not guarantee downsample output ordering, and a seeded sampler draws
+by index, so the cloud is now sorted there as it already was elsewhere.
+
+Detection is byte-identical across repeated runs on all 25 scenarios. Cost is
+~110 → ~122 ms per scene; accuracy is unchanged (overall translation p95 0.0058 →
+0.0057 m, rotation p95 0.527 → 0.534°). Adaptive early termination keeps a
+pure-numpy fitter competitive: a dominant plane at an 80% inlier ratio needs ~13
+trials rather than the nominal 1000.
+
 ## Known envelope and open weaknesses
 
 Measured on the stratified matrix (`diagnostics_stratified`), none gated yet:
@@ -70,12 +84,13 @@ Measured on the stratified matrix (`diagnostics_stratified`), none gated yet:
   Real snapshots contain returns to ~31 m. Cause is point starvation against
   fixed `cluster_min_size` / `min_inliers`, not pose quality — errors stay small
   right up to the point of disappearing.
-- **Hypothesis generation is not reproducible.** Open3D 0.19's `segment_plane`
-  RANSAC is not seedable (`o3d.utility.random.seed` does not reach it) and gives
-  different planes on identical input. Refined poses are stable, but the
-  *number* of candidates can vary between runs, which made one calibration test
-  flaky about one run in three. Replacing `segment_plane` with a seeded
-  in-repo RANSAC is the fix and would make the gate fully reproducible.
+- **Blocks in contact are not detected at all** — the largest gap, and it is in
+  the target application. A wall course scores 0 recall while a row with 10 cm
+  gaps scores 1.0 (`assembly` family); `config/scenes/wall.yaml` recovers 1 of
+  16. This is the `touching_row` problem at working scale. It is genuinely
+  ambiguous against `elongated_full_height_negative` — three flush blocks and
+  one 1.8 m solid produce the same measurement — so it needs scored hypotheses
+  plus a scene prior, not better geometry.
 - **Touching rows are silently dropped** (recall 0). A flush 3-block row exceeds
   `cluster_max_extent_xy` with no density valley to split on, so the whole
   cluster is discarded to protect against the elongated-object hard negative.
