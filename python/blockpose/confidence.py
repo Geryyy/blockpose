@@ -15,8 +15,12 @@ FEATURE_SCHEMA = (
     "height_consistency",
     "visible_face_coverage",
     "free_space_consistency",
+    "surface_explained",
 )
-ARTIFACT_VERSION = 1
+# v2 added `surface_explained` and redefined `free_space_consistency` (the old
+# free-space violation count was dominated by silhouette edge bleed). Artifacts
+# fitted against v1 features are not comparable and are rejected by validate().
+ARTIFACT_VERSION = 2
 # Deliberately absent until a selected-output corpus contains enough organic
 # positives and negatives. Experimental artifacts must be passed explicitly.
 DEFAULT_ARTIFACT = Path(__file__).with_name("selected_output_calibration.json")

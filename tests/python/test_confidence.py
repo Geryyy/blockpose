@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from blockpose.confidence import (
+    ARTIFACT_VERSION,
     DEFAULT_ARTIFACT,
     FEATURE_SCHEMA,
     CalibrationArtifact,
@@ -67,8 +68,11 @@ def test_metrics_reject_invalid_labels_and_probabilities(labels, probabilities, 
 
 
 def test_fit_serialization_schema_and_fallback(tmp_path: Path) -> None:
-    matrix = np.array([[0.1, 0.1, 0.0, 0.2], [0.2, 0.3, 0.1, 0.3],
-                       [0.8, 0.9, 0.8, 0.9], [0.9, 1.0, 1.0, 1.0]])
+    width = len(FEATURE_SCHEMA)
+    matrix = np.vstack([
+        np.full(width, 0.1), np.full(width, 0.3),
+        np.full(width, 0.8), np.full(width, 1.0),
+    ])
     labels = np.array([0, 0, 1, 1])
     artifact = fit_logistic(
         matrix, labels, development_seeds=[1], gate_seeds=[2], l2=0.5
@@ -78,7 +82,7 @@ def test_fit_serialization_schema_and_fallback(tmp_path: Path) -> None:
     loaded = load_artifact(path)
     assert loaded == artifact
     assert predict(_features(), None) == 0.0
-    bad = CalibrationArtifact(**{**artifact.__dict__, "schema": ["wrong"] * 4})
+    bad = CalibrationArtifact(**{**artifact.__dict__, "schema": ["wrong"] * len(FEATURE_SCHEMA)})
     assert predict(_features(), bad) == 0.0
     with pytest.raises(ValueError, match="schema/order"):
         feature_vector(dict(reversed(list(_features().items()))))
@@ -88,7 +92,7 @@ def test_fit_serialization_schema_and_fallback(tmp_path: Path) -> None:
 def test_fit_rejects_invalid_regularization(l2: float) -> None:
     with pytest.raises(ValueError, match="finite and non-negative"):
         fit_logistic(
-            np.array([[0.0] * 4, [1.0] * 4]),
+            np.array([[0.0] * len(FEATURE_SCHEMA), [1.0] * len(FEATURE_SCHEMA)]),
             np.array([0, 1]),
             l2=l2,
             development_seeds=[1],
@@ -98,11 +102,11 @@ def test_fit_rejects_invalid_regularization(l2: float) -> None:
 
 def test_predict_malformed_in_memory_artifact_falls_back() -> None:
     malformed = CalibrationArtifact(
-        1,
+        ARTIFACT_VERSION,
         list(FEATURE_SCHEMA),
-        [None] * 4,
-        [1.0] * 4,
-        [1.0] * 4,
+        [None] * len(FEATURE_SCHEMA),
+        [1.0] * len(FEATURE_SCHEMA),
+        [1.0] * len(FEATURE_SCHEMA),
         0.0,
         1.0,
         [1],
@@ -116,11 +120,11 @@ def test_artifact_rejects_invalid_regularization_in_memory_and_loaded(
     l2: float, tmp_path: Path
 ) -> None:
     artifact = CalibrationArtifact(
-        1,
+        ARTIFACT_VERSION,
         list(FEATURE_SCHEMA),
-        [0.0] * 4,
-        [1.0] * 4,
-        [0.0] * 4,
+        [0.0] * len(FEATURE_SCHEMA),
+        [1.0] * len(FEATURE_SCHEMA),
+        [0.0] * len(FEATURE_SCHEMA),
         0.0,
         l2,
         [1],

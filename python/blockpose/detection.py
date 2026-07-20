@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 
 import numpy as np
@@ -70,6 +70,9 @@ class HypothesisEvidence:
     free_space_violations: int = 0
     supported_rays: int = 0
     observed_geometry_faces: int = 0
+    # Rays geometrically aimed at the visible faces, whatever they actually hit.
+    # Denominator for `surface_explained`; keeps that feature scale-free.
+    incident_rays: int = 0
 
 
 @dataclass(frozen=True)
@@ -100,11 +103,17 @@ class DetectionResult:
 
 @dataclass(frozen=True)
 class SensorContext:
-    """Optional ray evidence in the same world frame as the input cloud."""
+    """Optional ray evidence in the same world frame as the input cloud.
+
+    ``miss_directions`` holds beams that returned nothing. They are optional
+    because a raw point cloud cannot recover them, but when the source can
+    supply them they are the strongest available free-space evidence.
+    """
 
     origin: np.ndarray
     ray_directions: np.ndarray
     ranges: np.ndarray
+    miss_directions: np.ndarray = field(default_factory=lambda: np.zeros((0, 3)))
 
     @classmethod
     def from_points(cls, origin: np.ndarray, points: np.ndarray) -> SensorContext:
@@ -134,7 +143,31 @@ def _validate_sensor_context(context: SensorContext) -> SensorContext:
     norms = np.linalg.norm(directions, axis=1)
     if np.any(~np.isfinite(norms)) or np.any(norms <= 1e-12):
         raise ValueError("sensor_context.ray_directions must have non-zero finite norms")
-    return SensorContext(origin, directions / norms[:, None], ranges)
+    misses = np.asarray(context.miss_directions, dtype=np.float64)
+    if misses.size and (misses.ndim != 2 or misses.shape[1] != 3):
+        raise ValueError("sensor_context.miss_directions must have shape (M, 3)")
+    if misses.size and not np.all(np.isfinite(misses)):
+        raise ValueError("sensor_context.miss_directions must be finite")
+    return SensorContext(origin, directions / norms[:, None], ranges, misses)
+
+
+def _ray_box_interval(
+    origin_local: np.ndarray, dirs_local: np.ndarray, half: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Slab test of rays against an origin-centred axis-aligned box.
+
+    Returns ``(t_enter, t_exit, intersects)``. Rays parallel to a slab are
+    handled by IEEE infinities; the NaN from ``0 * inf`` is scrubbed.
+    """
+    with np.errstate(divide="ignore", invalid="ignore"):
+        inverse = 1.0 / dirs_local
+        t_low = (-half - origin_local) * inverse
+        t_high = (half - origin_local) * inverse
+    t_low = np.nan_to_num(t_low, nan=-np.inf)
+    t_high = np.nan_to_num(t_high, nan=np.inf)
+    t_enter = np.minimum(t_low, t_high).max(axis=1)
+    t_exit = np.maximum(t_low, t_high).min(axis=1)
+    return t_enter, t_exit, t_exit > np.maximum(t_enter, 0.0)
 
 
 def visibility_evidence(
@@ -143,16 +176,29 @@ def visibility_evidence(
     dims: tuple[float, float, float],
     tolerance: float = 0.06,
 ) -> tuple[int, int, int, int]:
-    """Return expected faces, covered faces, and rays violating visible faces.
+    """Return ``(expected, covered, violations, supported, incident)`` ray evidence.
 
-    Rays ending before a face are treated as occlusion and remain neutral. Faces
-    oriented away from the sensor are not expected and also remain neutral.
+    Face coverage is measured per visible face with a *generous* rectangle
+    (+tolerance), because a return near a face edge still supports that face.
+
+    Free-space violations are measured against the block *volume* shrunk by
+    tolerance, not against extended face planes. The plane formulation counted a
+    ray as violating whenever it crossed an enlarged face rectangle, which
+    included rays skimming past the true silhouette and terminating on the
+    ground metres behind -- so violations fired in the hundreds on perfectly
+    correct poses. Requiring the ray to traverse the whole shrunk volume, and to
+    measure a range beyond the exit point, makes a violation mean what its name
+    says: the beam passed through where the block is claimed to be.
+
+    Rays ending before the block are occlusion and stay neutral. Faces oriented
+    away from the sensor are not expected and also stay neutral.
     """
     context = _validate_sensor_context(context)
     origin_local = pose.rotation.T @ (context.origin - pose.position)
     dirs_local = context.ray_directions @ pose.rotation
     half = np.asarray(dims, dtype=np.float64) / 2.0
-    expected_faces = covered_faces = violations = supported_rays = 0
+
+    expected_faces = covered_faces = supported_rays = incident_rays = 0
     for axis in range(3):
         for sign in (-1.0, 1.0):
             face_coord = sign * half[axis]
@@ -165,21 +211,50 @@ def visibility_evidence(
             distance[valid] = (face_coord - origin_local[axis]) / denom[valid]
             valid &= distance > 0.0
             intersections = np.zeros_like(dirs_local)
-            intersections[valid] = (
-                origin_local + distance[valid, None] * dirs_local[valid]
-            )
+            intersections[valid] = origin_local + distance[valid, None] * dirs_local[valid]
             for other in range(3):
                 if other != axis:
                     valid &= np.abs(intersections[:, other]) <= half[other] + tolerance
             if not np.any(valid):
                 continue
-            delta = context.ranges[valid] - distance[valid]
-            supported = int(np.count_nonzero(np.abs(delta) <= tolerance))
+            incident_rays += int(np.count_nonzero(valid))
+            supported = int(
+                np.count_nonzero(np.abs(context.ranges[valid] - distance[valid]) <= tolerance)
+            )
             supported_rays += supported
             if supported:
                 covered_faces += 1
-            violations += int(np.count_nonzero(delta > tolerance))
-    return expected_faces, covered_faces, violations, supported_rays
+
+    shrunk = np.maximum(half - tolerance, 1e-3)
+    _, t_exit, intersects = _ray_box_interval(origin_local, dirs_local, shrunk)
+    violations = int(np.count_nonzero(intersects & (context.ranges > t_exit + tolerance)))
+    return expected_faces, covered_faces, violations, supported_rays, incident_rays
+
+
+def free_space_violations_from_misses(
+    pose: BlockPose,
+    origin: np.ndarray,
+    miss_directions: np.ndarray,
+    dims: tuple[float, float, float],
+    tolerance: float = 0.06,
+) -> int:
+    """Count no-return rays that pass through the hypothesised block volume.
+
+    A ray that reported no return travelled to (at least) the sensor's maximum
+    range through empty space, so any such ray crossing the block volume is
+    conclusive evidence against the hypothesis -- stronger than a terminating
+    ray, which could always be explained by a surface behind the block.
+    """
+    directions = np.asarray(miss_directions, dtype=np.float64)
+    if directions.ndim != 2 or directions.shape[1] != 3 or len(directions) == 0:
+        return 0
+    norms = np.linalg.norm(directions, axis=1)
+    directions = directions[norms > 1e-12] / norms[norms > 1e-12, None]
+    origin_local = pose.rotation.T @ (np.asarray(origin, dtype=np.float64) - pose.position)
+    dirs_local = directions @ pose.rotation
+    half = np.maximum(np.asarray(dims, dtype=np.float64) / 2.0 - tolerance, 1e-3)
+    _, _, intersects = _ray_box_interval(origin_local, dirs_local, half)
+    return int(np.count_nonzero(intersects))
 
 
 def _voxel_downsample(pts: np.ndarray, voxel_size: float) -> np.ndarray:
@@ -474,6 +549,36 @@ def _split_connected_region(cluster: np.ndarray, params: DetectionParams) -> lis
     return regions if len(regions) == count else [cluster]
 
 
+def _evidence_features(evidence: HypothesisEvidence) -> dict[str, float]:
+    """Normalized [0, 1] quality features. Shared by scoring and diagnostics."""
+    expected = evidence.expected_visible_faces
+    total_rays = evidence.supported_rays + evidence.free_space_violations
+    return {
+        "support": min(evidence.support_points / 400.0, 1.0),
+        "height_consistency": max(0.0, 1.0 - evidence.top_height_error_m / 0.2),
+        "visible_face_coverage": evidence.covered_visible_faces / expected if expected else 0.0,
+        "free_space_consistency": (
+            evidence.supported_rays / total_rays if total_rays else 0.0
+        ),
+        # What fraction of the beams aimed at this cuboid actually terminate on
+        # it. Distinguishes a well-placed hypothesis from a shifted one even when
+        # both have full face coverage and no free-space violations.
+        "surface_explained": (
+            evidence.supported_rays / evidence.incident_rays if evidence.incident_rays else 0.0
+        ),
+    }
+
+
+# Weights sum to 1.0, so score is bounded in [0, 1] and comparable across scenes.
+_SCORE_WEIGHTS = {
+    "support": 0.25,
+    "height_consistency": 0.15,
+    "visible_face_coverage": 0.20,
+    "free_space_consistency": 0.20,
+    "surface_explained": 0.20,
+}
+
+
 def _make_hypothesis(
     pose: BlockPose,
     top_centroid: np.ndarray,
@@ -486,26 +591,33 @@ def _make_hypothesis(
     top_height = float(ground.height(top_centroid))
     layer = max(round(top_height / params.block_dims[2]), 1)
     height_error = abs(top_height - layer * params.block_dims[2])
-    score = min(support_points / 500.0, 1.0) - 3.0 * height_error
-    expected = covered = violations = supported_rays = 0
+    expected = covered = violations = supported_rays = incident_rays = 0
     if sensor_context is not None:
-        expected, covered, violations, supported_rays = visibility_evidence(
+        expected, covered, violations, supported_rays, incident_rays = visibility_evidence(
             pose, sensor_context, params.block_dims
         )
-        score += 0.1 * covered + 0.01 * supported_rays - 0.02 * violations
-    return CuboidHypothesis(
-        pose,
-        HypothesisEvidence(
-            support_points,
-            height_error,
-            score,
-            expected,
-            covered,
-            violations,
-            supported_rays,
-            observed_geometry_faces,
-        ),
+        # No-return beams crossing the volume are conclusive counter-evidence.
+        violations += free_space_violations_from_misses(
+            pose, sensor_context.origin, sensor_context.miss_directions, params.block_dims
+        )
+    evidence = HypothesisEvidence(
+        support_points,
+        height_error,
+        0.0,
+        expected,
+        covered,
+        violations,
+        supported_rays,
+        observed_geometry_faces,
+        incident_rays,
     )
+    # Every term is normalized and weighted. The previous formulation summed raw
+    # ray counts (0.01 * supported_rays - 0.02 * violations), which dominated the
+    # semantic terms by an order of magnitude and made the score a proxy for
+    # proximity to the sensor: an identical block scored 8.4 near and 1.9 far.
+    features = _evidence_features(evidence)
+    score = sum(weight * features[name] for name, weight in _SCORE_WEIGHTS.items())
+    return CuboidHypothesis(pose, replace(evidence, score=score))
 
 
 def _select_hypotheses(hypotheses: list[CuboidHypothesis]) -> list[CuboidHypothesis]:
@@ -743,23 +855,18 @@ def _detect_blocks_impl(
 
 def _diagnostics(hypothesis: CuboidHypothesis) -> DetectionDiagnostics:
     evidence = hypothesis.evidence
-    expected = evidence.expected_visible_faces
-    covered = evidence.covered_visible_faces
-    observed_faces = max(covered, evidence.observed_geometry_faces)
-    if observed_faces >= 3 and evidence.free_space_violations == 0:
+    features = _evidence_features(evidence)
+    observed_faces = max(evidence.covered_visible_faces, evidence.observed_geometry_faces)
+    # A ratio, not an exact-zero test. Requiring free_space_violations == 0 made
+    # FULL unreachable while the violation count was buggy, and would stay
+    # brittle now that mixed pixels can put a stray point inside the volume.
+    clean = features["free_space_consistency"]
+    if observed_faces >= 3 and clean >= 0.98:
         observability = Observability.FULL
-    elif observed_faces >= 2:
+    elif observed_faces >= 2 and clean >= 0.90:
         observability = Observability.PARTIAL
     else:
         observability = Observability.LIMITED
-    features = {
-        "support": min(evidence.support_points / 500.0, 1.0),
-        "height_consistency": max(0.0, 1.0 - evidence.top_height_error_m / 0.2),
-        "visible_face_coverage": covered / expected if expected else 0.0,
-        "free_space_consistency": 1.0
-        - evidence.free_space_violations
-        / max(evidence.supported_rays + evidence.free_space_violations, 1),
-    }
     return DetectionDiagnostics(evidence, observability, features, None)
 
 
@@ -799,5 +906,6 @@ def detect_scene_sample(sample, params: DetectionParams | None = None) -> list[B
         np.asarray(sample.sensor_origin, dtype=np.float64),
         np.asarray(sample.ray_directions, dtype=np.float64),
         np.asarray(sample.ranges, dtype=np.float64),
+        np.asarray(getattr(sample, "miss_directions", np.zeros((0, 3))), dtype=np.float64),
     )
     return detect_blocks(sample.points, params, sensor_context=context)

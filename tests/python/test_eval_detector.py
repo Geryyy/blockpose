@@ -47,6 +47,10 @@ def test_metrics_report_diagnostics() -> None:
         "stack",
         "clutter",
         "hard_negative",
+        "standoff",
+        "uneven_ground",
+        "sensor_artifacts",
+        "measured_sensor",
     }
     assert set(metrics["diagnostics_stratified"]) == expected_families
     # Seamless touching blocks are not distinguishable from one elongated solid;

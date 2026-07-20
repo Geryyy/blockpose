@@ -125,7 +125,7 @@ def test_rich_sample_labels_and_legacy_unpacking() -> None:
     assert sample.face_ids.shape == (len(pts),)
     assert sample.ray_directions.shape == pts.shape
     assert np.any(sample.instance_ids == 0)
-    assert sample.manifest["generator"] == "blockpose.synth.v2"
+    assert sample.manifest["generator"] == "blockpose.synth.v3"
 
 
 def test_degradation_profile_is_deterministic_and_labeled() -> None:

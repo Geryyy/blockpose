@@ -263,12 +263,23 @@ def test_adversarial_offset_stack_has_no_cross_layer_pairing_bias() -> None:
 
 
 def _cuboid_ray_context():
-    origin = np.array([-5.0, 0.0, 3.0])
-    ys = np.linspace(-0.25, 0.25, 5)
-    zs = np.linspace(0.2, 0.85, 5)
-    near = np.array([[-0.3, y, z] for y in ys for z in zs])
-    top = np.array([[x, y, 0.9] for x in np.linspace(-0.25, 0.25, 5) for y in ys])
-    return SensorContext.from_points(origin, np.vstack([near, top]))
+    """Ray context for a single block, raycast so the background is consistent.
+
+    Built from the generator rather than hand-placed returns: a hand-built
+    context containing *only* rays that terminate on the true block has no
+    background, so a shifted hypothesis has nothing to contradict it and scores
+    identically to the true one. Ground returns beside and in front of the block
+    -- correctly shadowed where the block occludes them -- are what make a
+    displaced cuboid measurably worse.
+    """
+    sample = generate_scene(
+        [BlockSpec(0.0, 0.0)],
+        SynthParams(sensor_pos=(-5.0, 0.0, 3.0), range_noise_std=0.0, ang_res_deg=0.5),
+        np.random.default_rng(7),
+    )
+    return SensorContext(
+        sample.sensor_origin, sample.ray_directions, sample.ranges, sample.miss_directions
+    )
 
 
 def test_visibility_score_prefers_true_cuboid_and_wrong_height_loses() -> None:
@@ -292,7 +303,7 @@ def test_visibility_score_prefers_true_cuboid_and_wrong_height_loses() -> None:
 def test_hidden_faces_are_neutral_and_free_space_is_penalized() -> None:
     pose = _make_pose_for_selection((0.0, 0.0, 0.45))
     context = _cuboid_ray_context()
-    expected, covered, violations, supported = visibility_evidence(
+    expected, covered, violations, supported, incident = visibility_evidence(
         pose, context, (0.6, 0.6, 0.9)
     )
     assert expected == 2  # near side and top; back/bottom faces are hidden
@@ -301,10 +312,10 @@ def test_hidden_faces_are_neutral_and_free_space_is_penalized() -> None:
     assert supported > 0
 
     through = SensorContext(context.origin, context.ray_directions, context.ranges + 1.0)
-    _, _, through_violations, _ = visibility_evidence(pose, through, (0.6, 0.6, 0.9))
+    _, _, through_violations, _, _ = visibility_evidence(pose, through, (0.6, 0.6, 0.9))
     assert through_violations > 0
     occluded = SensorContext(context.origin, context.ray_directions, context.ranges - 0.5)
-    _, _, occluded_violations, _ = visibility_evidence(pose, occluded, (0.6, 0.6, 0.9))
+    _, _, occluded_violations, _, _ = visibility_evidence(pose, occluded, (0.6, 0.6, 0.9))
     assert occluded_violations == 0
 
 

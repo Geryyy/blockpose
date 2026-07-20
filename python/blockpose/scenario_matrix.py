@@ -11,7 +11,14 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from blockpose.synth import BlockSpec, ClutterParams, SceneSample, SynthParams, generate_scene
+from blockpose.synth import (
+    BlockSpec,
+    ClutterParams,
+    SceneSample,
+    SynthParams,
+    generate_scene,
+    seyond_measured,
+)
 
 
 @dataclass(frozen=True)
@@ -50,6 +57,17 @@ def scenario_registry() -> tuple[Scenario, ...]:
             "noise",
             (base,),
             SynthParams(range_noise_std=0.03, range_noise_slope=0.001),
+        ),
+        # Two dropout modes, because they fail differently. Random thinning
+        # degrades density uniformly; a contiguous stripe punches a structured
+        # gap that fragments a fixed-eps DBSCAN cluster into sub-threshold
+        # pieces. A single stripe scenario also makes the family metric bimodal
+        # (the band either lands on the target or does not), so both are kept.
+        Scenario(
+            "isolated_dropout_60pct_random",
+            "dropout",
+            (base,),
+            SynthParams(dropout=0.6),
         ),
         Scenario(
             "isolated_dropout_40pct",
@@ -132,6 +150,72 @@ def scenario_registry() -> tuple[Scenario, ...]:
                 near_field_offset=0.0,
                 near_field_dims=(0.6, 1.8, 0.9),
             ),
+        ),
+        # Standoff ladder. The real snapshots contain returns out to ~31 m, but
+        # the detector was only ever measured to ~13 m ("isolated_far"), which
+        # sits just inside the point-density cliff. These make the usable range
+        # envelope an explicit, tracked number instead of an unknown.
+        *(
+            Scenario(
+                f"standoff_{distance}m",
+                "standoff",
+                (BlockSpec(float(distance) - 5.0, 0.0, yaw_deg=41.0),),
+                SynthParams(
+                    sensor_pos=(-5.0, 0.0, 4.0),
+                    look_at=(float(distance) - 5.0, 0.0, 0.45),
+                ),
+            )
+            for distance in (10, 15, 20, 25)
+        ),
+        # Uneven ground. The detector fits a single RANSAC ground plane and
+        # removes everything within 0.15 m of it; a flat synthetic plane never
+        # tested that tolerance.
+        Scenario(
+            "sloped_ground_4deg",
+            "uneven_ground",
+            (BlockSpec(0.0, 0.0, yaw_deg=17.0),),
+            SynthParams(ground_slope_deg=4.0),
+        ),
+        Scenario(
+            "undulating_ground",
+            "uneven_ground",
+            tuple(
+                BlockSpec(0.0, y, yaw_deg=25.0 + 30.0 * i)
+                for i, y in enumerate((-1.3, 0.0, 1.3))
+            ),
+            SynthParams(az_fov_deg=100.0, ground_undulation=0.10, ground_roughness=0.015),
+        ),
+        Scenario(
+            "sloped_rough_ground",
+            "uneven_ground",
+            (BlockSpec(0.0, 0.0, yaw_deg=52.0, pitch_deg=2.5),),
+            SynthParams(ground_slope_deg=3.0, ground_undulation=0.06, ground_roughness=0.02),
+        ),
+        # Mixed pixels: the dominant real LiDAR artifact at depth edges.
+        Scenario(
+            "mixed_pixels",
+            "sensor_artifacts",
+            (BlockSpec(0.0, 0.0, yaw_deg=33.0),),
+            SynthParams(mixed_pixel_fraction=0.25),
+        ),
+        Scenario(
+            "mixed_pixels_and_noise",
+            "sensor_artifacts",
+            (BlockSpec(0.0, 0.0, yaw_deg=33.0),),
+            SynthParams(mixed_pixel_fraction=0.35, range_noise_std=0.02, dropout=0.2),
+        ),
+        # The measured sensor profile, as opposed to the conservative default.
+        Scenario(
+            "measured_profile_near",
+            "measured_sensor",
+            (BlockSpec(0.0, 0.0, yaw_deg=23.0),),
+            seyond_measured(),
+        ),
+        Scenario(
+            "measured_profile_far",
+            "measured_sensor",
+            (BlockSpec(15.0, 0.0, yaw_deg=61.0),),
+            seyond_measured(sensor_pos=(-5.0, 0.0, 4.0), look_at=(15.0, 0.0, 0.45)),
         ),
     )
 

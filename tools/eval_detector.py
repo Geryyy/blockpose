@@ -60,8 +60,14 @@ def build_suite(seed: int) -> tuple[list, list, list]:
     return gate_scenes, diag_scenes, empty_scenes
 
 
+# A block yielding fewer returns than this cannot produce a cluster (the
+# detector's cluster_min_size is 30) let alone a plane fit, so it is excluded
+# from the recall denominator and reported separately as `unobservable_gt`.
+MIN_OBSERVABLE_POINTS = 30
+
+
 def _aggregate(scenes: list, params: DetectionParams) -> dict:
-    total_gt = total_det = total_matched = 0
+    total_gt = total_det = total_matched = unobservable = 0
     t_errors: list[float] = []
     r_errors: list[float] = []
     precision_per_scene: list[float] = []
@@ -75,26 +81,40 @@ def _aggregate(scenes: list, params: DetectionParams) -> dict:
             else detect_blocks(pts, params)
         )
         res = evaluate(det, gt, max_match_dist=0.5)
-        total_gt += len(gt)
+        # Blocks that produced (almost) no returns are not detectable and must
+        # not be scored as misses; a random dropout stripe can erase a target
+        # outright, which otherwise turns the metric into a coin flip.
+        if hasattr(scene, "visible_point_counts"):
+            counts = scene.visible_point_counts()
+            observable = int(np.count_nonzero(counts >= MIN_OBSERVABLE_POINTS))
+        else:
+            observable = len(gt)
+        unobservable += len(gt) - observable
+        total_gt += observable
         total_det += len(det)
         total_matched += res.matched
         t_errors.extend(res.translation_errors_m)
         r_errors.extend(res.rotation_errors_deg)
         precision_per_scene.append(res.precision)
-        recall_per_scene.append(res.recall)
+        recall_per_scene.append(res.matched / observable if observable else 0.0)
         exact_counts += int(res.exact_count)
     def percentile(values: list[float], q: float) -> float | None:
         return float(np.percentile(values, q)) if values else None
 
+    # `None` where the metric is undefined, rather than 0.0. A hard-negative
+    # family has no ground truth and (correctly) no detections; reporting
+    # "recall 0.0, precision 0.0" made a clean pass look like a total failure.
+    # For those families `false_positives` carries the signal.
     return {
         "n_scenes": len(scenes),
         "total_gt": total_gt,
+        "unobservable_gt": unobservable,
         "total_detected": total_det,
         "total_matched": total_matched,
-        "recall": total_matched / total_gt if total_gt else 0.0,
-        "precision": total_matched / total_det if total_det else 0.0,
-        "macro_recall": float(np.mean(recall_per_scene)) if scenes else 0.0,
-        "macro_precision": float(np.mean(precision_per_scene)) if scenes else 0.0,
+        "recall": total_matched / total_gt if total_gt else None,
+        "precision": total_matched / total_det if total_det else None,
+        "macro_recall": float(np.mean(recall_per_scene)) if total_gt else None,
+        "macro_precision": float(np.mean(precision_per_scene)) if total_det else None,
         "exact_count_accuracy": exact_counts / len(scenes) if scenes else 0.0,
         "translation_mean_m": float(np.mean(t_errors)) if t_errors else None,
         "translation_p50_m": percentile(t_errors, 50),
@@ -135,13 +155,15 @@ def check_thresholds(metrics: dict, thresholds: dict) -> list[str]:
         if cond:
             failures.append(msg)
 
+    # The gate suite always contains ground truth, so a `None` here means the
+    # detector returned nothing at all -- a failure, not an undefined metric.
     fail_if(
-        metrics["recall"] < thresholds["recall_min"],
-        f"recall {metrics['recall']:.3f} < {thresholds['recall_min']}",
+        metrics["recall"] is None or metrics["recall"] < thresholds["recall_min"],
+        f"recall {metrics['recall']} < {thresholds['recall_min']}",
     )
     fail_if(
-        metrics["precision"] < thresholds["precision_min"],
-        f"precision {metrics['precision']:.3f} < {thresholds['precision_min']}",
+        metrics["precision"] is None or metrics["precision"] < thresholds["precision_min"],
+        f"precision {metrics['precision']} < {thresholds['precision_min']}",
     )
     fail_if(
         metrics["translation_p95_m"] is None

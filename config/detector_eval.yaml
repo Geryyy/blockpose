@@ -1,13 +1,29 @@
 # Regression thresholds for the synthetic detector eval (tools/eval_detector.py).
 #
-# These gate the Phase-A core: isolated, well-observed blocks. Multi-block
-# occlusion recall is reported under `diagnostics_multiblock` (NOT gated yet) and
-# becomes a Phase-C gate later.
+# These gate the Phase-A core: isolated, well-observed blocks. Everything else
+# (multi-block occlusion, stacks, standoff, uneven ground, sensor artifacts) is
+# reported under `diagnostics_*` and is NOT gated yet.
 #
 # Ratchet these DOWN as the detector improves (plan v4 §11: tighten, never loosen
-# without a human-visible diff). translation_p95_m is currently limited by the
-# plane-fit MVP's single-face-centroid bias; Phase B (ICP + known-dimension center
-# recovery) is expected to pull it to a few cm, at which point it tightens.
+# without a human-visible diff).
+#
+# SENSOR PARAMETER PROVENANCE
+# The gate suite runs at range_noise_std = 0.01 m and ang_res_deg = 0.25. Both
+# are now traceable to the real snapshots via tools/measure_sensor_model.py:
+#   * measured range noise is ~0.005 m near-field, ~0.010-0.015 m at 10-15 m,
+#     with NO significant incidence-angle dependence. The gate's 0.01 m is
+#     therefore ~2x pessimistic in the near field -- deliberately conservative.
+#   * measured areal-equivalent angular pitch is 0.239 deg. The gate's 0.25 deg
+#     is within 5%, so gate point density is realistic, not optimistic.
+#     (The 0.133 deg nearest-neighbour gap is WITHIN-scanline spacing and must
+#     not be used here; it overstates density on a face by ~3.5x.)
+#
+# KNOWN MARGIN: symmetry-aware yaw is the fragile quantity. It sits near 0.4 deg
+# at the gate's noise level but degrades sharply beyond ~0.015 m range noise
+# (~3.8 deg at 0.02 m), because yaw comes from a single RANSAC side plane. The
+# 2.0 deg threshold therefore has roughly a 2x noise margin, not 10x. Tightening
+# it requires a better yaw estimator (see docs/detector-plan.md Phase B), not a
+# threshold change.
 
 thresholds:
   recall_min: 0.95

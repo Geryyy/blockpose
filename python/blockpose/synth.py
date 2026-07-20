@@ -24,6 +24,44 @@ from blockpose.pose import BlockPose
 # local Z, the 0.6 x 0.6 cross-section spans local X/Y.
 BLOCK_DIMS = (0.6, 0.6, 0.9)
 
+# ---------------------------------------------------------------------------
+# Measured sensor characteristics
+#
+# Derived from the three Seyond frames in data/registration_snapshots/ by
+# fitting local planes (radius 0.15 m, planarity ratio < 0.25) and taking the
+# MAD-sigma of point-to-plane residuals, debiased for plane-fit absorption by
+# sqrt(k/(k-3)).  Reproduce with tools/measure_sensor_model.py.
+#
+#   range noise      ~0.005 m for r < 10 m, rising to ~0.015 m at 10-15 m.
+#                    No significant incidence-angle dependence was found
+#                    (0.42-0.55 cm flat from 26 to 72 deg off-normal), so the
+#                    generator deliberately models range noise as isotropic.
+#   angular sampling TWO different numbers, and the distinction matters:
+#                      * nearest-neighbour gap p50 = 0.133 deg -- the spacing
+#                        WITHIN a scan line.
+#                      * areal-equivalent pitch  = 0.239 deg -- sqrt(1/density)
+#                        over the covered solid angle (17.5 pts/deg^2).
+#                    The pattern is anisotropic (dense along scan lines, sparse
+#                    across them), so the NN gap badly overestimates how many
+#                    points actually land on a given face.  The areal figure is
+#                    the one that governs points-on-a-block, so it is what the
+#                    isotropic ray grid must be matched to.  The elevation
+#                    histogram is fully continuous (1200/1200 bins occupied)
+#                    => non-repetitive solid-state pattern, not spinning rings.
+#   field of view    ~118 deg azimuth x ~72 deg elevation (asymmetric in
+#                    elevation: -56.6 to +15.3 deg, i.e. mounted high, looking down).
+#
+# NOTE: the SynthParams default of 0.25 deg is within 5% of the measured areal
+# pitch, so the default suite's point density is realistic (very slightly
+# conservative) rather than optimistic. The default range noise of 0.01 m is
+# about 2x the measured near-field sigma, i.e. deliberately pessimistic.
+MEASURED_ANG_RES_DEG = 0.239
+MEASURED_NN_GAP_DEG = 0.133  # within-scanline only; NOT the areal pitch
+MEASURED_RANGE_NOISE_STD = 0.005
+MEASURED_RANGE_NOISE_SLOPE = 0.0007
+MEASURED_AZ_FOV_DEG = 118.0
+MEASURED_EL_FOV_DEG = 72.0
+
 
 @dataclass
 class BlockSpec:
@@ -54,9 +92,38 @@ class SynthParams:
     stripe_dropout: float = 0.0  # fraction of azimuth columns removed contiguously
     outlier_fraction: float = 0.0  # random returns relative to retained hit count
     outlier_radius: float = 0.5  # maximum displacement of an outlier (m)
+    # Mixed pixels: the dominant real LiDAR artifact. A beam straddling a depth
+    # discontinuity returns a range *between* foreground and background, placing
+    # the point in empty space along the ray. Unlike `outlier_fraction` (which
+    # perturbs points isotropically off real surfaces) these are physical.
+    mixed_pixel_fraction: float = 0.0  # fraction of edge rays returning a blended range
+    mixed_pixel_edge_thresh: float = 0.3  # range step (m) that counts as an edge
     ground: bool = True
     ground_size: float = 40.0
+    # Uneven ground. `ground_slope_deg` tilts the whole plane; `ground_undulation`
+    # is the amplitude (m) of smooth metre-scale waviness; `ground_roughness` is
+    # per-vertex gravel-scale noise (m). All zero => the legacy flat plane.
+    ground_slope_deg: float = 0.0
+    ground_undulation: float = 0.0
+    ground_roughness: float = 0.0
+    ground_cell: float = 0.5  # heightfield triangle size (m)
     dims: tuple[float, float, float] = BLOCK_DIMS
+
+
+def seyond_measured(**overrides) -> SynthParams:
+    """SynthParams matching the measured Seyond snapshots (see MEASURED_* above).
+
+    This is the *realistic* profile. The `SynthParams()` defaults stay coarser and
+    noisier on purpose, so the regression gate measures a conservative bound.
+    """
+    base = {
+        "ang_res_deg": MEASURED_ANG_RES_DEG,
+        "range_noise_std": MEASURED_RANGE_NOISE_STD,
+        "range_noise_slope": MEASURED_RANGE_NOISE_SLOPE,
+        "az_fov_deg": MEASURED_AZ_FOV_DEG,
+        "el_fov_deg": MEASURED_EL_FOV_DEG,
+    }
+    return SynthParams(**{**base, **overrides})
 
 
 @dataclass
@@ -98,7 +165,27 @@ class SceneSample:
     ranges: np.ndarray
     ray_directions: np.ndarray
     sensor_origin: np.ndarray
+    # Directions of rays that hit nothing. These are the strongest possible
+    # free-space evidence (the beam provably passed through empty space), so
+    # they are retained rather than discarded with the miss mask.
+    miss_directions: np.ndarray = field(default_factory=lambda: np.zeros((0, 3)))
     manifest: dict = field(default_factory=dict)
+
+    def visible_point_counts(self) -> np.ndarray:
+        """Retained returns per ground-truth block, in `ground_truth` order.
+
+        Degradations (stripe dropout, occlusion, standoff) can leave a block with
+        no returns at all. Such a block is not a detector failure -- there is
+        nothing in the cloud to detect -- so evaluation must be able to tell
+        "missed it" apart from "it was never observed".
+        """
+        counts = np.zeros(len(self.ground_truth), dtype=np.int64)
+        if len(self.instance_ids):
+            observed, totals = np.unique(
+                self.instance_ids[self.instance_ids >= 0], return_counts=True
+            )
+            counts[observed] = totals
+        return counts
 
     def __iter__(self) -> Iterator:
         yield self.points
@@ -213,6 +300,72 @@ def _build_clutter(
     return meshes
 
 
+class GroundField:
+    """Deterministic ground height field: tilt + smooth undulation + gravel noise.
+
+    A flat field (all amplitudes zero) reproduces the legacy z=0 plane exactly,
+    so existing scenes are unaffected.
+    """
+
+    def __init__(self, params: SynthParams, rng: np.random.Generator):
+        self.slope = np.tan(np.radians(params.ground_slope_deg))
+        self.undulation = float(params.ground_undulation)
+        self.roughness = float(params.ground_roughness)
+        direction = float(rng.uniform(0.0, 2.0 * np.pi))
+        self.slope_dir = np.array([np.cos(direction), np.sin(direction)])
+        # Three incommensurate sinusoids give metre-scale waviness without
+        # introducing a periodic structure the detector could latch onto.
+        self.waves = [
+            (
+                float(rng.uniform(0.0, 2.0 * np.pi)),
+                float(rng.uniform(0.0, 2.0 * np.pi)),
+                wavelength,
+            )
+            for wavelength in (7.3, 3.1, 1.7)
+        ]
+        self.seed = int(rng.integers(0, 2**31 - 1))
+
+    @property
+    def is_flat(self) -> bool:
+        return self.slope == 0.0 and self.undulation == 0.0 and self.roughness == 0.0
+
+    def height(self, x, y) -> np.ndarray:
+        """Ground Z at (x, y). Excludes gravel-scale roughness, which is per-vertex."""
+        x = np.asarray(x, dtype=np.float64)
+        y = np.asarray(y, dtype=np.float64)
+        z = self.slope * (x * self.slope_dir[0] + y * self.slope_dir[1])
+        for index, (phase_x, phase_y, wavelength) in enumerate(self.waves):
+            k = 2.0 * np.pi / wavelength
+            amplitude = self.undulation / (index + 1)
+            z = z + amplitude * np.sin(k * x + phase_x) * np.cos(k * y + phase_y)
+        return z
+
+    def mesh(self, center_xy: tuple[float, float], size: float):
+        """Triangulated heightfield covering `size` x `size` around `center_xy`."""
+        cx, cy = center_xy
+        if self.is_flat:
+            ground = o3d.geometry.TriangleMesh.create_box(size, size, 0.02)
+            ground.translate([cx - size / 2.0, cy - size / 2.0, -0.02])
+            return ground
+        n = max(int(round(size / 0.5)), 2)
+        axis = np.linspace(-size / 2.0, size / 2.0, n + 1)
+        gx, gy = np.meshgrid(axis + cx, axis + cy, indexing="ij")
+        gz = self.height(gx, gy)
+        if self.roughness > 0.0:
+            local = np.random.default_rng(self.seed)
+            gz = gz + local.normal(0.0, self.roughness, size=gz.shape)
+        vertices = np.column_stack([gx.ravel(), gy.ravel(), gz.ravel()])
+        idx = np.arange((n + 1) * (n + 1)).reshape(n + 1, n + 1)
+        a, b = idx[:-1, :-1].ravel(), idx[1:, :-1].ravel()
+        c, d = idx[1:, 1:].ravel(), idx[:-1, 1:].ravel()
+        triangles = np.vstack([np.column_stack([a, b, c]), np.column_stack([a, c, d])])
+        mesh = o3d.geometry.TriangleMesh(
+            o3d.utility.Vector3dVector(vertices),
+            o3d.utility.Vector3iVector(triangles.astype(np.int32)),
+        )
+        return mesh
+
+
 def _resting_center_z(R: np.ndarray, dims: tuple[float, float, float]) -> float:
     """Center Z that places the lowest rotated cuboid corner on Z=0."""
     half = np.asarray(dims, dtype=np.float64) / 2.0
@@ -266,10 +419,22 @@ def _validate_params(params: SynthParams) -> np.ndarray:
         value = float(getattr(params, name))
         if not np.isfinite(value) or value < 0.0:
             raise ValueError(f"{name} must be non-negative and finite, got {value}")
-    for name in ("dropout", "stripe_dropout", "outlier_fraction"):
+    for name in ("dropout", "stripe_dropout", "outlier_fraction", "mixed_pixel_fraction"):
         value = float(getattr(params, name))
         if not np.isfinite(value) or not 0.0 <= value <= 1.0:
             raise ValueError(f"{name} must be finite and in [0, 1], got {value}")
+    for name in ("ground_undulation", "ground_roughness"):
+        value = float(getattr(params, name))
+        if not np.isfinite(value) or value < 0.0:
+            raise ValueError(f"{name} must be non-negative and finite, got {value}")
+    if not np.isfinite(params.mixed_pixel_edge_thresh) or params.mixed_pixel_edge_thresh <= 0.0:
+        raise ValueError(
+            "mixed_pixel_edge_thresh must be positive and finite, "
+            f"got {params.mixed_pixel_edge_thresh}"
+        )
+    slope = float(params.ground_slope_deg)
+    if not np.isfinite(slope) or not -45.0 < slope < 45.0:
+        raise ValueError(f"ground_slope_deg must be finite and within +/-45, got {slope}")
     if not np.isfinite(params.outlier_radius) or params.outlier_radius < 0.05:
         raise ValueError(
             "outlier_radius must be finite and at least 0.05 m, "
@@ -329,12 +494,19 @@ def generate_scene(
     cx = float(np.mean([s.x for s in specs])) if specs else 0.0
     cy = float(np.mean([s.y for s in specs])) if specs else 0.0
 
+    ground_field = GroundField(params, rng)
+
     gt: list[BlockPose] = []
     scene = o3d.t.geometry.RaycastingScene()
     block_geometry_ids: list[int] = []
     for spec in specs:
         R = _rotation(spec.yaw_deg, spec.pitch_deg, spec.roll_deg)
-        z = spec.z if spec.z is not None else _resting_center_z(R, spec.dims)
+        if spec.z is not None:
+            z = spec.z
+        else:
+            # Rest the block on the local ground height so uneven terrain does
+            # not leave blocks floating or buried.
+            z = _resting_center_z(R, spec.dims) + float(ground_field.height(spec.x, spec.y))
         center = np.array([spec.x, spec.y, z], dtype=np.float64)
         block_geometry_ids.append(scene.add_triangles(
             o3d.t.geometry.TriangleMesh.from_legacy(_box_mesh(center, R, spec.dims))
@@ -342,10 +514,11 @@ def generate_scene(
         gt.append(BlockPose(position=center, rotation=R, confidence=1.0, source="synthetic"))
 
     if params.ground:
-        half = params.ground_size / 2.0
-        ground = o3d.geometry.TriangleMesh.create_box(params.ground_size, params.ground_size, 0.02)
-        ground.translate([cx - half, cy - half, -0.02])
-        scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(ground))
+        scene.add_triangles(
+            o3d.t.geometry.TriangleMesh.from_legacy(
+                ground_field.mesh((cx, cy), params.ground_size)
+            )
+        )
 
     if clutter is not None:
         for mesh in _build_clutter(clutter, (cx, cy), rng):
@@ -370,15 +543,48 @@ def generate_scene(
         np.hstack([origins, dirs]).astype(np.float32), dtype=o3d.core.Dtype.Float32
     )
     ans = scene.cast_rays(rays)
-    t_hit = ans["t_hit"].numpy()
-    hit = np.isfinite(t_hit)
+    t_hit = ans["t_hit"].numpy().astype(np.float64)
+    n_az = max(int(params.az_fov_deg / params.ang_res_deg), 1)
 
+    # Mixed pixels: a beam straddling a depth discontinuity returns a range
+    # blended between foreground and background, landing in empty space.
+    mixed_mask = np.zeros(len(t_hit), dtype=bool)
+    if params.mixed_pixel_fraction > 0.0 and len(t_hit) % n_az == 0:
+        grid = t_hit.reshape(-1, n_az).copy()
+        mixed_grid = mixed_mask.reshape(-1, n_az).copy()
+        finite_grid = np.isfinite(grid)
+        pair_ok = finite_grid[:, :-1] & finite_grid[:, 1:]
+        # Mask before subtracting: inf - inf would produce a NaN warning.
+        step = np.abs(
+            np.where(pair_ok, grid[:, 1:], 0.0) - np.where(pair_ok, grid[:, :-1], 0.0)
+        )
+        rows, cols = np.nonzero(pair_ok & (step > params.mixed_pixel_edge_thresh))
+        if len(rows):
+            chosen = rng.random(len(rows)) < params.mixed_pixel_fraction
+            rows, cols = rows[chosen], cols[chosen]
+        if len(rows):
+            left, right = grid[rows, cols], grid[rows, cols + 1]
+            near, far = np.minimum(left, right), np.maximum(left, right)
+            blended = near + rng.uniform(0.25, 0.75, size=len(rows)) * (far - near)
+            # The clipped return is reported on the foreground ray.
+            target = np.where(left <= right, cols, cols + 1)
+            grid[rows, target] = blended
+            mixed_grid[rows, target] = True
+        t_hit = grid.reshape(-1)
+        mixed_mask = mixed_grid.reshape(-1)
+
+    finite = np.isfinite(t_hit)
+    active = np.ones(len(dirs), dtype=bool)
     if params.stripe_dropout > 0.0:
-        n_az = max(int(params.az_fov_deg / params.ang_res_deg), 1)
         width = min(max(int(round(n_az * params.stripe_dropout)), 1), n_az)
         start = int(rng.integers(0, n_az - width + 1))
         columns = np.arange(len(dirs)) % n_az
-        hit &= (columns < start) | (columns >= start + width)
+        active &= (columns < start) | (columns >= start + width)
+
+    hit = finite & active
+    # Rays that hit nothing are real observations of empty space, not absent
+    # data; keep them so the detector can use them as free-space evidence.
+    miss_directions = dirs[active & ~finite]
 
     t = t_hit[hit]
     d = dirs[hit]
@@ -388,6 +594,9 @@ def generate_scene(
     for instance_id, geometry_id in enumerate(block_geometry_ids):
         instance_ids[geometry_ids == geometry_id] = instance_id
     face_ids = np.where(instance_ids >= 0, primitive_ids // 2, -1)
+    # A mixed pixel lies off every real surface, so it carries no instance label.
+    instance_ids[mixed_mask[hit]] = -1
+    face_ids[mixed_mask[hit]] = -1
     if params.range_noise_std > 0.0 or params.range_noise_slope > 0.0:
         std = params.range_noise_std + params.range_noise_slope * np.maximum(t, 0.0)
         t = t + rng.normal(0.0, std, size=t.shape)
@@ -419,7 +628,7 @@ def generate_scene(
         face_ids = np.concatenate([face_ids, np.full(count, -1, dtype=np.int64)])
 
     manifest = {
-        "generator": "blockpose.synth.v2",
+        "generator": "blockpose.synth.v3",
         "params": asdict(params),
         "blocks": [asdict(spec) for spec in specs],
         "clutter": asdict(clutter) if clutter is not None else None,
@@ -432,6 +641,7 @@ def generate_scene(
         ranges=t.astype(np.float64),
         ray_directions=d.astype(np.float64),
         sensor_origin=sensor_pos,
+        miss_directions=miss_directions.astype(np.float64),
         manifest=manifest,
     )
 
