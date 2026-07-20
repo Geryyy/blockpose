@@ -7,13 +7,17 @@ than from invented layouts keeps the benchmark honest about the target task.
 Two things in that file contradict assumptions the rest of this package grew up
 with, and both matter:
 
-1. **Blocks are laid down, not stood up.** `block_size` is ``[0.9, 0.6, 0.6]``
-   and course centres sit at z = 0.3 with a 0.6 m rise between courses, so the
-   0.9 m long axis is HORIZONTAL. `docs/detector-plan.md` described the long axis
-   as roughly vertical. Both occur: `basic_pick_and_place` places a block at
-   z = 0.45, which is a block standing on its 0.6 x 0.6 end. So the detector has
-   to handle both orientations, and they have *different symmetry groups* --
-   see `pose.symmetry_equivalents`.
+1. **Blocks are laid down.** `block_size` is ``[0.9, 0.6, 0.6]`` and course
+   centres sit at z = 0.3 with a 0.6 m rise between courses, so the 0.9 m long
+   axis is HORIZONTAL. `docs/detector-plan.md` used to describe the long axis as
+   roughly vertical, which was wrong for the target task.
+
+   `basic_pick_and_place` places its block at z = 0.45 rather than 0.3. That is
+   **not** an upright block: it is the same laid block with 0.15 m of clearance,
+   because the real ground is not at z = 0 and the terrain is uneven. Plan
+   heights therefore carry a terrain allowance and are NOT exact multiples of the
+   block height -- which is an assumption `detection._make_hypothesis` makes when
+   it scores `height_consistency` against `layer * dims[2]`.
 
 2. **Courses are not flush.** Neighbouring centres are 0.92 m apart for a 0.9 m
    block, i.e. a **2 cm gap**, and the second course is offset by 0.30 m rather

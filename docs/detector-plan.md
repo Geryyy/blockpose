@@ -8,13 +8,17 @@ long-term architectural target.
 
 ## Problem shape
 
-- Blocks are exact 0.6 × 0.6 × 0.9 m concrete boxes. **Both orientations occur**
-  and `config/wall_plans.yaml` is the authority: staging/pick-and-place stands a
-  block upright on its 0.6 × 0.6 end (centre z = 0.45, dims `(0.6, 0.6, 0.9)`),
-  while every wall course lays it down with the 0.9 m axis **horizontal**
-  (centre z = 0.3, 0.6 m course rise, dims `(0.9, 0.6, 0.6)`). An earlier version
-  of this plan claimed the long axis was always roughly vertical; that was wrong
-  for the target task.
+- Blocks are exact 0.6 × 0.6 × 0.9 m concrete boxes. `config/wall_plans.yaml` is
+  the authority and **every plan block is laid down** with the 0.9 m axis
+  horizontal, dims `(0.9, 0.6, 0.6)`, course centres at z = 0.3 with a 0.6 m
+  rise. An earlier version of this plan claimed the long axis was roughly
+  vertical; that was wrong for the target task. Blocks may still be *staged*
+  upright, so the detector must cope with both, but the wall itself is laid.
+- **Plan heights include a terrain allowance.** `basic_pick_and_place` sits at
+  z = 0.45, which is the same laid block with 0.15 m of clearance because the
+  real ground is not at z = 0 and the terrain is uneven. Block heights are
+  therefore **not** exact multiples of the block height above a single plane —
+  an assumption the detector currently makes.
 - They can **tilt a few degrees** in pitch/roll (uneven ground) → estimate full
   **6-DOF** pose; gravity is a strong *prior / initialization*, not a hard
   constraint.

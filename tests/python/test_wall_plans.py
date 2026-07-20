@@ -34,14 +34,18 @@ def test_course_heights_match_a_0_6_m_vertical_extent() -> None:
     assert heights == [0.3, 0.9]  # first course, then a 0.6 m rise
 
 
-def test_basic_pick_and_place_is_the_upright_exception() -> None:
-    """z = 0.45 only makes sense for a block standing on its 0.6 x 0.6 end.
+def test_basic_pick_and_place_carries_a_terrain_allowance() -> None:
+    """z = 0.45 is a laid block with 0.15 m of clearance, not an upright block.
 
-    Documented rather than normalised: the detector has to cope with both
-    orientations, and they have different symmetry groups.
+    The real ground is not at z = 0 and the terrain is uneven, so plan heights
+    include an allowance. Plan heights are therefore NOT exact multiples of the
+    block height, which `detection._make_hypothesis` assumes when it scores
+    `height_consistency` against `layer * dims[2]`.
     """
     (spec,) = PLANS["basic_pick_and_place"].specs
     assert spec.z == pytest.approx(0.45)
+    resting = PLANS["example_wall"].block_size[2] / 2.0
+    assert spec.z - resting == pytest.approx(0.15)
 
 
 def test_relative_placement_resolves_against_the_referenced_block() -> None:
