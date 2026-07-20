@@ -64,7 +64,7 @@ for path in (REPO_ROOT / "python", REPO_ROOT / "tools"):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from blockpose.detection import DetectionParams, detect_blocks
+from blockpose.detection import DetectionParams, detect_scene_sample
 from blockpose.evaluate import evaluate
 from blockpose.scenario_matrix import generate_scenario_matrix
 from blockpose.synth import BLOCK_DIMS
@@ -89,7 +89,7 @@ def box_edges(pose, dims=BLOCK_DIMS):
 
 def overlay(name, title):
     sample = CASES[name]
-    detections = detect_blocks(sample.points, DetectionParams())
+    detections = detect_scene_sample(sample, DetectionParams())
     result = evaluate(detections, sample.ground_truth)
     fig = plt.figure(figsize=(8, 5))
     ax = fig.add_subplot(111, projection="3d")
@@ -157,7 +157,8 @@ inventing three from outer extent alone.
 **Two-block stack:** only the observable top block is recovered. The buried interface supplies no
 surface evidence, so the lower pose must not be invented from the synthetic layout.
 
-**Far range:** the sparse far-range case remains below the detector's plane-support requirements.
+**Far range:** optional sensor context now scales geometric support thresholds by expected
+range-dependent angular density, recovering this sparse case without location-specific tuning.
 """
         ),
         code(
@@ -165,7 +166,7 @@ surface evidence, so the lower pose must not be invented from the synthetic layo
 touching_det, touching_eval = overlay("touching_row", "Failure: seamless touching row")
 negative_det, negative_eval = overlay("hard_negative_only", "Improved: hard negatives rejected")
 stack_det, stack_eval = overlay("two_stack", "Failure: buried lower stack block")
-far_det, far_eval = overlay("isolated_far", "Failure: sparse far-range block")
+far_det, far_eval = overlay("isolated_far", "Improved: sparse far-range block")
 """
         ),
         markdown(
@@ -185,7 +186,7 @@ validated cloud + sensor origin
   → pose + observability + calibrated confidence + diagnostics
 ```
 
-The next acceptance targets are long-range support and richer plane/edge evidence. Stacked blocks
+The next acceptance targets are richer face coverage and calibrated evidence. Stacked blocks
 with buried interfaces must be reported as unobservable unless visible geometry supplies enough
 evidence; layout priors must not masquerade as measurements.
 """

@@ -14,7 +14,7 @@ def test_showcase_is_executed_and_documents_honest_baseline() -> None:
     assert "evaluation-only labels" in text
     assert "diagnostics_stratified" in text
     assert "Failure: buried lower stack block" in text
-    assert "Failure: sparse far-range block" in text
+    assert "Improved: sparse far-range block" in text
     assert "Failure: seamless touching row" in text
     assert "CuboidHypothesis" in text
     code_cells = [cell for cell in notebook["cells"] if cell["cell_type"] == "code"]

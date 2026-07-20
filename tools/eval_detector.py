@@ -24,7 +24,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "python"))
 
-from blockpose.detection import DetectionParams, detect_blocks  # noqa: E402
+from blockpose.detection import DetectionParams, detect_blocks, detect_scene_sample  # noqa: E402
 from blockpose.evaluate import evaluate  # noqa: E402
 from blockpose.scenario_matrix import generate_scenario_matrix  # noqa: E402
 from blockpose.synth import BlockSpec, SynthParams, generate_scene, random_scene  # noqa: E402
@@ -67,8 +67,13 @@ def _aggregate(scenes: list, params: DetectionParams) -> dict:
     precision_per_scene: list[float] = []
     recall_per_scene: list[float] = []
     exact_counts = 0
-    for pts, gt in scenes:
-        det = detect_blocks(pts, params)
+    for scene in scenes:
+        pts, gt = scene
+        det = (
+            detect_scene_sample(scene, params)
+            if hasattr(scene, "sensor_origin")
+            else detect_blocks(pts, params)
+        )
         res = evaluate(det, gt, max_match_dist=0.5)
         total_gt += len(gt)
         total_det += len(det)
@@ -109,7 +114,7 @@ def run_suite(seed: int) -> dict:
 
     gate = _aggregate(gate_scenes, params)
     diagnostics = _aggregate(diag_scenes, params)
-    false_positives_empty = sum(len(detect_blocks(pts, params)) for pts, _ in empty_scenes)
+    false_positives_empty = sum(len(detect_scene_sample(scene, params)) for scene in empty_scenes)
 
     metrics = {"seed": seed, **gate, "false_positives_empty": int(false_positives_empty)}
     metrics["diagnostics_multiblock"] = diagnostics

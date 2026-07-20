@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import open3d as o3d
@@ -64,12 +64,100 @@ class HypothesisEvidence:
     support_points: int
     top_height_error_m: float
     score: float
+    expected_visible_faces: int = 0
+    covered_visible_faces: int = 0
+    free_space_violations: int = 0
+    supported_rays: int = 0
 
 
 @dataclass(frozen=True)
 class CuboidHypothesis:
     pose: BlockPose
     evidence: HypothesisEvidence
+
+
+@dataclass(frozen=True)
+class SensorContext:
+    """Optional ray evidence in the same world frame as the input cloud."""
+
+    origin: np.ndarray
+    ray_directions: np.ndarray
+    ranges: np.ndarray
+
+    @classmethod
+    def from_points(cls, origin: np.ndarray, points: np.ndarray) -> SensorContext:
+        origin = np.asarray(origin, dtype=np.float64)
+        vectors = np.asarray(points, dtype=np.float64) - origin
+        ranges = np.linalg.norm(vectors, axis=1)
+        valid = ranges > 1e-9
+        return cls(origin, vectors[valid] / ranges[valid, None], ranges[valid])
+
+
+def _validate_sensor_context(context: SensorContext) -> SensorContext:
+    origin = np.asarray(context.origin, dtype=np.float64)
+    directions = np.asarray(context.ray_directions, dtype=np.float64)
+    ranges = np.asarray(context.ranges, dtype=np.float64)
+    if origin.shape != (3,) or not np.all(np.isfinite(origin)):
+        raise ValueError("sensor_context.origin must have shape (3,) with finite coordinates")
+    if directions.ndim != 2 or directions.shape[1] != 3:
+        raise ValueError("sensor_context.ray_directions must have shape (N, 3)")
+    if ranges.ndim != 1:
+        raise ValueError("sensor_context.ranges must have shape (N,)")
+    if len(directions) != len(ranges):
+        raise ValueError("sensor_context directions and ranges must have the same length")
+    if not np.all(np.isfinite(directions)):
+        raise ValueError("sensor_context.ray_directions must be finite")
+    if not np.all(np.isfinite(ranges)) or np.any(ranges < 0.0):
+        raise ValueError("sensor_context.ranges must be finite and non-negative")
+    norms = np.linalg.norm(directions, axis=1)
+    if np.any(~np.isfinite(norms)) or np.any(norms <= 1e-12):
+        raise ValueError("sensor_context.ray_directions must have non-zero finite norms")
+    return SensorContext(origin, directions / norms[:, None], ranges)
+
+
+def visibility_evidence(
+    pose: BlockPose,
+    context: SensorContext,
+    dims: tuple[float, float, float],
+    tolerance: float = 0.06,
+) -> tuple[int, int, int, int]:
+    """Return expected faces, covered faces, and rays violating visible faces.
+
+    Rays ending before a face are treated as occlusion and remain neutral. Faces
+    oriented away from the sensor are not expected and also remain neutral.
+    """
+    context = _validate_sensor_context(context)
+    origin_local = pose.rotation.T @ (context.origin - pose.position)
+    dirs_local = context.ray_directions @ pose.rotation
+    half = np.asarray(dims, dtype=np.float64) / 2.0
+    expected_faces = covered_faces = violations = supported_rays = 0
+    for axis in range(3):
+        for sign in (-1.0, 1.0):
+            face_coord = sign * half[axis]
+            if sign * (origin_local[axis] - face_coord) <= 0.0:
+                continue
+            expected_faces += 1
+            denom = dirs_local[:, axis]
+            valid = np.abs(denom) > 1e-9
+            distance = np.zeros(len(denom), dtype=np.float64)
+            distance[valid] = (face_coord - origin_local[axis]) / denom[valid]
+            valid &= distance > 0.0
+            intersections = np.zeros_like(dirs_local)
+            intersections[valid] = (
+                origin_local + distance[valid, None] * dirs_local[valid]
+            )
+            for other in range(3):
+                if other != axis:
+                    valid &= np.abs(intersections[:, other]) <= half[other] + tolerance
+            if not np.any(valid):
+                continue
+            delta = context.ranges[valid] - distance[valid]
+            supported = int(np.count_nonzero(np.abs(delta) <= tolerance))
+            supported_rays += supported
+            if supported:
+                covered_faces += 1
+            violations += int(np.count_nonzero(delta > tolerance))
+    return expected_faces, covered_faces, violations, supported_rays
 
 
 def _voxel_downsample(pts: np.ndarray, voxel_size: float) -> np.ndarray:
@@ -370,12 +458,30 @@ def _make_hypothesis(
     support_points: int,
     ground: GroundPlane,
     params: DetectionParams,
+    sensor_context: SensorContext | None = None,
 ) -> CuboidHypothesis:
     top_height = float(ground.height(top_centroid))
     layer = max(round(top_height / params.block_dims[2]), 1)
     height_error = abs(top_height - layer * params.block_dims[2])
     score = min(support_points / 500.0, 1.0) - 3.0 * height_error
-    return CuboidHypothesis(pose, HypothesisEvidence(support_points, height_error, score))
+    expected = covered = violations = supported_rays = 0
+    if sensor_context is not None:
+        expected, covered, violations, supported_rays = visibility_evidence(
+            pose, sensor_context, params.block_dims
+        )
+        score += 0.1 * covered + 0.01 * supported_rays - 0.02 * violations
+    return CuboidHypothesis(
+        pose,
+        HypothesisEvidence(
+            support_points,
+            height_error,
+            score,
+            expected,
+            covered,
+            violations,
+            supported_rays,
+        ),
+    )
 
 
 def _select_hypotheses(hypotheses: list[CuboidHypothesis]) -> list[CuboidHypothesis]:
@@ -487,12 +593,16 @@ def _synthesize_pose_top_only(
 def detect_blocks(
     pts_world: np.ndarray,
     params: DetectionParams | None = None,
+    *,
+    sensor_context: SensorContext | None = None,
 ) -> list[BlockPose]:
     """Detect concrete blocks in a world-frame point cloud.
 
     Args:
         pts_world: (N, 3) float64 point cloud in world frame (Z = up).
         params: Detection parameters; uses defaults if None.
+        sensor_context: Optional sensor origin and hit rays for visibility,
+            occlusion, free-space evidence, and range-aware sampling thresholds.
 
     Returns:
         List of BlockPose, one per detected block, sorted by Z descending.
@@ -502,6 +612,9 @@ def detect_blocks(
     """
     if params is None:
         params = DetectionParams()
+
+    if sensor_context is not None:
+        sensor_context = _validate_sensor_context(sensor_context)
 
     pts = np.asarray(pts_world)
     if pts.ndim != 2 or pts.shape[1] != 3:
@@ -526,6 +639,22 @@ def detect_blocks(
     pts, ground = _remove_ground(pts, params)
     if len(pts) == 0:
         return []
+
+    if sensor_context is not None:
+        # Estimate angular-density loss from object-relevant, above-ground
+        # returns rather than the usually dominant ground cloud.
+        object_ranges = np.linalg.norm(pts - sensor_context.origin, axis=1)
+        # Upper-quartile range protects sparse distant candidates when nearer
+        # non-occluding objects contribute more returns.
+        typical_range = float(np.percentile(object_ranges, 75))
+        density_scale = np.clip((5.0 / max(typical_range, 1.0)) ** 2, 0.25, 1.0)
+        params = replace(
+            params,
+            dbscan_eps=min(params.dbscan_eps * max(typical_range / 5.0, 1.0), 0.14),
+            dbscan_min_points=max(3, int(round(params.dbscan_min_points * density_scale))),
+            cluster_min_size=max(12, int(round(params.cluster_min_size * density_scale))),
+            min_inliers=max(12, int(round(params.min_inliers * density_scale))),
+        )
 
     # Stage 3: DBSCAN clustering
     clusters = _cluster_points(pts, params, ground)
@@ -563,7 +692,7 @@ def detect_blocks(
                     )
                     support = len(top.points)
                 hypothesis = _make_hypothesis(
-                    pose, top.centroid, support, ground, params
+                    pose, top.centroid, support, ground, params, sensor_context
                 )
                 # The observed top must reach one known block height. Higher
                 # top patches are retained as independently observed layers.
@@ -578,3 +707,17 @@ def detect_blocks(
     ]
     results.sort(key=lambda p: p.position[2], reverse=True)
     return results
+
+
+def detect_scene_sample(sample, params: DetectionParams | None = None) -> list[BlockPose]:
+    """Detect a rich sample carrying points, sensor origin, rays, and ranges.
+
+    The argument is intentionally duck-typed to avoid coupling the detector to
+    the synthetic generator's ``SceneSample`` class.
+    """
+    context = SensorContext(
+        np.asarray(sample.sensor_origin, dtype=np.float64),
+        np.asarray(sample.ray_directions, dtype=np.float64),
+        np.asarray(sample.ranges, dtype=np.float64),
+    )
+    return detect_blocks(sample.points, params, sensor_context=context)

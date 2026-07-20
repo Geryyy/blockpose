@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -9,16 +10,22 @@ import pytest
 from blockpose.detection import (
     CuboidHypothesis,
     DetectionParams,
+    GroundPlane,
     HypothesisEvidence,
+    SensorContext,
+    _make_hypothesis,
     _remove_ground,
     _select_hypotheses,
     _split_connected_region,
     _synthesize_pose,
+    _validate_sensor_context,
     detect_blocks,
+    detect_scene_sample,
+    visibility_evidence,
 )
 from blockpose.evaluate import evaluate, rotation_error_deg
 from blockpose.io import load_snapshot
-from blockpose.synth import BlockSpec, SynthParams, generate_scene
+from blockpose.synth import BlockSpec, ClutterParams, SynthParams, generate_scene
 
 REPO_ROOT = Path(__file__).parent.parent.parent
 SNAPSHOTS_DIR = REPO_ROOT / "data" / "registration_snapshots"
@@ -249,6 +256,134 @@ def test_adversarial_offset_stack_has_no_cross_layer_pairing_bias() -> None:
     stability = evaluate(permuted, detections, max_match_dist=0.1)
     assert stability.matched == len(detections)
     assert max(stability.translation_errors_m, default=0.0) <= 0.03
+
+
+def _cuboid_ray_context():
+    origin = np.array([-5.0, 0.0, 3.0])
+    ys = np.linspace(-0.25, 0.25, 5)
+    zs = np.linspace(0.2, 0.85, 5)
+    near = np.array([[-0.3, y, z] for y in ys for z in zs])
+    top = np.array([[x, y, 0.9] for x in np.linspace(-0.25, 0.25, 5) for y in ys])
+    return SensorContext.from_points(origin, np.vstack([near, top]))
+
+
+def test_visibility_score_prefers_true_cuboid_and_wrong_height_loses() -> None:
+    context = _cuboid_ray_context()
+    ground = GroundPlane(np.array([0.0, 0.0, 1.0]), 0.0, "test")
+    true_pose = _make_pose_for_selection((0.0, 0.0, 0.45))
+    shifted_pose = _make_pose_for_selection((0.0, 0.25, 0.45))
+    wrong_height = _make_pose_for_selection((0.0, 0.0, 0.7))
+    params = DetectionParams()
+    true = _make_hypothesis(true_pose, np.array([0.0, 0.0, 0.9]), 100, ground, params, context)
+    shifted = _make_hypothesis(
+        shifted_pose, np.array([0.0, 0.25, 0.9]), 100, ground, params, context
+    )
+    wrong = _make_hypothesis(
+        wrong_height, np.array([0.0, 0.0, 1.15]), 100, ground, params, context
+    )
+    assert true.evidence.score > shifted.evidence.score
+    assert true.evidence.score > wrong.evidence.score
+
+
+def test_hidden_faces_are_neutral_and_free_space_is_penalized() -> None:
+    pose = _make_pose_for_selection((0.0, 0.0, 0.45))
+    context = _cuboid_ray_context()
+    expected, covered, violations, supported = visibility_evidence(
+        pose, context, (0.6, 0.6, 0.9)
+    )
+    assert expected == 2  # near side and top; back/bottom faces are hidden
+    assert covered == 2
+    assert violations == 0
+    assert supported > 0
+
+    through = SensorContext(context.origin, context.ray_directions, context.ranges + 1.0)
+    _, _, through_violations, _ = visibility_evidence(pose, through, (0.6, 0.6, 0.9))
+    assert through_violations > 0
+    occluded = SensorContext(context.origin, context.ray_directions, context.ranges - 0.5)
+    _, _, occluded_violations, _ = visibility_evidence(pose, occluded, (0.6, 0.6, 0.9))
+    assert occluded_violations == 0
+
+
+def test_rich_sample_entry_point_recovers_far_case() -> None:
+    from blockpose.scenario_matrix import generate_scenario_matrix
+
+    _, sample = next(
+        item for item in generate_scenario_matrix(0) if item[0].name == "isolated_far"
+    )
+    detections = detect_scene_sample(sample)
+    result = evaluate(detections, sample.ground_truth)
+    assert result.recall == 1.0
+    assert result.precision == 1.0
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        SensorContext(np.array([0.0, 0.0]), np.ones((1, 3)), np.ones(1)),
+        SensorContext(np.zeros(3), np.ones((1, 2)), np.ones(1)),
+        SensorContext(np.zeros(3), np.ones((1, 3)), np.ones((1, 1))),
+        SensorContext(np.zeros(3), np.ones((1, 3)), np.array([-1.0])),
+        SensorContext(np.zeros(3), np.zeros((1, 3)), np.ones(1)),
+    ],
+)
+def test_invalid_sensor_context_is_rejected_even_for_sparse_cloud(context) -> None:
+    with pytest.raises(ValueError, match="sensor_context"):
+        detect_blocks(np.empty((0, 3)), sensor_context=context)
+
+
+def test_scaled_ray_directions_are_normalized_invariantly() -> None:
+    pose = _make_pose_for_selection((0.0, 0.0, 0.45))
+    context = _cuboid_ray_context()
+    scaled = SensorContext(context.origin, context.ray_directions * 7.0, context.ranges)
+    points = context.origin + context.ranges[:, None] * context.ray_directions
+    a = detect_blocks(points, sensor_context=context)
+    b = detect_blocks(points, sensor_context=scaled)
+    assert len(a) == len(b)
+    assert visibility_evidence(pose, context, (0.6, 0.6, 0.9)) == visibility_evidence(
+        pose, _validate_sensor_context(scaled), (0.6, 0.6, 0.9)
+    )
+
+
+def test_parallel_rays_do_not_emit_runtime_warning() -> None:
+    pose = _make_pose_for_selection((0.0, 0.0, 0.45))
+    context = SensorContext(
+        np.array([-5.0, 0.0, 3.0]),
+        np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0]]),
+        np.array([2.0, 5.0]),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        visibility_evidence(pose, context, (0.6, 0.6, 0.9))
+
+
+def test_far_block_survives_nearby_nonoccluding_clutter() -> None:
+    sensor = (-5.0, 0.0, 4.0)
+    far = generate_scene(
+        [BlockSpec(8.0, 0.0, yaw_deg=61.0)],
+        SynthParams(sensor_pos=sensor, look_at=(8.0, 0.0, 0.45)),
+        np.random.default_rng(31),
+    )
+    near = generate_scene(
+        [],
+        SynthParams(sensor_pos=sensor, look_at=(0.0, -2.0, 0.45), az_fov_deg=40.0),
+        np.random.default_rng(32),
+        ClutterParams(
+            trees=False,
+            container=False,
+            logs=False,
+            near_field_boxes=1,
+            near_field_offset=2.0,
+        ),
+    )
+    points = np.vstack([far.points, near.points])
+    context = SensorContext(
+        np.asarray(sensor),
+        np.vstack([far.ray_directions, near.ray_directions]),
+        np.concatenate([far.ranges, near.ranges]),
+    )
+    result = evaluate(detect_blocks(points, sensor_context=context), far.ground_truth)
+    assert result.recall == 1.0
+    assert result.unmatched_det == 0
 
 
 def test_dimension_gating_rejects_tall_cluster() -> None:
