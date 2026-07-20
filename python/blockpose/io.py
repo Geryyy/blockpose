@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +14,7 @@ from blockpose.pose import BlockPose, quat_xyzw_to_rotmat
 # Default path relative to repo root (two levels up from tools/, one up from python/)
 _REPO_ROOT = Path(__file__).parent.parent.parent
 _DEFAULT_TRANSFORM_CONFIG = _REPO_ROOT / "config" / "transforms_pzs100_initial_pose_1.yaml"
+_DEFAULT_CAMERA_CALIB = _REPO_ROOT / "config" / "calibration" / "calib_blackfly_to_seyond.yaml"
 
 
 def load_pcd(path: str | Path) -> np.ndarray:
@@ -26,20 +28,107 @@ def load_pcd(path: str | Path) -> np.ndarray:
     return pts
 
 
-def load_T_world_seyond(config_path: str | Path | None = None) -> np.ndarray:
-    """Load T_world_seyond as a (4, 4) float64 homogeneous transform matrix."""
+def load_transform(name: str, config_path: str | Path | None = None) -> np.ndarray:
+    """Load a named transform as a (4, 4) float64 homogeneous transform matrix.
+
+    `name` must match a `transforms[].name` entry in the transform config, e.g.
+    "T_world_seyond" or "T_world_blackfly_rotated".
+    """
     if config_path is None:
         config_path = _DEFAULT_TRANSFORM_CONFIG
     config_path = Path(config_path)
     with config_path.open() as f:
         data = yaml.safe_load(f)
     for entry in data["transforms"]:
-        if entry["name"] == "T_world_seyond":
+        if entry["name"] == name:
             T = np.array(entry["matrix"], dtype=np.float64)
             if T.shape != (4, 4):
                 raise ValueError(f"Expected 4x4 matrix, got {T.shape}")
             return T
-    raise KeyError("T_world_seyond not found in transform config")
+    raise KeyError(f"{name} not found in transform config {config_path}")
+
+
+def load_T_world_seyond(config_path: str | Path | None = None) -> np.ndarray:
+    """Load T_world_seyond (lidar -> world) as a (4, 4) float64 transform matrix."""
+    return load_transform("T_world_seyond", config_path)
+
+
+def load_T_world_camera(config_path: str | Path | None = None) -> np.ndarray:
+    """Load T_world_blackfly_rotated (camera -> world) as a (4, 4) float64 transform matrix."""
+    return load_transform("T_world_blackfly_rotated", config_path)
+
+
+@dataclass
+class CameraModel:
+    """Pinhole camera model with optional radial-tangential distortion.
+
+    Conventions match `sensor_msgs/CameraInfo` (row-major K, optical frame:
+    X right, Y down, Z forward out of the lens), i.e. the layout used in
+    `config/calibration/*.yaml`.
+    """
+
+    K: np.ndarray  # (3, 3) float64 intrinsic matrix
+    width: int
+    height: int
+    # OpenCV distortion coefficients. Length 5 (plumb-bob) or 8
+    # (rational_polynomial); empty for an ideal pinhole. Order:
+    # [k1, k2, p1, p2, k3, (k4, k5, k6)].
+    D: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float64))
+
+    def __post_init__(self) -> None:
+        self.K = np.asarray(self.K, dtype=np.float64).reshape(3, 3)
+        self.D = np.asarray(self.D, dtype=np.float64).ravel()
+
+    @property
+    def fx(self) -> float:
+        return float(self.K[0, 0])
+
+    @property
+    def fy(self) -> float:
+        return float(self.K[1, 1])
+
+    @property
+    def cx(self) -> float:
+        return float(self.K[0, 2])
+
+    @property
+    def cy(self) -> float:
+        return float(self.K[1, 2])
+
+
+def load_camera_model(calib_path: str | Path | None = None) -> CameraModel:
+    """Load a `CameraModel` (intrinsics + distortion + image size) from a calib YAML."""
+    if calib_path is None:
+        calib_path = _DEFAULT_CAMERA_CALIB
+    calib_path = Path(calib_path)
+    with calib_path.open() as f:
+        data = yaml.safe_load(f)
+    K = np.array(data["K"], dtype=np.float64).reshape(3, 3)
+    width = int(data["image_width"])
+    height = int(data["image_height"])
+    D = np.array(data.get("D", []), dtype=np.float64).ravel()
+    return CameraModel(K=K, width=width, height=height, D=D)
+
+
+def load_camera_intrinsics(
+    calib_path: str | Path | None = None,
+) -> tuple[np.ndarray, int, int]:
+    """Load pinhole intrinsics from a camera calibration YAML.
+
+    Returns (K, width, height). Prefer `load_camera_model` when distortion is
+    needed (e.g. projecting points into the image).
+    """
+    cam = load_camera_model(calib_path)
+    return cam.K, cam.width, cam.height
+
+
+def load_rgb(path: str | Path) -> np.ndarray:
+    """Load an RGB image as an (H, W, 3) uint8 array."""
+    img = o3d.io.read_image(str(path))
+    arr = np.asarray(img)
+    if arr.ndim != 3 or arr.shape[2] != 3:
+        raise ValueError(f"Expected an (H, W, 3) RGB image, got shape {arr.shape}")
+    return arr
 
 
 def apply_transform(pts: np.ndarray, T: np.ndarray) -> np.ndarray:

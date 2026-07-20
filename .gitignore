@@ -41,6 +41,7 @@ htmlcov/
 !.env.example
 .openclaude/settings.local.json
 .openclaude/worktrees/
+.claude/settings.local.json
 .pypirc
 .idea/
 .vscode/

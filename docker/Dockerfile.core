@@ -1,15 +1,6 @@
 # syntax=docker/dockerfile:1.7
-# blockpose core development image — NO ROS.
-# Phases P–5 live entirely in this image. CI uses it for build + unit +
-# synthetic regression. Dockerfile.ros2 extends it for the wrapper phase.
+# blockpose core development image — Python/Open3D prototyping.
 
-# ---------------------------------------------------------------------------
-# Pinned versions (bump deliberately, in one place)
-# ---------------------------------------------------------------------------
-# NOTE: keep OPEN3D_VERSION in sync with the `open3d` wheel pin in
-# pyproject.toml — tensor-API behavior must match between C++ core and
-# Python notebooks.
-ARG OPEN3D_VERSION=0.19.0
 ARG UV_VERSION=0.5.24
 ARG NODE_MAJOR=24
 ARG OPENCLAUDE_VERSION=0.24.0
@@ -19,45 +10,27 @@ FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 FROM ubuntu:24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG OPEN3D_VERSION
 ARG NODE_MAJOR
 ARG OPENCLAUDE_VERSION
 
 # ---------------------------------------------------------------------------
-# System toolchain + C++ dependencies (all ABI-consistent from Ubuntu 24.04)
-#   Eigen 3.4, Ceres 2.2, yaml-cpp 0.8, nlohmann-json 3.11, CLI11 2.4,
-#   pybind11 2.11, GTest 1.14
+# System packages: Python + GUI/X11 runtime libs for Open3D's visualizer
 # ---------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential \
-        gdb \
-        clang-format \
-        clang-tidy \
-        cmake \
-        ninja-build \
-        ccache \
         git \
         git-lfs \
         curl \
         ca-certificates \
         gnupg \
-        pkg-config \
         python3 \
         python3-dev \
         python3-venv \
-        libeigen3-dev \
-        libceres-dev \
-        libyaml-cpp-dev \
-        nlohmann-json3-dev \
-        libcli11-dev \
-        pybind11-dev \
-        libgtest-dev \
-        libgmock-dev \
-        # runtime deps of the Open3D C++ SDK and GUI/X11 visualization tools
+        # runtime deps of Open3D's GUI/X11 visualization tools
         libdbus-1-3 \
         libegl1 \
         libglib2.0-0 \
         libgl1 \
+        libgl1-mesa-dri \
         libglx-mesa0 \
         libglu1-mesa-dev \
         libgomp1 \
@@ -66,6 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libpng16-16 \
         libsm6 \
         libx11-6 \
+        libwayland-cursor0 \
         libxcb-cursor0 \
         libxext6 \
         libxfixes3 \
@@ -82,41 +56,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------
-# Open3D C++ SDK (prebuilt devel tarball — do NOT build Open3D per-checkout)
-# Verify the asset name against the release page if the download 404s:
-#   https://github.com/isl-org/Open3D/releases/tag/v${OPEN3D_VERSION}
-# ---------------------------------------------------------------------------
-RUN curl -fsSL -o /tmp/open3d.tar.xz \
-        "https://github.com/isl-org/Open3D/releases/download/v${OPEN3D_VERSION}/open3d-devel-linux-x86_64-cxx11-abi-${OPEN3D_VERSION}.tar.xz" \
-    && mkdir -p /opt/open3d \
-    && tar -xJf /tmp/open3d.tar.xz -C /opt/open3d --strip-components=1 \
-    && rm /tmp/open3d.tar.xz
-
-ENV Open3D_ROOT=/opt/open3d \
-    CMAKE_PREFIX_PATH=/opt/open3d \
-    LD_LIBRARY_PATH=/opt/open3d/lib
-
-# ---------------------------------------------------------------------------
-# Rerun C++ SDK — OPTIONAL, only needed once the C++ RerunDebugSink is built.
-# The Python rerun-sdk (installed via uv) is sufficient for Phases P–1.
-# Uncomment when the C++ sink lands:
-#
-# ARG RERUN_VERSION=0.22.0
-# RUN curl -fsSL -o /tmp/rerun_cpp.zip \
-#         "https://github.com/rerun-io/rerun/releases/download/${RERUN_VERSION}/rerun_cpp_sdk.zip" \
-#     && unzip -q /tmp/rerun_cpp.zip -d /opt/rerun && rm /tmp/rerun_cpp.zip
-# ENV CMAKE_PREFIX_PATH=/opt/open3d:/opt/rerun
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
 # uv — Python environment manager (venv + lockfile inside the container)
 # ---------------------------------------------------------------------------
 COPY --from=uv /uv /uvx /usr/local/bin/
-
-# ccache defaults
-ENV CCACHE_DIR=/workspace/.cache/ccache \
-    CMAKE_C_COMPILER_LAUNCHER=ccache \
-    CMAKE_CXX_COMPILER_LAUNCHER=ccache
 
 # ---------------------------------------------------------------------------
 # Node.js + OpenClaude CLI

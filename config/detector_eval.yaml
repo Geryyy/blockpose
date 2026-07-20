@@ -1,0 +1,17 @@
+# Regression thresholds for the synthetic detector eval (tools/eval_detector.py).
+#
+# These gate the Phase-A core: isolated, well-observed blocks. Multi-block
+# occlusion recall is reported under `diagnostics_multiblock` (NOT gated yet) and
+# becomes a Phase-C gate later.
+#
+# Ratchet these DOWN as the detector improves (plan v4 §11: tighten, never loosen
+# without a human-visible diff). translation_p95_m is currently limited by the
+# plane-fit MVP's single-face-centroid bias; Phase B (ICP + known-dimension center
+# recovery) is expected to pull it to a few cm, at which point it tightens.
+
+thresholds:
+  recall_min: 0.95
+  precision_min: 0.90
+  translation_p95_m: 0.15
+  rotation_p95_deg: 2.0
+  false_positives_empty_max: 0

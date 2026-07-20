@@ -1,8 +1,7 @@
 # Usage:
 #   export BLOCKPOSE_DATASET=$HOME/data/block_perception_dataset
 #   docker compose build core
-#   docker compose run --rm core          # dev shell, no ROS
-#   docker compose build ros2 && docker compose run --rm ros2
+#   docker compose run --rm core
 
 services:
   core:
@@ -18,29 +17,15 @@ services:
       - BLOCKPOSE_DATASET=/data
       - DISPLAY=${DISPLAY:-}
       - QT_X11_NO_MITSHM=1
+      - XDG_SESSION_TYPE=x11
+      - GDK_BACKEND=x11
+      - QT_QPA_PLATFORM=xcb
+      - GLFW_PLATFORM=x11
+      - LIBGL_ALWAYS_SOFTWARE=1
     working_dir: /workspace
     stdin_open: true
     tty: true
     # host networking so rerun-sdk in the container can reach a Rerun
-    # viewer running on the host, and (later) ROS DDS discovery works.
-    network_mode: host
-
-  ros2:
-    image: blockpose-ros2
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.ros2
-    volumes:
-      - .:/workspace
-      - ${BLOCKPOSE_DATASET:?set BLOCKPOSE_DATASET to your dataset dir}:/data
-      - /tmp/.X11-unix:/tmp/.X11-unix:rw
-    environment:
-      - BLOCKPOSE_DATASET=/data
-      - DISPLAY=${DISPLAY:-}
-      - QT_X11_NO_MITSHM=1
-      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
-    working_dir: /workspace
-    stdin_open: true
-    tty: true
+    # viewer running on the host.
     network_mode: host
     ipc: host

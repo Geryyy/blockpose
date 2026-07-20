@@ -5,7 +5,6 @@ description = "LiDAR-based 6-DoF pose estimation of concrete blocks — gripped,
 requires-python = ">=3.12"
 readme = "README.md"
 
-# NOTE: open3d wheel pin must match OPEN3D_VERSION in docker/Dockerfile.core.
 dependencies = [
     "numpy>=1.26,<3",
     "open3d==0.19.0",
@@ -22,15 +21,14 @@ dev = [
     "pytest>=8",
     "pytest-cov",
     "ruff>=0.6",
-    "ipykernel",           # spike notebooks (Phase P only; delete after)
+    "ipykernel",
+    "jupyterlab",
 ]
 
 # Phase 7 (gated) — do NOT install until the learned-component gate triggers.
 # learned = ["torch", ...]
 
 [tool.uv]
-# The compiled pybind11 module is built by CMake and installed into the venv
-# via `make python-install`; this project only manages the pure-Python layer.
 package = true
 
 [build-system]

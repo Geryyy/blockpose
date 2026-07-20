@@ -1,18 +1,22 @@
 # Blockpose
 
 Blockpose is a standalone workspace for reliable 6-DoF pose estimation of
-concrete blocks from point clouds. The intended implementation is a C++20 core
-with Python bindings and a thin, optional ROS 2 integration layer. The current
-repository is an early scaffold: it contains the implementation roadmap,
-development environment, tests for that environment, and a curated export of
-models and configuration from the source ROS workspace.
+concrete blocks from point clouds. Development is **Python-first**: the
+current phase is a Python/Open3D prototype track (detection, registration,
+evaluation against real snapshot data) used to de-risk the algorithmic
+approach. Once the approach is validated, the core moves to C++20 with
+pybind11 bindings and a thin, optional ROS 2 integration layer, per the
+implementation plan — the C++/CMake/ROS 2 scaffolding has been removed for
+now and returns at that point, not before. The current repository contains
+the implementation roadmap, development environment, tests, and a curated
+export of models and configuration from the source ROS workspace.
 
 ## Start here
 
-- [`block_pose_estimation_plan_v4.md`](block_pose_estimation_plan_v4.md) is the
-  canonical implementation plan and the source of truth for agentic work. Its
-  versioned filename is retained for now to preserve history and existing links;
-  do not create a second copy under a generic name.
+- [`docs/implementation-plan.md`](docs/implementation-plan.md) is the
+  canonical implementation plan and the source of truth for agentic work,
+  including the Python-prototype-first phasing (Phase P) and the later
+  C++/ROS 2 phases.
 - [`docs/ENVIRONMENT.md`](docs/ENVIRONMENT.md) explains the Docker and local
   development workflow.
 - [`source_manifest.yaml`](source_manifest.yaml) records where exported
@@ -25,10 +29,9 @@ models and configuration from the source ROS workspace.
 ## Repository layout
 
 ```text
-apps/             small executables and environment checks
 assets/           models, meshes, templates, worlds, and textures
 config/           runtime and reference configuration
-docker/           core and ROS 2 development images
+docker/           core development image
 docs/             maintained project documentation
 launch_context/   reference ROS launch files from the source workspace
 notes/            historical setup notes
@@ -86,8 +89,11 @@ make check
 ```
 
 The devcontainer uses the same core image and automatically mounts the repo-local
-`data/` directory at `/data` with `BLOCKPOSE_DATASET=/data`. The planned core path
-is ROS-free; the ROS 2 image exists for bag export and later integration only.
+`data/` directory at `/data` with `BLOCKPOSE_DATASET=/data`.
+
+`make check` currently runs the Python test suite and lint only. C++ build,
+ctest, and clang-format targets will return once the core migrates back to
+C++/ROS 2.
 
 ## Reference bag workflow
 

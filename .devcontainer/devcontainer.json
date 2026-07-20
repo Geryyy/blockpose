@@ -13,22 +13,25 @@
   "containerEnv": {
     "BLOCKPOSE_DATASET": "/data",
     "DISPLAY": "${localEnv:DISPLAY}",
-    "QT_X11_NO_MITSHM": "1"
+    "QT_X11_NO_MITSHM": "1",
+    "XDG_SESSION_TYPE": "x11",
+    "GDK_BACKEND": "x11",
+    "QT_QPA_PLATFORM": "xcb",
+    "GLFW_PLATFORM": "x11",
+    "LIBGL_ALWAYS_SOFTWARE": "1"
   },
   "remoteUser": "ubuntu",
-  "postCreateCommand": "uv sync --all-extras && cmake --preset dev",
+  "postCreateCommand": "uv sync --all-extras",
   "customizations": {
     "vscode": {
       "extensions": [
-        "ms-vscode.cpptools",
-        "ms-vscode.cmake-tools",
         "ms-python.python",
+        "ms-toolsai.jupyter",
         "charliermarsh.ruff",
-        "llvm-vs-code-extensions.vscode-clangd"
+        "anthropic.claude-code",
+        "openai.chatgpt"
       ],
       "settings": {
-        "cmake.generator": "Ninja",
-        "cmake.buildDirectory": "${workspaceFolder}/build",
         "python.defaultInterpreterPath": "/workspace/.venv/bin/python",
         "workbench.colorTheme": "Monokai Dimmed"
       }
@@ -37,6 +40,6 @@
   // Rerun can run on the HOST (rerun --serve or native app); the container can
   // also open X11 GUI tools through the mounted display socket.
   // Forward the default gRPC port both ways.
-  "forwardPorts": [9876],
-  "runArgs": ["--network=host"]
+  "forwardPorts": [9876, 8888],
+  "runArgs": ["--network=host", "--ipc=host"]
 }
