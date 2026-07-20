@@ -39,6 +39,29 @@ points land on a block face** — matching the NN gap would overstate on-face
 density by ~3.5x and make the suite optimistic. The default suite is therefore
 realistic-to-conservative, not flattering.
 
+## Model-based refinement (implemented)
+
+`blockpose/refine.py` fits the exact cuboid to every assigned return by
+minimizing the analytic box SDF over the full 6-DOF pose, initialized from the
+closed-form plane-fit guess. Multi-block scenes get point assignment first
+(nearest surface within a band) so a stack's two hypotheses stop contaminating
+each other. Measured over the full scenario matrix, 3 seeds:
+
+| family | trans p95 before → after | rot p95 before → after |
+|---|---|---|
+| overall | 0.0444 → **0.0058** m | 1.796 → **0.527°** |
+| noise | 0.0425 → 0.0050 m | 2.268 → **0.505°** |
+| stack | 0.0108 → 0.0071 m | 3.175 → **0.613°** |
+| multi_block | 0.0163 → 0.0006 m | 0.680 → 0.157° |
+
+Recall and false positives are unchanged everywhere; cost is ~84 → ~110 ms per
+scene. Refinement also **removes the run-to-run pose nondeterminism**: repeated
+detection of one scene varied by 2.85 mm before and 0.000 mm after, because the
+fit converges to the same optimum regardless of which RANSAC plane seeded it.
+
+Gate thresholds were ratcheted accordingly: translation p95 0.15 → 0.025 m,
+rotation p95 2.0 → 1.0°.
+
 ## Known envelope and open weaknesses
 
 Measured on the stratified matrix (`diagnostics_stratified`), none gated yet:
@@ -47,9 +70,12 @@ Measured on the stratified matrix (`diagnostics_stratified`), none gated yet:
   Real snapshots contain returns to ~31 m. Cause is point starvation against
   fixed `cluster_min_size` / `min_inliers`, not pose quality — errors stay small
   right up to the point of disappearing.
-- **Yaw is the fragile quantity.** It comes from a single RANSAC side plane;
-  p95 rotation is ~0.4° at the gate's noise but ~3.8° at 0.02 m range noise.
-  Margin against the 2° threshold is ~2x, not 10x.
+- **Hypothesis generation is not reproducible.** Open3D 0.19's `segment_plane`
+  RANSAC is not seedable (`o3d.utility.random.seed` does not reach it) and gives
+  different planes on identical input. Refined poses are stable, but the
+  *number* of candidates can vary between runs, which made one calibration test
+  flaky about one run in three. Replacing `segment_plane` with a seeded
+  in-repo RANSAC is the fix and would make the gate fully reproducible.
 - **Touching rows are silently dropped** (recall 0). A flush 3-block row exceeds
   `cluster_max_extent_xy` with no density valley to split on, so the whole
   cluster is discarded to protect against the elongated-object hard negative.

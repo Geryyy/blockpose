@@ -9,6 +9,7 @@ import numpy as np
 import open3d as o3d
 
 from blockpose.pose import BlockPose
+from blockpose.refine import refine_poses
 
 
 @dataclass
@@ -38,6 +39,15 @@ class DetectionParams:
     side_plane_angle_deg: float = 20.0
     max_plane_center_dist: float = 0.6
     block_dims: tuple[float, float, float] = (0.6, 0.6, 0.9)
+    # Model-based refinement (blockpose.refine). The closed-form pose uses a top
+    # plane plus at most one side plane; refinement fits the exact cuboid to
+    # every assigned return, which is what removes the single-plane yaw fragility.
+    refine_enabled: bool = True
+    refine_band: float = 0.10  # assignment distance to a hypothesis surface (m)
+    refine_iterations: int = 2
+    refine_min_points: int = 20
+    refine_max_translation: float = 0.15  # reject corrections larger than this
+    refine_max_rotation_deg: float = 20.0
 
 
 @dataclass(frozen=True)
@@ -842,6 +852,35 @@ def _detect_blocks_impl(
                     hypotheses.append(hypothesis)
 
     selected = _select_hypotheses(hypotheses)
+
+    if params.refine_enabled and selected:
+        # Refine against the above-ground cloud, then rebuild evidence from the
+        # refined pose so diagnostics describe the pose actually returned. The
+        # top-face centre is recomputed from the pose rather than reusing the
+        # original plane centroid, which no longer corresponds to it.
+        refined = refine_poses(
+            [hypothesis.pose for hypothesis in selected],
+            pts,
+            params.block_dims,
+            band=params.refine_band,
+            iterations=params.refine_iterations,
+            min_points=params.refine_min_points,
+            max_translation=params.refine_max_translation,
+            max_rotation_deg=params.refine_max_rotation_deg,
+        )
+        selected = [
+            _make_hypothesis(
+                pose,
+                pose.position + pose.rotation[:, 2] * (params.block_dims[2] / 2.0),
+                hypothesis.evidence.support_points,
+                ground,
+                params,
+                sensor_context,
+                hypothesis.evidence.observed_geometry_faces,
+            )
+            for hypothesis, pose in zip(selected, refined, strict=True)
+        ]
+
     selected = [
         hypothesis
         for hypothesis in selected
