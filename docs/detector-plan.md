@@ -129,20 +129,32 @@ Measured on the stratified matrix (`diagnostics_stratified`), none gated yet:
   Real snapshots contain returns to ~31 m. Cause is point starvation against
   fixed `cluster_min_size` / `min_inliers`, not pose quality — errors stay small
   right up to the point of disappearing.
-- **Real wall plans are not detected at all** — the largest gap, and it is the
-  target application. Driven directly from `config/wall_plans.yaml` (family
-  `wall_plan`): `example_wall` 0 of 5, `row3_middle_last` 0 of 3, while the
-  single-block and stack plans work. The plans specify **2 cm** course gaps
-  (0.92 m centres, 0.9 m blocks) — five times tighter than the 10 cm the
-  `assembly` family shows the detector can resolve, and comparable to one voxel
-  (0.04 m) plus the clustering epsilon (0.06 m). Two separate problems are
-  stacked here: the gap is below the current spatial resolution, and even a
-  resolved gap leaves the `touching_row` ambiguity against
-  `elongated_full_height_negative`. The first is a resolution budget question;
-  the second needs scored hypotheses plus a scene prior. Confirmed by
-  experiment: `cluster_max_extent_xy` (1.5 m) discards a wall row outright, and
-  raising it alone takes `row3_middle_last` from 0 to 1 of 3 -- so the extent
-  guard and the interface splitter are both blockers, in that order.
+- **Blind detection cannot separate a laid wall course** — and the reason is now
+  measured precisely, not guessed. The plans specify **2 cm** joints (0.92 m
+  centres, 0.9 m blocks). In the *raw* cloud that gap is observable to ~6 m
+  (23–37 returns fall into each 2 cm slot, set back ~11 cm behind the faces; 4
+  by 8 m). But those slot returns are **stripped by ground removal and
+  clustering** before any splitter runs — the block-surface cluster that
+  survives (top + front faces) is coplanar and continuous across the joint, with
+  no set-back signal even at zero voxel size (measured: near-boundary set-back
+  max 2 cm, versus 11 cm in the raw cloud). So the gap is not below sensor
+  resolution; it is below the resolution of the *processed* cluster, and the
+  earlier "raise `cluster_max_extent_xy`" result (0→1 of 3) was one big-box
+  hypothesis landing on one block by luck, not a real split. A set-back splitter
+  was prototyped and reverted: it either missed the gap or tiled the elongated
+  hard negative, because on the processed cluster the two are indistinguishable.
+
+  **This is the case the plan prior is for** (`blockpose/plan_prior.py`). When
+  the wall is being built the poses are known — the robot placed the blocks — so
+  the joints do not need to be discovered. `detect_with_plan` assigns returns to
+  each expected block, refines with the same SDF fit, and scores with the same
+  evidence model. Result on the plans (priors jittered ±4 cm to make refinement
+  work): `row3_middle_last` 3/3 at ≤18 mm, `example_wall` 3 of 5 cleanly (the
+  two-course cases lose the mutually occluded blocks, correctly flagged by a low
+  score). A block present in the plan but not yet placed scores 0.38–0.41 versus
+  0.76–0.96 for placed blocks, a clean verify threshold. Blind separation of
+  2 cm joints from a single scan remains out of reach and is not the priority,
+  since the target task always has the plan.
 - **Touching rows are silently dropped** (recall 0). A flush 3-block row exceeds
   `cluster_max_extent_xy` with no density valley to split on, so the whole
   cluster is discarded to protect against the elongated-object hard negative.
