@@ -1,0 +1,15 @@
+schema_version: 1
+snapshot: 1783429345_020967424_seq4
+annotation_complete: false
+annotated_roi: null
+notes: Upstream registration only; scene has not been exhaustively manually reviewed.
+blocks:
+  - id: block_3
+    provenance: upstream_registration
+    visibility: unknown
+    dimensions: [0.9, 0.6, 0.6]
+    confidence: 0.52583
+    pose:
+      position: [-11.6228, -2.58698, 1.32119]
+      orientation_xyzw: [0.021235, -0.0170501, 0.206428, 0.978083]
+unmatched_detection_reviews: {}

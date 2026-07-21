@@ -49,6 +49,9 @@ class PlanPriorResult:
     features: dict[str, float]
     support_points: int
     refined: bool
+    incident_rays: int = 0
+    supported_rays: int = 0
+    free_space_violations: int = 0
 
     @property
     def translation_from_plan(self) -> float:
@@ -136,6 +139,9 @@ def detect_with_plan(
                 features=_evidence_features(hypothesis.evidence),
                 support_points=len(owned),
                 refined=refined,
+                incident_rays=hypothesis.evidence.incident_rays,
+                supported_rays=hypothesis.evidence.supported_rays,
+                free_space_violations=hypothesis.evidence.free_space_violations,
             )
         )
     return results

@@ -1,0 +1,31 @@
+schema_version: 1
+snapshot: 1783429044_018652416_seq1
+annotation_complete: false
+annotated_roi: null
+notes: Upstream registrations only; scene has not been exhaustively manually reviewed.
+blocks:
+  - id: block_0
+    provenance: upstream_registration
+    visibility: unknown
+    dimensions: [0.9, 0.6, 0.6]
+    confidence: 0.501845
+    pose:
+      position: [-10.9243, -2.62914, 0.400582]
+      orientation_xyzw: [-0.0213811, 0.00514508, 0.167687, 0.985595]
+  - id: block_1
+    provenance: upstream_registration
+    visibility: unknown
+    dimensions: [0.9, 0.6, 0.6]
+    confidence: 0.465569
+    pose:
+      position: [-11.8772, -0.620233, 0.428261]
+      orientation_xyzw: [0.0215226, 0.0323727, -0.679375, 0.732761]
+  - id: block_2
+    provenance: upstream_registration
+    visibility: unknown
+    dimensions: [0.9, 0.6, 0.6]
+    confidence: 0.82485
+    pose:
+      position: [-13.7461, 2.77166, 0.651086]
+      orientation_xyzw: [0.00368544, 0.0196905, -0.71975, 0.693944]
+unmatched_detection_reviews: {}

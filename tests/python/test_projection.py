@@ -17,12 +17,13 @@ from blockpose.projection import (
     project_points,
     world_to_camera,
 )
+from conftest import snapshot_with_ground_truth
 
 REPO_ROOT = Path(__file__).parent.parent.parent
 SNAPSHOTS_DIR = REPO_ROOT / "data" / "registration_snapshots"
 TRANSFORM_CONFIG = REPO_ROOT / "config" / "transforms_pzs100_initial_pose_1.yaml"
 CAMERA_CALIB = REPO_ROOT / "config" / "calibration" / "calib_blackfly_to_seyond.yaml"
-SNAPSHOT_1 = sorted(SNAPSHOTS_DIR.iterdir())[0]
+SNAPSHOT_1 = snapshot_with_ground_truth(SNAPSHOTS_DIR)
 
 
 def _pinhole(fx=500.0, fy=520.0, cx=320.0, cy=240.0, width=640, height=480, D=None):

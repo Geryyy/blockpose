@@ -9,6 +9,7 @@ import numpy as np
 import open3d as o3d
 import yaml
 
+from blockpose.frames import PointFrame, PoseTrajectory
 from blockpose.pose import BlockPose, quat_xyzw_to_rotmat
 
 # Default path relative to repo root (two levels up from tools/, one up from python/)
@@ -26,6 +27,22 @@ def load_pcd(path: str | Path) -> np.ndarray:
     if pts.ndim != 2 or pts.shape[1] != 3:
         raise ValueError(f"Expected (N, 3) array, got {pts.shape}")
     return pts
+
+
+def load_point_frame(
+    path: str | Path,
+    *,
+    timestamp: float = 0.0,
+    frame_id: str = "sensor",
+    sensor_trajectory: PoseTrajectory | None = None,
+) -> PointFrame:
+    """Load a legacy XYZ PCD as a rich frame with unavailable fields explicit."""
+    return PointFrame(
+        load_pcd(path),
+        timestamp=timestamp,
+        frame_id=frame_id,
+        sensor_trajectory=sensor_trajectory,
+    )
 
 
 def load_transform(name: str, config_path: str | Path | None = None) -> np.ndarray:

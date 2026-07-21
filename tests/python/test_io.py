@@ -12,13 +12,15 @@ from blockpose.io import (
     load_snapshot,
     load_T_world_seyond,
 )
+from conftest import snapshot_with_ground_truth
 
 REPO_ROOT = Path(__file__).parent.parent.parent
 SNAPSHOTS_DIR = REPO_ROOT / "data" / "registration_snapshots"
 TRANSFORM_CONFIG = REPO_ROOT / "config" / "transforms_pzs100_initial_pose_1.yaml"
 
-# Use the first snapshot for deterministic tests
-SNAPSHOT_1 = sorted(SNAPSHOTS_DIR.iterdir())[0]
+# A deterministic snapshot known to carry real ground truth (see
+# conftest.snapshot_with_ground_truth for why "the first snapshot" isn't safe).
+SNAPSHOT_1 = snapshot_with_ground_truth(SNAPSHOTS_DIR)
 
 
 def test_load_pcd_shape() -> None:

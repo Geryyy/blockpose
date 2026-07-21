@@ -68,6 +68,16 @@ class DetectionParams:
     refine_min_points: int = 20
     refine_max_translation: float = 0.15  # reject corrections larger than this
     refine_max_rotation_deg: float = 20.0
+    # Minimum weighted evidence score (see _SCORE_WEIGHTS) to keep a hypothesis
+    # at all, applied before NMS selection. 0.0 (accept everything that
+    # survives clustering/plane-fitting) matches all prior behaviour and every
+    # synthetic scenario this is gated against. Real snapshots have real
+    # clutter -- e.g. the crane/gripper hardware above a block -- that can
+    # still produce a shaped-enough cluster to reach pose synthesis; measured
+    # on real data, spurious hypotheses like that score under ~0.2 while every
+    # true block scores over ~0.4, a threshold around there is a first,
+    # deliberately conservative cut, not a tuned classifier.
+    min_score: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -953,6 +963,7 @@ def _detect_blocks_impl(
                     if float(ground.height(top.centroid)) >= dims[2] - 0.08:
                         hypotheses.append(hypothesis)
 
+    hypotheses = [h for h in hypotheses if h.evidence.score >= params.min_score]
     selected = _select_hypotheses(hypotheses)
 
     if params.refine_enabled and selected:

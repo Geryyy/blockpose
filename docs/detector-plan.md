@@ -201,6 +201,56 @@ judge. Isaac Sim stays gated behind a *measured* gap (plan v4 §8).
 - Greedy accept + non-overlap; split stacked blocks by height layers.
 - *Gate:* precision/recall targets on multi-block scenes; zero FP on empty scans.
 
-**Phase D — Real validation (after TF re-export).**
+**Phase D — Real validation (after TF re-export, in progress).**
 - Same detector + evaluator on real snapshots; measure the sim-to-real gap; add
   LiDAR intensity as a feature only if it earns its keep.
+- TF re-export landed: snapshots now ship a `tf.yaml` (the crane's actual joint
+  state at capture time; `blockpose.io.load_tf_snapshot`). The static
+  `transforms_pzs100_initial_pose_1.yaml` config was misplacing the cloud by
+  several metres relative to recorded ground truth for at least one snapshot —
+  large enough that 0 of 3 blocks matched until `tools/detect_blocks.py` was
+  switched to prefer `tf.yaml` when present.
+- `tools/eval_real_snapshots.py` is the real-data counterpart to
+  `eval_detector.py`: no fixed gate yet (too few real snapshots to fit
+  thresholds to signal rather than noise), but it discovers every `tf.yaml`
+  snapshot under `data/registration_snapshots/` and reports the same shape of
+  metrics, so a regression is visible run over run.
+- **Ground truth here is not exact.** `registrations.yaml` is itself the
+  output of the upstream RGB-based registration pipeline, which can fail to
+  register a block it detected (`registration_ok: false`) — observed on 2 of 4
+  snapshots at time of writing, both reporting zero registered blocks despite
+  having candidate detections. An unmatched detection in a low/zero-GT
+  snapshot may be a real, un-registered block, not a false positive; see the
+  harness's module docstring and `precision_grounded_snapshots_only` metric,
+  which excludes zero-GT snapshots rather than silently scoring them as pure
+  false-positive noise.
+- **Real-data orientation disambiguation needed visibility evidence that real
+  callers weren't providing.** `detection.py`'s free-space/visibility scoring
+  (the "ranking needs a feature that penalises a box protruding into empty
+  space" gap noted above) is only computed when a `SensorContext` is passed —
+  synthetic callers always provide one (from the raycaster), but
+  `tools/detect_blocks.py` never constructed one for real point clouds, so
+  that scoring was silently inactive on every real snapshot. Real point clouds
+  can't recover true sensor misses, but `SensorContext.from_points(origin,
+  points)` derives ray directions/ranges from the returns themselves, which is
+  enough: on one real snapshot this dropped mean rotation error on 2 of 3
+  blocks from ~87° (wrong long/short face) to ~1.5°. It also changed which
+  block was recovered — one, sitting close to the crane/gripper arm, dropped
+  out of the accepted set — a real, unresolved recall/orientation-accuracy
+  trade-off, not yet safe to call solved on one example.
+- **No hypothesis had a minimum quality bar.** `_select_hypotheses` did greedy
+  non-overlap NMS with no absolute score floor, so any cluster that produced a
+  plausible top/side plane pair was reported regardless of how weak its
+  evidence was. The crane/gripper hardware directly above a block produced
+  exactly such a hypothesis. A geometric exclusion zone (tried first, using
+  the crane-side frames in `tf.yaml`) turned out not to work: the gripper's
+  position is fixed relative to the crane's *own* joint state, not to the
+  sensor, and `tf.yaml` does not export a tool/gripper frame — so the same
+  clutter can appear anywhere in sensor-relative space depending on the arm's
+  current pose. Measured instead: real spurious hypotheses score under ~0.2
+  while every confirmed real block scores over ~0.4 (see `_SCORE_WEIGHTS`).
+  `DetectionParams.min_score` (new, default `0.0` — a no-op, so every
+  synthetic scenario and gate is unaffected) lets real-data callers apply that
+  cut; `tools/detect_blocks.py` and `tools/eval_real_snapshots.py` default it
+  to `0.4`. This is a first, deliberately conservative threshold from four
+  snapshots, not a tuned classifier — revisit as more real data lands.

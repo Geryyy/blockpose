@@ -30,6 +30,7 @@ from blockpose.detection import (
 from blockpose.evaluate import evaluate, rotation_error_deg
 from blockpose.io import load_snapshot
 from blockpose.synth import BlockSpec, ClutterParams, SynthParams, generate_scene
+from conftest import snapshot_with_ground_truth
 
 REPO_ROOT = Path(__file__).parent.parent.parent
 SNAPSHOTS_DIR = REPO_ROOT / "data" / "registration_snapshots"
@@ -40,8 +41,10 @@ SNAPSHOT_DIRS = sorted(SNAPSHOTS_DIR.iterdir())
 
 @pytest.fixture(scope="module")
 def snapshot1_data():
-    """Load first snapshot once for all tests in this module."""
-    return load_snapshot(SNAPSHOT_DIRS[0], TRANSFORM_CONFIG)
+    """Load a snapshot with confirmed ground truth once for all tests in this
+    module (see conftest.snapshot_with_ground_truth: some real snapshots have
+    zero registered blocks, so "the first one" isn't reliably meaningful)."""
+    return load_snapshot(snapshot_with_ground_truth(SNAPSHOTS_DIR), TRANSFORM_CONFIG)
 
 
 @pytest.fixture(scope="module")

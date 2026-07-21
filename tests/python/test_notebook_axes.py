@@ -49,14 +49,20 @@ def test_relevant_notebooks_equalize_3d_axes_and_are_executed() -> None:
         )
 
 
-def test_showcase_ships_rendered_interactive_figures() -> None:
-    """Interactive inspection is the point; the code alone is not enough."""
+def test_showcase_ships_rendered_figures() -> None:
+    """Visual inspection is the point; the code alone is not enough.
+
+    The showcase currently renders via matplotlib (`image/png`), not plotly --
+    both are accepted mechanisms (see module docstring); what matters is that
+    figures actually rendered, not which library produced them.
+    """
     notebook, _ = _source(SHOWCASE)
     rendered = [
         output
         for cell in notebook["cells"]
         for output in cell.get("outputs", [])
         if "application/vnd.plotly.v1+json" in output.get("data", {})
+        or "image/png" in output.get("data", {})
     ]
     assert len(rendered) >= 4
 

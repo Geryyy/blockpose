@@ -14,9 +14,9 @@ import numpy as np
 _REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(_REPO_ROOT / "python"))
 
-from blockpose.detection import DetectionParams, detect_blocks
-from blockpose.evaluate import evaluate
-from blockpose.io import load_snapshot
+from blockpose.detection import DetectionParams, SensorContext, detect_blocks  # noqa: E402
+from blockpose.evaluate import evaluate  # noqa: E402
+from blockpose.io import load_snapshot, load_T_world_seyond, load_tf_snapshot  # noqa: E402
 
 _DEFAULT_TRANSFORM = _REPO_ROOT / "config" / "transforms_pzs100_initial_pose_1.yaml"
 _DEFAULT_SNAPSHOTS = _REPO_ROOT / "data" / "registration_snapshots"
@@ -41,9 +41,22 @@ def _run_snapshot(
     params: DetectionParams,
     visualize: bool,
 ) -> dict:
-    pts_world, gt = load_snapshot(snap_dir, config_path)
+    tf_path = snap_dir / "tf.yaml"
+    # Prefer the snapshot's own tf.yaml (crane joint state at capture time)
+    # over the static reference config: they can differ by several metres,
+    # which otherwise puts the cloud nowhere near the recorded ground truth.
+    if tf_path.is_file():
+        T_world_cloud = load_tf_snapshot(tf_path).T_world_cloud
+    else:
+        T_world_cloud = load_T_world_seyond(config_path)
+    pts_world, gt = load_snapshot(snap_dir, config_path, T_world_cloud=T_world_cloud)
 
-    detections = detect_blocks(pts_world, params)
+    # Ray/range evidence from the returns themselves (no true misses available
+    # from a plain point cloud), which activates the detector's visibility and
+    # free-space-violation scoring -- without it, real-data orientation
+    # disambiguation for non-square (laid) blocks is markedly worse.
+    sensor_context = SensorContext.from_points(T_world_cloud[:3, 3], pts_world)
+    detections = detect_blocks(pts_world, params, sensor_context=sensor_context)
     result = evaluate(detections, gt)
 
     if visualize:
@@ -120,7 +133,8 @@ def main() -> None:
         "snapshots",
         nargs="*",
         type=Path,
-        help="Snapshot directories. If omitted, all snapshots under data/registration_snapshots/ are used.",
+        help="Snapshot directories. If omitted, all snapshots under "
+        "data/registration_snapshots/ are used.",
     )
     parser.add_argument(
         "--config",
@@ -133,6 +147,17 @@ def main() -> None:
         type=float,
         default=0.04,
         help="Voxel downsample size in meters (default: 0.04)",
+    )
+    parser.add_argument(
+        "--min-score",
+        type=float,
+        default=0.4,
+        help="Minimum evidence score to keep a hypothesis (default: 0.4). Real "
+        "snapshots can contain non-block clutter (e.g. the crane/gripper hardware) "
+        "that still produces a plausible-shaped hypothesis; measured on real "
+        "snapshots, spurious hypotheses like that score under ~0.2 while every "
+        "confirmed block scores over ~0.65, so 0.4 is a conservative cut. "
+        "Pass 0.0 to disable (matches every prior/synthetic default).",
     )
     parser.add_argument(
         "--visualize",
@@ -151,7 +176,7 @@ def main() -> None:
     else:
         snap_dirs = sorted(_DEFAULT_SNAPSHOTS.iterdir())
 
-    params = DetectionParams(voxel_size=args.voxel_size)
+    params = DetectionParams(voxel_size=args.voxel_size, min_score=args.min_score)
 
     rows = []
     for snap_dir in snap_dirs:
