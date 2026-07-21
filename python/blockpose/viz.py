@@ -16,8 +16,7 @@ from __future__ import annotations
 import numpy as np
 import plotly.graph_objects as go
 
-from blockpose.pose import BlockPose
-from blockpose.synth import BLOCK_DIMS
+from blockpose.pose import BLOCK_DIMS, BlockPose
 
 GT_COLOR = "#00c853"
 DET_COLOR = "#2979ff"

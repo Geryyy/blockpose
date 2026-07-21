@@ -223,7 +223,10 @@ def test_evidence_selection_collapses_duplicates_but_keeps_neighbors() -> None:
 def _make_pose_for_selection(position):
     from blockpose.pose import BlockPose
 
-    return BlockPose(np.asarray(position, dtype=np.float64), np.eye(3))
+    # Pinned upright: _boxes_overlap uses pose.dims, and the 0.6 m spacing
+    # cases in this file assume the 0.6x0.6 square footprint, not the
+    # ambient default.
+    return BlockPose(np.asarray(position, dtype=np.float64), np.eye(3), dims=(0.6, 0.6, 0.9))
 
 
 def test_detection_is_stable_under_point_permutation() -> None:
@@ -243,20 +246,23 @@ def test_detection_is_stable_under_point_permutation() -> None:
 
 
 def test_adversarial_offset_stack_has_no_cross_layer_pairing_bias() -> None:
+    upright = (0.6, 0.6, 0.9)
     sample = generate_scene(
         [
-            BlockSpec(0.0, 0.0, z=0.45, yaw_deg=30.0),
-            BlockSpec(0.34641016, 0.2, z=1.35, yaw_deg=30.0),
+            BlockSpec(0.0, 0.0, z=0.45, yaw_deg=30.0, dims=upright),
+            BlockSpec(0.34641016, 0.2, z=1.35, yaw_deg=30.0, dims=upright),
         ],
-        SynthParams(look_at=(0.15, 0.1, 0.9)),
+        SynthParams(look_at=(0.15, 0.1, 0.9), dims=upright),
         np.random.default_rng(23),
     )
-    detections = detect_blocks(sample.points)
+    detections = detect_blocks(sample.points, DetectionParams(block_dims=upright))
     result = evaluate(detections, sample.ground_truth)
     assert result.unmatched_det == 0
     if result.matched:
         assert max(result.translation_errors_m) <= 0.04
-    permuted = detect_blocks(np.random.default_rng(101).permutation(sample.points))
+    permuted = detect_blocks(
+        np.random.default_rng(101).permutation(sample.points), DetectionParams(block_dims=upright)
+    )
     stability = evaluate(permuted, detections, max_match_dist=0.1)
     assert stability.matched == len(detections)
     assert max(stability.translation_errors_m, default=0.0) <= 0.03
@@ -273,7 +279,7 @@ def _cuboid_ray_context():
     displaced cuboid measurably worse.
     """
     sample = generate_scene(
-        [BlockSpec(0.0, 0.0)],
+        [BlockSpec(0.0, 0.0, dims=(0.6, 0.6, 0.9))],
         SynthParams(sensor_pos=(-5.0, 0.0, 3.0), range_noise_std=0.0, ang_res_deg=0.5),
         np.random.default_rng(7),
     )
@@ -288,7 +294,7 @@ def test_visibility_score_prefers_true_cuboid_and_wrong_height_loses() -> None:
     true_pose = _make_pose_for_selection((0.0, 0.0, 0.45))
     shifted_pose = _make_pose_for_selection((0.0, 0.25, 0.45))
     wrong_height = _make_pose_for_selection((0.0, 0.0, 0.7))
-    params = DetectionParams()
+    params = DetectionParams(block_dims=(0.6, 0.6, 0.9))
     true = _make_hypothesis(true_pose, np.array([0.0, 0.0, 0.9]), 100, ground, params, context)
     shifted = _make_hypothesis(
         shifted_pose, np.array([0.0, 0.25, 0.9]), 100, ground, params, context
@@ -372,15 +378,16 @@ def test_parallel_rays_do_not_emit_runtime_warning() -> None:
 
 
 def test_far_block_survives_nearby_nonoccluding_clutter() -> None:
+    upright = (0.6, 0.6, 0.9)
     sensor = (-5.0, 0.0, 4.0)
     far = generate_scene(
-        [BlockSpec(8.0, 0.0, yaw_deg=61.0)],
-        SynthParams(sensor_pos=sensor, look_at=(8.0, 0.0, 0.45)),
+        [BlockSpec(8.0, 0.0, yaw_deg=61.0, dims=upright)],
+        SynthParams(sensor_pos=sensor, look_at=(8.0, 0.0, 0.45), dims=upright),
         np.random.default_rng(31),
     )
     near = generate_scene(
         [],
-        SynthParams(sensor_pos=sensor, look_at=(0.0, -2.0, 0.45), az_fov_deg=40.0),
+        SynthParams(sensor_pos=sensor, look_at=(0.0, -2.0, 0.45), az_fov_deg=40.0, dims=upright),
         np.random.default_rng(32),
         ClutterParams(
             trees=False,
@@ -396,7 +403,10 @@ def test_far_block_survives_nearby_nonoccluding_clutter() -> None:
         np.vstack([far.ray_directions, near.ray_directions]),
         np.concatenate([far.ranges, near.ranges]),
     )
-    result = evaluate(detect_blocks(points, sensor_context=context), far.ground_truth)
+    result = evaluate(
+        detect_blocks(points, DetectionParams(block_dims=upright), sensor_context=context),
+        far.ground_truth,
+    )
     assert result.recall == 1.0
     assert result.unmatched_det == 0
 

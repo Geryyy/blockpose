@@ -8,7 +8,7 @@ from enum import Enum
 import numpy as np
 import open3d as o3d
 
-from blockpose.pose import BlockPose
+from blockpose.pose import BLOCK_DIMS, BlockPose
 from blockpose.ransac import segment_plane
 from blockpose.refine import refine_poses
 
@@ -41,11 +41,11 @@ class DetectionParams:
     top_plane_angle_deg: float = 30.0
     side_plane_angle_deg: float = 20.0
     max_plane_center_dist: float = 0.6
-    block_dims: tuple[float, float, float] = (0.6, 0.6, 0.9)
+    block_dims: tuple[float, float, float] = BLOCK_DIMS
     # Orientations to hypothesise when the block's resting pose is unknown. The
-    # same 0.6 x 0.6 x 0.9 block stands upright as (0.6, 0.6, 0.9) or lies on a
-    # long face as (0.9, 0.6, 0.6) -- every wall course in config/wall_plans.yaml
-    # is the latter, and a detector configured for one sees NONE of the other.
+    # same 0.9 x 0.6 x 0.6 block lies on a long face (the default, matching
+    # every wall course in config/wall_plans.yaml) or stands upright as
+    # (0.6, 0.6, 0.9) -- a detector configured for one sees NONE of the other.
     #
     # Empty means "use block_dims only". Multi-orientation is NOT yet the default
     # because the evidence model cannot reliably rank the two: `height_consistency`
@@ -56,8 +56,8 @@ class DetectionParams:
     # orientations needs a feature that penalises a box protruding into space the
     # returns show is empty; see docs/detector-plan.md.
     #
-    # Set explicitly to enable, e.g. ((0.9, 0.6, 0.6),) when a plan says the
-    # blocks are laid, or both entries to accept the current precision cost.
+    # Set explicitly to enable, e.g. ((0.6, 0.6, 0.9),) when a scene says the
+    # blocks stand upright, or both entries to accept the current precision cost.
     candidate_dims: tuple[tuple[float, float, float], ...] = ()
     # Model-based refinement (blockpose.refine). The closed-form pose uses a top
     # plane plus at most one side plane; refinement fits the exact cuboid to

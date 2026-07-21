@@ -45,9 +45,13 @@ def test_pose_carries_its_own_extents() -> None:
 
 
 def test_candidate_dims_defaults_to_block_dims_only() -> None:
+    """block_dims defaults to the laid orientation; its footprint isn't square,
+    so the single candidate still expands to its yaw-swapped twin (unlike the
+    upright block, whose square footprint collapses the swap onto itself)."""
     params = DetectionParams()
     assert params.candidate_dims == ()
-    assert _candidate_dims(params) == (UPRIGHT,)
+    assert params.block_dims == LAID
+    assert _candidate_dims(params) == (LAID, (0.6, 0.9, 0.6))
 
 
 def test_candidate_dims_expands_non_square_footprints_and_deduplicates() -> None:

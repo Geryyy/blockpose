@@ -30,7 +30,7 @@ from blockpose.io import (  # noqa: E402
     load_T_world_camera,
     load_tf_snapshot,
 )
-from blockpose.pose import BlockPose  # noqa: E402
+from blockpose.pose import BLOCK_DIMS, BlockPose  # noqa: E402
 from blockpose.projection import (  # noqa: E402
     colorize_world_points,
     project_points,
@@ -41,10 +41,9 @@ DEFAULT_CONFIG = REPO_ROOT / "config" / "transforms_pzs100_initial_pose_1.yaml"
 DEFAULT_CAMERA_CALIB = REPO_ROOT / "config" / "calibration" / "calib_blackfly_to_seyond.yaml"
 # Fallback extents when a block's own points can't be measured (see
 # _estimate_block_extents). registrations.yaml only carries position +
-# orientation, not size, and this "upright" shape is wrong for the many
-# blocks that rest lying on a long face (config/wall_plans.yaml default
-# block_size is [0.9, 0.6, 0.6]) -- it's a last resort, not an assumption.
-BLOCK_EXTENTS_M = np.array([0.6, 0.6, 0.9], dtype=np.float64)
+# orientation, not size, so this falls back to the repo's canonical laid
+# orientation (blockpose.pose.BLOCK_DIMS) -- a last resort, not an assumption.
+BLOCK_EXTENTS_M = np.asarray(BLOCK_DIMS, dtype=np.float64)
 MASK_PROXIMITY_RADIUS_M = 0.6
 MIN_BLOCK_EXTENT_M = 0.3
 MAX_BLOCK_EXTENT_M = 1.2

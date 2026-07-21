@@ -102,7 +102,9 @@ def test_tilted_default_block_is_physically_settled() -> None:
         np.random.default_rng(4),
     )
     pose = sample.ground_truth[0]
-    half = np.asarray((0.6, 0.6, 0.9)) / 2
+    # Derived from the actual pose, not a re-hardcoded literal, so this check
+    # stays correct regardless of what BlockSpec.dims defaults to.
+    half = np.asarray(pose.dims) / 2
     corners = np.array(
         [
             [x, y, z]

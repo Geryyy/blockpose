@@ -23,7 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "python"))
 
 from blockpose.detection import DetectionParams, detect_scene_sample  # noqa: E402
-from blockpose.pose import BlockPose  # noqa: E402
+from blockpose.pose import BLOCK_DIMS, BlockPose  # noqa: E402
 from blockpose.scenes import generate_from_config, load_scene_config  # noqa: E402
 
 GT_COLOR = "#00e000"
@@ -74,7 +74,7 @@ def main() -> int:
     cfg = load_scene_config(scene_path)
     sample = generate_from_config(cfg, np.random.default_rng(args.seed))
     pts, gt = sample.points, sample.ground_truth
-    dims = cfg.specs[0].dims if cfg.specs else (0.6, 0.6, 0.9)
+    dims = cfg.specs[0].dims if cfg.specs else BLOCK_DIMS
 
     # Pass the full sample, not just points: without the sensor origin and rays
     # the detector loses range-adaptive density scaling and free-space evidence,

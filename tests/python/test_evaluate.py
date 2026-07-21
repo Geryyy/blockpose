@@ -32,29 +32,37 @@ def test_translation_error_known_distance() -> None:
     assert translation_error(a, b) == pytest.approx(5.0)
 
 
+_UPRIGHT_DIMS = (0.6, 0.6, 0.9)  # square footprint about Z: yaw is a free symmetry
+
+
 def test_rotation_error_zero_for_same() -> None:
     pose = _make_pose(yaw_deg=37.0)
     assert rotation_error_deg(pose, pose) == pytest.approx(0.0, abs=1e-5)
 
 
 def test_rotation_error_90deg_is_zero_by_symmetry() -> None:
-    """90-degree rotation about world Z is a symmetry equivalence — error = 0."""
+    """90-degree rotation about world Z is a symmetry equivalence — error = 0.
+
+    Pinned to an explicit upright (square-about-Z) dims tuple rather than
+    relying on blockpose.pose.BLOCK_DIMS, since which axis pair is equal (and
+    thus which rotation is "free") depends entirely on that shape.
+    """
     det = _make_pose(yaw_deg=90.0)
     gt = _make_pose(yaw_deg=0.0)
-    assert rotation_error_deg(det, gt) == pytest.approx(0.0, abs=1e-5)
+    assert rotation_error_deg(det, gt, _UPRIGHT_DIMS) == pytest.approx(0.0, abs=1e-5)
 
 
 def test_rotation_error_180deg_is_zero_by_symmetry() -> None:
     det = _make_pose(yaw_deg=180.0)
     gt = _make_pose(yaw_deg=0.0)
-    assert rotation_error_deg(det, gt) == pytest.approx(0.0, abs=1e-5)
+    assert rotation_error_deg(det, gt, _UPRIGHT_DIMS) == pytest.approx(0.0, abs=1e-5)
 
 
 def test_rotation_error_45deg_is_maximum_ambiguity() -> None:
     """45° is halfway between two symmetry equivalents — error = 45°."""
     det = _make_pose(yaw_deg=45.0)
     gt = _make_pose(yaw_deg=0.0)
-    assert rotation_error_deg(det, gt) == pytest.approx(45.0, abs=0.1)
+    assert rotation_error_deg(det, gt, _UPRIGHT_DIMS) == pytest.approx(45.0, abs=0.1)
 
 
 def test_match_detections_empty_inputs() -> None:

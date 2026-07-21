@@ -37,6 +37,7 @@ from pathlib import Path
 import numpy as np
 import yaml
 
+from blockpose.pose import BLOCK_DIMS
 from blockpose.synth import BlockSpec
 
 DEFAULT_PLANS = Path(__file__).resolve().parents[2] / "config" / "wall_plans.yaml"
@@ -102,7 +103,7 @@ def load_wall_plans(path: str | Path = DEFAULT_PLANS) -> dict[str, WallPlan]:
     """Parse every plan in the YAML into resolved `WallPlan` objects."""
     data = yaml.safe_load(Path(path).read_text()) or {}
     defaults = data.get("defaults") or {}
-    block_size = tuple(float(v) for v in defaults.get("block_size", (0.9, 0.6, 0.6)))
+    block_size = tuple(float(v) for v in defaults.get("block_size", BLOCK_DIMS))
     if len(block_size) != 3:
         raise ValueError(f"defaults.block_size must have three entries, got {block_size}")
 

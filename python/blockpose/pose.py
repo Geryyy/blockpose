@@ -9,12 +9,17 @@ from functools import lru_cache
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-# Canonical block extents in the block frame. Lives here rather than in synth so
-# that pose utilities can default to it without importing the generator.
-# NOTE: config/wall_plans.yaml lays blocks down as (0.9, 0.6, 0.6); the two
-# orientations have DIFFERENT symmetry groups, so pass `dims` explicitly
-# whenever the block is not the upright default.
-BLOCK_DIMS = (0.6, 0.6, 0.9)
+# Canonical block extents (x, y, z) in the block's own frame. Lives here
+# rather than in synth so that pose utilities can default to it without
+# importing the generator. This is the block laid on its long face -- the
+# resting orientation used by every course in config/wall_plans.yaml and the
+# one actually observed in data/registration_snapshots/. The two orientations
+# have DIFFERENT symmetry groups (see _cuboid_symmetry_group), so pass `dims`
+# explicitly whenever a block is not in this default orientation.
+BLOCK_DIMS = (0.9, 0.6, 0.6)
+# The same physical block standing on end, as in a staging pallet/stack.
+# Never assumed -- pass it explicitly wherever a scene models that orientation.
+BLOCK_DIMS_UPRIGHT = (0.6, 0.6, 0.9)
 
 
 @dataclass
@@ -25,7 +30,7 @@ class BlockPose:
     source: str = ""
     # Extents in the block's own frame. Carried on the pose because a pose alone
     # does not say which way a non-cube block is lying, and the same physical
-    # block appears as (0.6, 0.6, 0.9) standing or (0.9, 0.6, 0.6) laid down.
+    # block appears as (0.9, 0.6, 0.6) laid down or (0.6, 0.6, 0.9) standing.
     # Downstream code needs this to pick the right symmetry group and to fit the
     # right model, so it must travel with the pose rather than be assumed.
     dims: tuple[float, float, float] = BLOCK_DIMS
@@ -127,7 +132,7 @@ def symmetry_equivalents(
     """Rotations of `R` that describe the same physical block placement.
 
     `dims` are the block's extents in its own frame and determine the symmetry
-    group; see `_cuboid_symmetry_group`. For the default upright 0.6x0.6x0.9
+    group; see `_cuboid_symmetry_group`. For the default laid 0.9x0.6x0.6
     block this returns 8 rotations (4 about the long axis, each with an
     end-for-end flip), not the 4 an earlier version assumed.
     """

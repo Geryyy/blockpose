@@ -23,6 +23,7 @@ from blockpose.confidence import (  # noqa: E402
     save_artifact,
 )
 from blockpose.detection import (  # noqa: E402
+    DetectionParams,
     SensorContext,
     detect_blocks_detailed,
 )
@@ -36,10 +37,20 @@ GATE_SEEDS = list(range(100, 104))
 def build_corpus(seeds: list[int]) -> tuple[np.ndarray, np.ndarray]:
     rows: list[np.ndarray] = []
     labels: list[float] = []
+    default_params = DetectionParams()
     for seed in seeds:
         for _, sample in generate_scenario_matrix(seed):
             context = SensorContext(sample.sensor_origin, sample.ray_directions, sample.ranges)
-            result = detect_blocks_detailed(sample.points, sensor_context=context)
+            # Scenarios mix upright staging blocks and laid wall-plan blocks
+            # (see scenario_matrix.py); the detector needs the matching prior,
+            # same as tools/eval_detector.py's _aggregate.
+            dims = tuple(sample.manifest.get("params", {}).get("dims", default_params.block_dims))
+            params = (
+                default_params
+                if dims == tuple(default_params.block_dims)
+                else DetectionParams(block_dims=dims)
+            )
+            result = detect_blocks_detailed(sample.points, params, sensor_context=context)
             candidates = result.poses
             features = [item.features for item in result.diagnostics]
             matched = {index for index, _ in match_detections(candidates, sample.ground_truth, 0.5)}

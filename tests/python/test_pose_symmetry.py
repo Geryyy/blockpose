@@ -94,9 +94,9 @@ def test_small_errors_survive_the_larger_group() -> None:
     assert rotation_error_deg(tilted, identity, UPRIGHT) == pytest.approx(3.0, abs=1e-6)
 
 
-def test_default_dims_are_the_upright_block() -> None:
-    assert BLOCK_DIMS == UPRIGHT
-    assert len(symmetry_equivalents(np.eye(3))) == len(_cuboid_symmetry_group(UPRIGHT))
+def test_default_dims_are_the_laid_block() -> None:
+    assert BLOCK_DIMS == LAID
+    assert len(symmetry_equivalents(np.eye(3))) == len(_cuboid_symmetry_group(LAID))
 
 
 def test_equivalents_are_left_multiplied_onto_the_pose() -> None:

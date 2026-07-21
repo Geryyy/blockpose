@@ -24,7 +24,7 @@ def _pose(position, yaw_deg=0.0) -> BlockPose:
     angle = np.radians(yaw_deg)
     cos, sin = np.cos(angle), np.sin(angle)
     rotation = np.array([[cos, -sin, 0.0], [sin, cos, 0.0], [0.0, 0.0, 1.0]])
-    return BlockPose(np.asarray(position, dtype=np.float64), rotation)
+    return BlockPose(np.asarray(position, dtype=np.float64), rotation, dims=DIMS)
 
 
 def test_box_sdf_sign_and_magnitude() -> None:
@@ -57,14 +57,16 @@ def test_surface_distance_respects_pose() -> None:
 
 def test_refine_recovers_a_perturbed_pose() -> None:
     sample = generate_scene(
-        [BlockSpec(0.0, 0.0, yaw_deg=27.0)],
-        SynthParams(range_noise_std=0.005),
+        [BlockSpec(0.0, 0.0, yaw_deg=27.0, dims=DIMS)],
+        SynthParams(range_noise_std=0.005, dims=DIMS),
         np.random.default_rng(3),
     )
     truth = sample.ground_truth[0]
     on_block = sample.points[sample.instance_ids >= 0]
 
-    disturbed = BlockPose(truth.position + np.array([0.05, -0.04, 0.02]), truth.rotation)
+    disturbed = BlockPose(
+        truth.position + np.array([0.05, -0.04, 0.02]), truth.rotation, dims=DIMS
+    )
     refined, did_refine = refine_pose(disturbed, on_block, DIMS)
 
     assert did_refine
@@ -75,8 +77,8 @@ def test_refine_recovers_a_perturbed_pose() -> None:
 
 def test_refine_is_deterministic() -> None:
     sample = generate_scene(
-        [BlockSpec(0.0, 0.0, yaw_deg=12.0)],
-        SynthParams(range_noise_std=0.01),
+        [BlockSpec(0.0, 0.0, yaw_deg=12.0, dims=DIMS)],
+        SynthParams(range_noise_std=0.01, dims=DIMS),
         np.random.default_rng(5),
     )
     points = sample.points[sample.instance_ids >= 0]
@@ -98,11 +100,13 @@ def test_refine_declines_when_evidence_is_insufficient() -> None:
 def test_refine_declines_when_correction_exceeds_guard() -> None:
     """A hypothesis fitted to a distant block must not be dragged onto it."""
     sample = generate_scene(
-        [BlockSpec(0.0, 0.0)], SynthParams(range_noise_std=0.0), np.random.default_rng(11)
+        [BlockSpec(0.0, 0.0, dims=DIMS)],
+        SynthParams(range_noise_std=0.0, dims=DIMS),
+        np.random.default_rng(11),
     )
     on_block = sample.points[sample.instance_ids >= 0]
     far_off = BlockPose(sample.ground_truth[0].position + np.array([1.2, 0.0, 0.0]),
-                        sample.ground_truth[0].rotation)
+                        sample.ground_truth[0].rotation, dims=DIMS)
     refined, did_refine = refine_pose(far_off, on_block, DIMS, max_translation=0.15)
     assert not did_refine
     assert refined is far_off
@@ -110,10 +114,14 @@ def test_refine_declines_when_correction_exceeds_guard() -> None:
 
 def test_refine_keeps_source_and_confidence_provenance() -> None:
     sample = generate_scene(
-        [BlockSpec(0.0, 0.0)], SynthParams(range_noise_std=0.005), np.random.default_rng(2)
+        [BlockSpec(0.0, 0.0, dims=DIMS)],
+        SynthParams(range_noise_std=0.005, dims=DIMS),
+        np.random.default_rng(2),
     )
     truth = sample.ground_truth[0]
-    start = BlockPose(truth.position + 0.02, truth.rotation, confidence=0.7, source="plane_fit")
+    start = BlockPose(
+        truth.position + 0.02, truth.rotation, confidence=0.7, source="plane_fit", dims=DIMS
+    )
     refined, did_refine = refine_pose(start, sample.points[sample.instance_ids >= 0], DIMS)
     assert did_refine
     assert refined.confidence == 0.7
@@ -122,11 +130,11 @@ def test_refine_keeps_source_and_confidence_provenance() -> None:
 
 def test_assign_points_splits_a_stack_between_hypotheses() -> None:
     sample = generate_scene(
-        [BlockSpec(0.0, 0.0, z=0.45), BlockSpec(0.0, 0.0, z=1.35)],
-        SynthParams(range_noise_std=0.005, look_at=(0.0, 0.0, 0.9)),
+        [BlockSpec(0.0, 0.0, z=0.45, dims=DIMS), BlockSpec(0.0, 0.0, z=1.35, dims=DIMS)],
+        SynthParams(range_noise_std=0.005, look_at=(0.0, 0.0, 0.9), dims=DIMS),
         np.random.default_rng(4),
     )
-    poses = [BlockPose(g.position, g.rotation) for g in sample.ground_truth]
+    poses = [BlockPose(g.position, g.rotation, dims=DIMS) for g in sample.ground_truth]
     on_blocks = sample.points[sample.instance_ids >= 0]
     labels = sample.instance_ids[sample.instance_ids >= 0]
 
@@ -155,12 +163,14 @@ def test_assign_points_handles_empty_inputs() -> None:
 
 def test_refine_poses_improves_a_stack_without_collapsing_it() -> None:
     sample = generate_scene(
-        [BlockSpec(0.0, 0.0, z=0.45), BlockSpec(0.25, 0.0, z=1.35)],
-        SynthParams(range_noise_std=0.01, look_at=(0.1, 0.0, 0.9)),
+        [BlockSpec(0.0, 0.0, z=0.45, dims=DIMS), BlockSpec(0.25, 0.0, z=1.35, dims=DIMS)],
+        SynthParams(range_noise_std=0.01, look_at=(0.1, 0.0, 0.9), dims=DIMS),
         np.random.default_rng(8),
     )
     truth = sample.ground_truth
-    start = [BlockPose(g.position + np.array([0.03, 0.02, 0.0]), g.rotation) for g in truth]
+    start = [
+        BlockPose(g.position + np.array([0.03, 0.02, 0.0]), g.rotation, dims=DIMS) for g in truth
+    ]
     refined = refine_poses(start, sample.points, DIMS)
 
     assert len(refined) == 2

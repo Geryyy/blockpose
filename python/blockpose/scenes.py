@@ -7,7 +7,8 @@ from it. Iterate the YAML and re-render with `tools/view_scene.py`.
 Schema (all sections optional except at least one of `blocks`/`patterns`):
 
     name: wall_partial
-    dims: [0.6, 0.6, 0.9]          # default block size (x, y, z); long axis is z
+    dims: [0.6, 0.6, 0.9]          # block size (x, y, z); omit for the default
+                                   # laid orientation (blockpose.pose.BLOCK_DIMS)
     sensor:
       pos: [-6.0, -1.5, 4.5]
       look_at: [1.5, 0.0, 1.3]
@@ -32,9 +33,8 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from blockpose.pose import BlockPose
+from blockpose.pose import BLOCK_DIMS, BlockPose
 from blockpose.synth import (
-    BLOCK_DIMS,
     BlockSpec,
     ClutterParams,
     SceneSample,

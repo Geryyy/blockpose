@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from blockpose.pose import BLOCK_DIMS_UPRIGHT
 from blockpose.synth import (
     BlockSpec,
     ClutterParams,
@@ -20,6 +21,23 @@ from blockpose.synth import (
     seyond_measured,
 )
 from blockpose.wall_plans import load_wall_plans
+
+
+def _upright_spec(x: float, y: float, **kwargs) -> BlockSpec:
+    """A BlockSpec for the generic (non-wall-plan) registry below.
+
+    Every scenario here models a free-standing/staging block, not a wall
+    course, so it is pinned to the upright orientation explicitly rather than
+    riding on whatever blockpose.pose.BLOCK_DIMS happens to default to.
+    """
+    kwargs.setdefault("dims", BLOCK_DIMS_UPRIGHT)
+    return BlockSpec(x, y, **kwargs)
+
+
+def _upright_params(**kwargs) -> SynthParams:
+    """SynthParams for the generic registry, pinned upright (see _upright_spec)."""
+    kwargs.setdefault("dims", BLOCK_DIMS_UPRIGHT)
+    return SynthParams(**kwargs)
 
 
 @dataclass(frozen=True)
@@ -37,27 +55,32 @@ class Scenario:
 
 
 def scenario_registry() -> tuple[Scenario, ...]:
-    """Return the stable diagnostic matrix definition."""
-    base = BlockSpec(0.0, 0.0, yaw_deg=23.0)
+    """Return the stable diagnostic matrix definition.
+
+    Every scenario below (except `wall_plan_scenarios()`) models a
+    free-standing/staging block, so it is built via `_upright_spec`/
+    `_upright_params`, pinned to BLOCK_DIMS_UPRIGHT explicitly.
+    """
+    base = _upright_spec(0.0, 0.0, yaw_deg=23.0)
     return (
-        Scenario("isolated_near", "isolated_range", (base,), SynthParams()),
+        Scenario("isolated_near", "isolated_range", (base,), _upright_params()),
         Scenario(
             "isolated_far",
             "isolated_range",
-            (BlockSpec(8.0, 0.0, yaw_deg=61.0),),
-            SynthParams(sensor_pos=(-5.0, 0.0, 4.0), look_at=(8.0, 0.0, 0.45)),
+            (_upright_spec(8.0, 0.0, yaw_deg=61.0),),
+            _upright_params(sensor_pos=(-5.0, 0.0, 4.0), look_at=(8.0, 0.0, 0.45)),
         ),
         Scenario(
             "isolated_tilt_7deg",
             "tilt",
-            (BlockSpec(0.0, 0.0, yaw_deg=37.0, pitch_deg=7.0, roll_deg=-5.0),),
-            SynthParams(),
+            (_upright_spec(0.0, 0.0, yaw_deg=37.0, pitch_deg=7.0, roll_deg=-5.0),),
+            _upright_params(),
         ),
         Scenario(
             "isolated_noise_3cm",
             "noise",
             (base,),
-            SynthParams(range_noise_std=0.03, range_noise_slope=0.001),
+            _upright_params(range_noise_std=0.03, range_noise_slope=0.001),
         ),
         # Two dropout modes, because they fail differently. Random thinning
         # degrades density uniformly; a contiguous stripe punches a structured
@@ -68,55 +91,55 @@ def scenario_registry() -> tuple[Scenario, ...]:
             "isolated_dropout_60pct_random",
             "dropout",
             (base,),
-            SynthParams(dropout=0.6),
+            _upright_params(dropout=0.6),
         ),
         Scenario(
             "isolated_dropout_40pct",
             "dropout",
             (base,),
-            SynthParams(dropout=0.4, stripe_dropout=0.1),
+            _upright_params(dropout=0.4, stripe_dropout=0.1),
         ),
         Scenario(
             "three_separated",
             "multi_block",
             tuple(
-                BlockSpec(0.0, y, yaw_deg=15.0 + 20.0 * i)
+                _upright_spec(0.0, y, yaw_deg=15.0 + 20.0 * i)
                 for i, y in enumerate((-1.3, 0.0, 1.3))
             ),
-            SynthParams(az_fov_deg=100.0),
+            _upright_params(az_fov_deg=100.0),
         ),
         Scenario(
             "touching_row",
             "touching",
-            tuple(BlockSpec(0.0, 0.6 * i, yaw_deg=0.0) for i in range(3)),
-            SynthParams(az_fov_deg=100.0),
+            tuple(_upright_spec(0.0, 0.6 * i, yaw_deg=0.0) for i in range(3)),
+            _upright_params(az_fov_deg=100.0),
         ),
         Scenario(
             "two_stack",
             "stack",
-            (BlockSpec(0.0, 0.0, z=0.45), BlockSpec(0.0, 0.0, z=1.35)),
-            SynthParams(look_at=(0.0, 0.0, 0.9)),
+            (_upright_spec(0.0, 0.0, z=0.45), _upright_spec(0.0, 0.0, z=1.35)),
+            _upright_params(look_at=(0.0, 0.0, 0.9)),
         ),
         Scenario(
             "offset_two_stack",
             "stack",
-            (BlockSpec(0.0, 0.0, z=0.45), BlockSpec(0.25, 0.0, z=1.35)),
-            SynthParams(look_at=(0.1, 0.0, 0.9)),
+            (_upright_spec(0.0, 0.0, z=0.45), _upright_spec(0.25, 0.0, z=1.35)),
+            _upright_params(look_at=(0.1, 0.0, 0.9)),
         ),
         Scenario(
             "offset_two_stack_yaw30",
             "stack",
             (
-                BlockSpec(0.0, 0.0, z=0.45, yaw_deg=30.0),
-                BlockSpec(0.34641016, 0.2, z=1.35, yaw_deg=30.0),
+                _upright_spec(0.0, 0.0, z=0.45, yaw_deg=30.0),
+                _upright_spec(0.34641016, 0.2, z=1.35, yaw_deg=30.0),
             ),
-            SynthParams(look_at=(0.15, 0.1, 0.9)),
+            _upright_params(look_at=(0.15, 0.1, 0.9)),
         ),
         Scenario(
             "near_field_hard_negative",
             "clutter",
             (base,),
-            SynthParams(az_fov_deg=100.0),
+            _upright_params(az_fov_deg=100.0),
             ClutterParams(
                 trees=False,
                 container=False,
@@ -129,7 +152,7 @@ def scenario_registry() -> tuple[Scenario, ...]:
             "hard_negative_only",
             "hard_negative",
             (),
-            SynthParams(az_fov_deg=100.0, look_at=(0.0, 0.0, 0.45)),
+            _upright_params(az_fov_deg=100.0, look_at=(0.0, 0.0, 0.45)),
             ClutterParams(
                 trees=False,
                 container=False,
@@ -142,7 +165,7 @@ def scenario_registry() -> tuple[Scenario, ...]:
             "elongated_full_height_negative",
             "hard_negative",
             (),
-            SynthParams(az_fov_deg=100.0, look_at=(0.0, 0.0, 0.45)),
+            _upright_params(az_fov_deg=100.0, look_at=(0.0, 0.0, 0.45)),
             ClutterParams(
                 trees=False,
                 container=False,
@@ -160,8 +183,8 @@ def scenario_registry() -> tuple[Scenario, ...]:
             Scenario(
                 f"standoff_{distance}m",
                 "standoff",
-                (BlockSpec(float(distance) - 5.0, 0.0, yaw_deg=41.0),),
-                SynthParams(
+                (_upright_spec(float(distance) - 5.0, 0.0, yaw_deg=41.0),),
+                _upright_params(
                     sensor_pos=(-5.0, 0.0, 4.0),
                     look_at=(float(distance) - 5.0, 0.0, 0.45),
                 ),
@@ -174,36 +197,36 @@ def scenario_registry() -> tuple[Scenario, ...]:
         Scenario(
             "sloped_ground_4deg",
             "uneven_ground",
-            (BlockSpec(0.0, 0.0, yaw_deg=17.0),),
-            SynthParams(ground_slope_deg=4.0),
+            (_upright_spec(0.0, 0.0, yaw_deg=17.0),),
+            _upright_params(ground_slope_deg=4.0),
         ),
         Scenario(
             "undulating_ground",
             "uneven_ground",
             tuple(
-                BlockSpec(0.0, y, yaw_deg=25.0 + 30.0 * i)
+                _upright_spec(0.0, y, yaw_deg=25.0 + 30.0 * i)
                 for i, y in enumerate((-1.3, 0.0, 1.3))
             ),
-            SynthParams(az_fov_deg=100.0, ground_undulation=0.10, ground_roughness=0.015),
+            _upright_params(az_fov_deg=100.0, ground_undulation=0.10, ground_roughness=0.015),
         ),
         Scenario(
             "sloped_rough_ground",
             "uneven_ground",
-            (BlockSpec(0.0, 0.0, yaw_deg=52.0, pitch_deg=2.5),),
-            SynthParams(ground_slope_deg=3.0, ground_undulation=0.06, ground_roughness=0.02),
+            (_upright_spec(0.0, 0.0, yaw_deg=52.0, pitch_deg=2.5),),
+            _upright_params(ground_slope_deg=3.0, ground_undulation=0.06, ground_roughness=0.02),
         ),
         # Mixed pixels: the dominant real LiDAR artifact at depth edges.
         Scenario(
             "mixed_pixels",
             "sensor_artifacts",
-            (BlockSpec(0.0, 0.0, yaw_deg=33.0),),
-            SynthParams(mixed_pixel_fraction=0.25),
+            (_upright_spec(0.0, 0.0, yaw_deg=33.0),),
+            _upright_params(mixed_pixel_fraction=0.25),
         ),
         Scenario(
             "mixed_pixels_and_noise",
             "sensor_artifacts",
-            (BlockSpec(0.0, 0.0, yaw_deg=33.0),),
-            SynthParams(mixed_pixel_fraction=0.35, range_noise_std=0.02, dropout=0.2),
+            (_upright_spec(0.0, 0.0, yaw_deg=33.0),),
+            _upright_params(mixed_pixel_fraction=0.35, range_noise_std=0.02, dropout=0.2),
         ),
         # Assembly geometry -- the actual target application. A wall course is a
         # row of blocks in contact, so it hits the same missing-interface problem
@@ -213,37 +236,39 @@ def scenario_registry() -> tuple[Scenario, ...]:
         Scenario(
             "wall_course_single",
             "assembly",
-            tuple(BlockSpec(0.0, 0.6 * i, yaw_deg=0.0) for i in range(5)),
-            SynthParams(az_fov_deg=120.0, look_at=(0.0, 1.2, 0.45)),
+            tuple(_upright_spec(0.0, 0.6 * i, yaw_deg=0.0) for i in range(5)),
+            _upright_params(az_fov_deg=120.0, look_at=(0.0, 1.2, 0.45)),
         ),
         Scenario(
             "wall_two_courses",
             "assembly",
             tuple(
-                BlockSpec(0.0, 0.6 * i + (0.3 if course else 0.0), z=0.9 * course + 0.45)
+                _upright_spec(0.0, 0.6 * i + (0.3 if course else 0.0), z=0.9 * course + 0.45)
                 for course in range(2)
                 for i in range(4)
             ),
-            SynthParams(az_fov_deg=120.0, look_at=(0.0, 1.0, 0.9)),
+            _upright_params(az_fov_deg=120.0, look_at=(0.0, 1.0, 0.9)),
         ),
         Scenario(
             "spaced_row_10cm_gaps",
             "assembly",
-            tuple(BlockSpec(0.0, 0.7 * i, yaw_deg=0.0) for i in range(4)),
-            SynthParams(az_fov_deg=120.0, look_at=(0.0, 1.05, 0.45)),
+            tuple(_upright_spec(0.0, 0.7 * i, yaw_deg=0.0) for i in range(4)),
+            _upright_params(az_fov_deg=120.0, look_at=(0.0, 1.05, 0.45)),
         ),
         # The measured sensor profile, as opposed to the conservative default.
         Scenario(
             "measured_profile_near",
             "measured_sensor",
-            (BlockSpec(0.0, 0.0, yaw_deg=23.0),),
-            seyond_measured(),
+            (_upright_spec(0.0, 0.0, yaw_deg=23.0),),
+            seyond_measured(dims=BLOCK_DIMS_UPRIGHT),
         ),
         Scenario(
             "measured_profile_far",
             "measured_sensor",
-            (BlockSpec(15.0, 0.0, yaw_deg=61.0),),
-            seyond_measured(sensor_pos=(-5.0, 0.0, 4.0), look_at=(15.0, 0.0, 0.45)),
+            (_upright_spec(15.0, 0.0, yaw_deg=61.0),),
+            seyond_measured(
+                dims=BLOCK_DIMS_UPRIGHT, sensor_pos=(-5.0, 0.0, 4.0), look_at=(15.0, 0.0, 0.45)
+            ),
         ),
         *wall_plan_scenarios(),
     )

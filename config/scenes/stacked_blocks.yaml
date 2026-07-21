@@ -1,5 +1,6 @@
 # Stacked blocks: a few vertical stacks (blocks resting upright, 0.9 m long axis up).
 name: stacked_blocks
+dims: [0.6, 0.6, 0.9]
 
 sensor:
   pos: [-6.0, 0.0, 4.5]

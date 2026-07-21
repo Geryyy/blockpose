@@ -27,6 +27,7 @@ sys.path.insert(0, str(REPO_ROOT / "python"))
 
 from blockpose.detection import DetectionParams, detect_blocks, detect_scene_sample  # noqa: E402
 from blockpose.evaluate import evaluate  # noqa: E402
+from blockpose.pose import BLOCK_DIMS_UPRIGHT  # noqa: E402
 from blockpose.scenario_matrix import generate_scenario_matrix  # noqa: E402
 from blockpose.synth import BlockSpec, SynthParams, generate_scene, random_scene  # noqa: E402
 
@@ -41,9 +42,16 @@ def build_suite(seed: int) -> tuple[list, list, list]:
     diag_scenes: 2-4 block scenes with mutual occlusion — reported as
         diagnostics (Phase C progress), NOT gated.
     empty_scenes: no blocks — false-positive check (gated).
+
+    Blocks are pinned to the upright orientation (BLOCK_DIMS_UPRIGHT): the
+    detector's closed-form pose synthesis assumes a square footprint (see the
+    comment on `_synthesize_pose` in blockpose.detection), and a random yaw
+    over the full 0-360 range only holds that assumption for a square
+    footprint. Laid-block pose recovery is exercised separately via
+    `wall_plan_scenarios`.
     """
     rng = np.random.default_rng(seed)
-    params = SynthParams(range_noise_std=0.01)
+    params = SynthParams(range_noise_std=0.01, dims=BLOCK_DIMS_UPRIGHT)
 
     gate_scenes = []
     for _ in range(8):
@@ -53,6 +61,7 @@ def build_suite(seed: int) -> tuple[list, list, list]:
             yaw_deg=float(rng.uniform(0.0, 360.0)),
             pitch_deg=float(rng.uniform(-3.0, 3.0)),
             roll_deg=float(rng.uniform(-3.0, 3.0)),
+            dims=params.dims,
         )
         gate_scenes.append(generate_scene([spec], params, rng))
 

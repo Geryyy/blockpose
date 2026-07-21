@@ -66,8 +66,8 @@ for path in (REPO_ROOT / "python", REPO_ROOT / "tools"):
 
 from blockpose.detection import DetectionParams, detect_scene_sample
 from blockpose.evaluate import evaluate
+from blockpose.pose import BLOCK_DIMS
 from blockpose.scenario_matrix import generate_scenario_matrix
-from blockpose.synth import BLOCK_DIMS
 import eval_detector
 
 SEED = 0

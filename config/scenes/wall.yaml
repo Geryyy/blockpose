@@ -1,6 +1,7 @@
 # Wall assembly: courses of upright blocks with a running-bond offset, plus one
 # block still waiting in the staging area beside it.
 name: wall
+dims: [0.6, 0.6, 0.9]
 
 sensor:
   pos: [-6.0, -2.0, 4.5]
