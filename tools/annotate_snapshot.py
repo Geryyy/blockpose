@@ -308,6 +308,7 @@ class AnnotatorWindow:
     def _mark_widget_dirty(self) -> None:
         if not self._loading_widgets:
             self.controller.dirty = True
+            self.status.text = "Unsaved changes — press Ctrl+S or Validate & Save."
 
     def _step(self, axis: int, sign: int) -> None:
         step = 0.01 if axis < 3 else 1.0
@@ -497,6 +498,9 @@ class AnnotatorWindow:
             return gui.Widget.EventCallbackResult.IGNORED
         if event.is_repeat:
             return gui.Widget.EventCallbackResult.IGNORED
+        if event.key == ord("S") and event.is_modifier_down(gui.KeyModifier.CTRL):
+            self._save()
+            return gui.Widget.EventCallbackResult.HANDLED
         # Z/Y are deliberately conventional even if platform modifier delivery differs.
         if event.key == ord("Z"):
             self._undo()
@@ -600,8 +604,12 @@ def main() -> None:
     if initial.parent != root:
         raise ValueError(f"Snapshot {initial} must be a direct child of {root}")
     gui.Application.instance.initialize()
-    AnnotatorWindow(root, initial, args.config.resolve(), args.pick_radius)
+    # Keep the Python owner alive for the entire GUI event loop. Discarding the
+    # temporary AnnotatorWindow before run() can destroy Open3D's renderer and
+    # GLX pbuffer while Filament still uses it (GLXBadPbuffer on startup/click).
+    annotator = AnnotatorWindow(root, initial, args.config.resolve(), args.pick_radius)
     gui.Application.instance.run()
+    del annotator
 
 
 if __name__ == "__main__":

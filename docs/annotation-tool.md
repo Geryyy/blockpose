@@ -37,3 +37,5 @@ Mark a snapshot complete only after setting the world-space ROI and resolving al
 pending priors. Save validates these rules, writes schema v2 atomically, and first
 copies the previous manifest to a timestamped `annotations.yaml.backup-*` file.
 Navigation and window close prompt before discarding unsaved changes.
+Approving or editing marks the document unsaved; persist it with `Ctrl`+`S` or
+the **Validate & Save** button.
