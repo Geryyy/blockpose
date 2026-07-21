@@ -232,6 +232,8 @@ def evaluate_snapshot(snap_dir: Path, config_path: Path, params: DetectionParams
             "score": diag.evidence.score,
             "observability": diag.observability.value,
             "features": diag.features,
+            "proposal_scale_m": diag.proposal_scale_m,
+            "support_height_m": diag.support_height_m,
             "matched_target_index": next((j for i, j in pairs if i == index), None),
         })
 
@@ -258,6 +260,8 @@ def evaluate_snapshot(snap_dir: Path, config_path: Path, params: DetectionParams
         "exact_count": len(detections) == len(targets) if complete else None,
         "match_curves": match_curves,
         "runtime_ms": runtime_ms,
+        "detector_stage_counts": result.stage_counts,
+        "detector_stage_timings_ms": result.stage_timings_ms,
         "detections": detection_records,
     }
 

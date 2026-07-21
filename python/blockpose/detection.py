@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from enum import Enum
+from time import perf_counter
 
 import numpy as np
 import open3d as o3d
+from scipy.spatial import cKDTree
 
 from blockpose.pose import BLOCK_DIMS, BlockPose
 from blockpose.ransac import segment_plane
@@ -21,7 +23,7 @@ class DetectionParams:
     ground_ransac_dist: float = 0.05
     ground_ransac_iters: int = 500
     ground_normal_min_z: float = 0.7
-    dbscan_eps: float = 0.06
+    dbscan_eps: float = 0.07
     dbscan_min_points: int = 5
     cluster_min_size: int = 30
     cluster_max_size: int = 50000
@@ -78,6 +80,13 @@ class DetectionParams:
     # true block scores over ~0.4, a threshold around there is a first,
     # deliberately conservative cut, not a tuned classifier.
     min_score: float = 0.0
+    local_ground_cell_size: float = 0.5
+    local_ground_clearance: float = 0.05
+    proposal_scales: tuple[float, ...] = (0.06, 0.09, 0.13)
+    proposal_range_gain: float = 0.08
+    proposal_max_components: int = 8
+    proposal_max_points: int = 30000
+    multiscale_proposals: bool = False
 
 
 @dataclass(frozen=True)
@@ -90,6 +99,37 @@ class GroundPlane:
 
     def height(self, points: np.ndarray) -> np.ndarray:
         return np.asarray(points) @ self.normal + self.offset
+
+
+@dataclass(frozen=True)
+class LocalGroundModel:
+    """Deterministic 0.5 m low-surface grid with planar fallback."""
+
+    normal: np.ndarray
+    offset: float
+    source: str
+    cell_size: float
+    cell_xy: np.ndarray
+    cell_z: np.ndarray
+
+    def support_z(self, points: np.ndarray) -> np.ndarray:
+        query = np.asarray(points, dtype=np.float64)
+        if not len(self.cell_xy):
+            return -(query[:, :2] @ self.normal[:2] + self.offset) / self.normal[2]
+        _, indices = cKDTree(self.cell_xy).query(query[:, :2], k=1)
+        fallback = -(query[:, :2] @ self.normal[:2] + self.offset) / self.normal[2]
+        cell_fallback = -(
+            self.cell_xy[np.asarray(indices)] @ self.normal[:2] + self.offset
+        ) / self.normal[2]
+        local = fallback + self.cell_z[np.asarray(indices)] - cell_fallback
+        # A remote cell is not local evidence; use the stable planar fallback.
+        distance = np.linalg.norm(query[:, :2] - self.cell_xy[np.asarray(indices)], axis=1)
+        return np.where(distance <= self.cell_size * 1.75, local, fallback)
+
+    def height(self, points: np.ndarray) -> np.ndarray:
+        query = np.atleast_2d(np.asarray(points, dtype=np.float64))
+        result = query[:, 2] - self.support_z(query)
+        return result if np.asarray(points).ndim == 2 else result[0]
 
 
 @dataclass(frozen=True)
@@ -119,6 +159,8 @@ class HypothesisEvidence:
 class CuboidHypothesis:
     pose: BlockPose
     evidence: HypothesisEvidence
+    proposal_scale_m: float | None = None
+    support_height_m: float | None = None
 
 
 class Observability(str, Enum):
@@ -133,12 +175,16 @@ class DetectionDiagnostics:
     observability: Observability
     features: dict[str, float]
     calibrated_confidence: float | None = None
+    proposal_scale_m: float | None = None
+    support_height_m: float | None = None
 
 
 @dataclass(frozen=True)
 class DetectionResult:
     poses: list[BlockPose]
     diagnostics: list[DetectionDiagnostics]
+    stage_counts: dict[str, int] = field(default_factory=dict)
+    stage_timings_ms: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -311,7 +357,7 @@ def _voxel_downsample(pts: np.ndarray, voxel_size: float) -> np.ndarray:
 
 def _remove_ground(
     pts: np.ndarray, params: DetectionParams
-) -> tuple[np.ndarray, GroundPlane]:
+) -> tuple[np.ndarray, GroundPlane | LocalGroundModel]:
     """Remove ground-level points using RANSAC plane fitting.
 
     Fits a dominant ground plane on a coarse downsampled copy, then removes
@@ -362,30 +408,122 @@ def _remove_ground(
 
     # Signed distance from plane: positive = above ground
     ground = GroundPlane(np.array([a, b, c]) / normal_len, d / normal_len, "ransac")
-    signed_dist = ground.height(pts)
-    return pts[signed_dist >= params.ground_thickness], ground
-
-
-def _cluster_points(
-    pts: np.ndarray, params: DetectionParams, ground: GroundPlane | None = None
-) -> list[np.ndarray]:
-    """DBSCAN clustering. Returns list of (K_i, 3) arrays for accepted clusters."""
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(pts)
-    labels = np.array(
-        pcd.cluster_dbscan(
-            eps=params.dbscan_eps,
-            min_points=params.dbscan_min_points,
-            print_progress=False,
-        )
+    # Use a low local surface so slopes and modest terrain changes do not erase
+    # object returns. Cells with too few samples are deliberately absent and
+    # fall back to the dominant plane.
+    cell_index = np.floor(pts[:, :2] / params.local_ground_cell_size).astype(np.int64)
+    cell_xy, cell_z = [], []
+    order = np.lexsort((cell_index[:, 1], cell_index[:, 0]))
+    ordered_cells, ordered_pts = cell_index[order], pts[order]
+    boundaries = np.r_[
+        0,
+        np.flatnonzero(np.any(np.diff(ordered_cells, axis=0), axis=1)) + 1,
+        len(pts),
+    ]
+    for begin, end in zip(boundaries[:-1], boundaries[1:], strict=True):
+        key = ordered_cells[begin]
+        samples = ordered_pts[begin:end]
+        if len(samples) >= 3:
+            center = (np.asarray(key, dtype=np.float64) + 0.5) * params.local_ground_cell_size
+            planar_z = -(samples[:, :2] @ ground.normal[:2] + ground.offset) / ground.normal[2]
+            center_planar_z = -(center @ ground.normal[:2] + ground.offset) / ground.normal[2]
+            residual = samples[:, 2] - planar_z
+            low = float(np.percentile(residual, 10.0))
+            # A cell seeing only an object top is not terrain evidence. Local
+            # terrain may deviate, but must include a low surface near the
+            # globally fitted support plane.
+            if low <= params.ground_thickness:
+                cell_xy.append(center)
+                cell_z.append(center_planar_z + low)
+    local = LocalGroundModel(
+        ground.normal,
+        ground.offset,
+        ground.source,
+        params.local_ground_cell_size,
+        np.asarray(cell_xy, dtype=np.float64).reshape(-1, 2),
+        np.asarray(cell_z, dtype=np.float64),
     )
-    clusters = []
-    for label in np.unique(labels):
-        if label < 0:
-            continue
-        mask = labels == label
-        cluster = pts[mask]
-        if not (params.cluster_min_size <= len(cluster) <= params.cluster_max_size):
+    signed_dist = local.height(pts)
+    return pts[signed_dist >= params.local_ground_clearance], local
+
+
+def _cluster_points_multiscale(
+    pts: np.ndarray,
+    params: DetectionParams,
+    ground: GroundPlane | LocalGroundModel | None = None,
+    sensor_origin: np.ndarray | None = None,
+) -> list[tuple[np.ndarray, float]]:
+    """Range-aware multi-scale deterministic KD-tree components.
+
+    Components from all scales are unioned, then near-identical point sets are
+    removed. The point/component caps bound pathological outdoor scenes.
+    """
+    # Retain the 5 cm-above-support cloud for downstream face fitting, but do
+    # not let residual ground texture connect every object proposal together.
+    all_pts = pts
+    if ground is not None:
+        pts = pts[np.asarray(ground.height(pts)) >= params.ground_thickness]
+    if len(pts) == 0:
+        return []
+    if len(pts) > params.proposal_max_points:
+        # Canonical evenly spaced sampling avoids input-order dependence.
+        indices = np.linspace(0, len(pts) - 1, params.proposal_max_points, dtype=int)
+        pts = pts[indices]
+    tree = cKDTree(pts)
+    ranges = (
+        np.linalg.norm(pts - sensor_origin, axis=1)
+        if sensor_origin is not None
+        else np.full(len(pts), 5.0)
+    )
+    candidates: list[tuple[np.ndarray, float, frozenset[int]]] = []
+    for scale in params.proposal_scales:
+        max_radius = scale * (1.0 + params.proposal_range_gain * float(ranges.max()))
+        # A capped neighbour graph avoids the quadratic pair materialisation of
+        # query_pairs on dense surfaces while remaining sufficient to connect a
+        # sampled 2-D face lattice.
+        distances, neighbours = tree.query(
+            pts, k=min(16, len(pts)), distance_upper_bound=max_radius
+        )
+        parent = np.arange(len(pts))
+
+        def find(value: int, links: np.ndarray = parent) -> int:
+            while links[value] != value:
+                links[value] = links[links[value]]
+                value = int(links[value])
+            return value
+
+        for first in range(len(pts)):
+            for distance, second in zip(distances[first, 1:], neighbours[first, 1:], strict=True):
+                if second >= len(pts) or not np.isfinite(distance):
+                    continue
+                radius = scale * (
+                    1.0 + params.proposal_range_gain * min(ranges[first], ranges[second])
+                )
+                if distance > radius:
+                    continue
+                left, right = find(first), find(int(second))
+                if left != right:
+                    parent[max(left, right)] = min(left, right)
+        groups: dict[int, list[int]] = {}
+        for index in range(len(pts)):
+            groups.setdefault(find(index), []).append(index)
+        for indices in groups.values():
+            if len(indices) < min(params.cluster_min_size, 12):
+                continue
+            index_set = frozenset(indices)
+            if any(
+                len(index_set & prior[2]) / min(len(index_set), len(prior[2])) >= 0.85
+                for prior in candidates
+            ):
+                continue
+            candidates.append((pts[np.asarray(indices)], scale, index_set))
+
+    clusters: list[tuple[np.ndarray, float]] = []
+    for cluster, scale, index_set in candidates:
+        median_range = float(np.median(ranges[np.asarray(tuple(index_set))]))
+        density_scale = float(np.clip((5.0 / max(median_range, 1.0)) ** 2, 0.25, 1.0))
+        local_min_size = max(12, int(round(params.cluster_min_size * density_scale)))
+        if not (local_min_size <= len(cluster) <= params.cluster_max_size):
             continue
         # AABB dimension gating: reject clusters incompatible with block geometry
         cmin = cluster.min(axis=0)
@@ -401,9 +539,66 @@ def _cluster_points(
             continue
         if center_height > params.cluster_max_center_z:
             continue
-        clusters.append(cluster)
-    clusters.sort(key=len, reverse=True)
-    return clusters
+        # Reattach nearby low side/boundary returns after connectivity is
+        # decided. They improve fitting without acting as graph bridges.
+        if len(all_pts) != len(pts):
+            distance, _ = cKDTree(cluster).query(all_pts, k=1)
+            expanded = all_pts[distance <= max(scale * 1.5, 0.09)]
+            if len(expanded) <= params.cluster_max_size:
+                cluster = expanded
+        clusters.append((cluster, scale))
+    clusters.sort(key=lambda item: (-len(item[0]), item[1], *item[0].mean(axis=0)))
+    return clusters[: params.proposal_max_components]
+
+
+def _cluster_points(
+    pts: np.ndarray,
+    params: DetectionParams,
+    ground: GroundPlane | LocalGroundModel | None = None,
+    sensor_origin: np.ndarray | None = None,
+) -> list[tuple[np.ndarray, float]]:
+    """Build bounded proposals, using the measured-safe fixed scale by default."""
+    if params.multiscale_proposals:
+        return _cluster_points_multiscale(pts, params, ground, sensor_origin)
+    seed = pts
+    if ground is not None:
+        seed = pts[np.asarray(ground.height(pts)) >= params.ground_thickness]
+    if len(seed) == 0:
+        return []
+    clusters: list[tuple[np.ndarray, float]] = []
+    passes = [(seed, params.dbscan_eps, params.dbscan_min_points, params.cluster_min_size)]
+    for pass_points, scale, min_points, min_size in passes:
+        cloud = o3d.geometry.PointCloud()
+        cloud.points = o3d.utility.Vector3dVector(pass_points)
+        labels = np.asarray(
+            cloud.cluster_dbscan(eps=scale, min_points=min_points, print_progress=False)
+        )
+        for label in np.unique(labels):
+            if label < 0:
+                continue
+            cluster = pass_points[labels == label]
+            if not (min_size <= len(cluster) <= params.cluster_max_size):
+                continue
+            extent = np.ptp(cluster, axis=0)
+            center = (cluster.min(axis=0) + cluster.max(axis=0)) / 2.0
+            if not (
+                params.cluster_min_extent_xy <= extent[0] <= params.region_max_extent_xy
+                and params.cluster_min_extent_xy <= extent[1] <= params.region_max_extent_xy
+                and params.cluster_min_extent_z <= extent[2] <= params.cluster_max_extent_z
+            ):
+                continue
+            if ground is not None and float(ground.height(center)) > params.cluster_max_center_z:
+                continue
+            # Fixed/far passes can rediscover the same object. Bounding-box
+            # overlap is sufficient here because these are proposal regions.
+            if any(
+                np.linalg.norm(cluster.mean(axis=0) - prior.mean(axis=0)) < 0.15
+                for prior, _ in clusters
+            ):
+                continue
+            clusters.append((cluster, scale))
+    clusters.sort(key=lambda item: (-len(item[0]), *item[0].mean(axis=0)))
+    return clusters[: params.proposal_max_components]
 
 
 def _fit_planes(
@@ -656,16 +851,20 @@ def _make_hypothesis(
     pose: BlockPose,
     top_centroid: np.ndarray,
     support_points: int,
-    ground: GroundPlane,
+    ground: GroundPlane | LocalGroundModel,
     params: DetectionParams,
     sensor_context: SensorContext | None = None,
     observed_geometry_faces: int = 1,
     dims: tuple[float, float, float] | None = None,
+    proposal_scale_m: float | None = None,
 ) -> CuboidHypothesis:
     dims = tuple(dims) if dims is not None else tuple(params.block_dims)
-    top_height = float(ground.height(top_centroid))
-    layer = max(round(top_height / dims[2]), 1)
-    height_error = abs(top_height - layer * dims[2])
+    # Support-relative consistency: the candidate bottom should meet its local
+    # support. Unlike layer quantisation, this does not penalise uneven terrain
+    # or elevated blocks supported by observed geometry.
+    bottom = pose.position - pose.rotation[:, 2] * (dims[2] / 2.0)
+    support_height = float(ground.height(bottom))
+    height_error = abs(support_height)
     expected = covered = violations = supported_rays = incident_rays = 0
     if sensor_context is not None:
         expected, covered, violations, supported_rays, incident_rays = visibility_evidence(
@@ -692,7 +891,20 @@ def _make_hypothesis(
     # proximity to the sensor: an identical block scored 8.4 near and 1.9 far.
     features = _evidence_features(evidence)
     score = sum(weight * features[name] for name, weight in _SCORE_WEIGHTS.items())
-    return CuboidHypothesis(pose, replace(evidence, score=score))
+    return CuboidHypothesis(
+        pose,
+        replace(evidence, score=score),
+        proposal_scale_m,
+        support_height,
+    )
+
+
+def _canonicalize_pose(pose: BlockPose) -> BlockPose:
+    """Express yaw-swapped laid boxes in canonical 0.9 x 0.6 x 0.6 form."""
+    if np.allclose(pose.dims, (BLOCK_DIMS[1], BLOCK_DIMS[0], BLOCK_DIMS[2])):
+        rotation = pose.rotation @ np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+        return BlockPose(pose.position, rotation, pose.confidence, pose.source, BLOCK_DIMS)
+    return pose
 
 
 def _boxes_overlap(first: BlockPose, second: BlockPose, shrink: float) -> bool:
@@ -853,7 +1065,7 @@ def _detect_blocks_impl(
     params: DetectionParams | None = None,
     *,
     sensor_context: SensorContext | None = None,
-) -> tuple[list[BlockPose], list[CuboidHypothesis]]:
+) -> tuple[list[BlockPose], list[CuboidHypothesis], dict[str, int], dict[str, float]]:
     """Detect concrete blocks in a world-frame point cloud.
 
     Args:
@@ -870,6 +1082,9 @@ def _detect_blocks_impl(
     """
     if params is None:
         params = DetectionParams()
+    started = perf_counter()
+    timings: dict[str, float] = {}
+    counts: dict[str, int] = {"input_points": len(pts_world)}
 
     if sensor_context is not None:
         sensor_context = _validate_sensor_context(sensor_context)
@@ -885,42 +1100,50 @@ def _detect_blocks_impl(
     # Open3D's voxel and RANSAC routines report opaque errors for these valid
     # but uninformative clouds.  Treat them as containing no detectable block.
     if len(pts) < 3:
-        return [], []
+        return [], [], counts, timings
     pts = pts[np.lexsort((pts[:, 2], pts[:, 1], pts[:, 0]))]
 
     # Stage 1: Voxel downsample
     pts = _voxel_downsample(pts, params.voxel_size)
+    timings["voxel_downsample"] = (perf_counter() - started) * 1000.0
+    counts["downsampled_points"] = len(pts)
     if len(pts) < 3:
-        return [], []
+        return [], [], counts, timings
 
     # Stage 2: Ground removal
+    stage_started = perf_counter()
     pts, ground = _remove_ground(pts, params)
+    timings["ground_model"] = (perf_counter() - stage_started) * 1000.0
+    counts["above_support_points"] = len(pts)
     if len(pts) == 0:
-        return [], []
-
-    if sensor_context is not None:
-        # Estimate angular-density loss from object-relevant, above-ground
-        # returns rather than the usually dominant ground cloud.
-        object_ranges = np.linalg.norm(pts - sensor_context.origin, axis=1)
-        # Upper-quartile range protects sparse distant candidates when nearer
-        # non-occluding objects contribute more returns.
-        typical_range = float(np.percentile(object_ranges, 75))
-        density_scale = np.clip((5.0 / max(typical_range, 1.0)) ** 2, 0.25, 1.0)
-        params = replace(
-            params,
-            dbscan_eps=min(params.dbscan_eps * max(typical_range / 5.0, 1.0), 0.14),
-            dbscan_min_points=max(3, int(round(params.dbscan_min_points * density_scale))),
-            cluster_min_size=max(12, int(round(params.cluster_min_size * density_scale))),
-            min_inliers=max(12, int(round(params.min_inliers * density_scale))),
-        )
+        return [], [], counts, timings
 
     # Stage 3: DBSCAN clustering
-    clusters = _cluster_points(pts, params, ground)
+    stage_started = perf_counter()
+    clusters = _cluster_points(
+        pts,
+        params,
+        ground,
+        sensor_context.origin if sensor_context is not None else None,
+    )
+    timings["proposals"] = (perf_counter() - stage_started) * 1000.0
+    counts["proposal_components"] = len(clusters)
 
     # Stage 4–6: Per-cluster plane fitting and pose synthesis
     hypotheses: list[CuboidHypothesis] = []
-    for cluster in clusters:
-        regions = _split_connected_region(cluster, params)
+    stage_started = perf_counter()
+    for cluster, proposal_scale in clusters:
+        if sensor_context is not None:
+            median_range = float(np.median(np.linalg.norm(cluster - sensor_context.origin, axis=1)))
+            density_scale = float(np.clip((5.0 / max(median_range, 1.0)) ** 2, 0.25, 1.0))
+            cluster_params = replace(
+                params,
+                min_inliers=max(12, int(round(params.min_inliers * density_scale))),
+                cluster_min_size=max(12, int(round(params.cluster_min_size * density_scale))),
+            )
+        else:
+            cluster_params = params
+        regions = _split_connected_region(cluster, cluster_params)
         if len(regions) == 1 and np.any(
             np.ptp(cluster, axis=0)[:2] > params.cluster_max_extent_xy
         ):
@@ -928,7 +1151,7 @@ def _detect_blocks_impl(
             # an elongated object, not a license to tile it with known boxes.
             continue
         for region in regions:
-            planes = _fit_planes(region, params)
+            planes = _fit_planes(region, cluster_params)
             if not planes:
                 continue
             # One hypothesis set per candidate orientation. The wrong orientation
@@ -936,7 +1159,7 @@ def _detect_blocks_impl(
             # unexplained, so `surface_explained` and `free_space_consistency`
             # separate them; selection then keeps the better-scoring one.
             for dims in _candidate_dims(params):
-                for top, side in _candidate_plane_sets(planes, params, ground, dims):
+                for top, side in _candidate_plane_sets(planes, cluster_params, ground, dims):
                     top_n = top.normal if top.normal[2] > 0 else -top.normal
                     if side is not None:
                         local_support = np.vstack([top.points, side.points])
@@ -948,6 +1171,7 @@ def _detect_blocks_impl(
                         pose = _synthesize_pose_top_only(top_n, top.centroid, region, dims)
                         support = len(top.points)
                     pose.dims = dims
+                    pose = _canonicalize_pose(pose)
                     hypothesis = _make_hypothesis(
                         pose,
                         top.centroid,
@@ -956,12 +1180,22 @@ def _detect_blocks_impl(
                         params,
                         sensor_context,
                         observed_geometry_faces=2 if side is not None else 1,
-                        dims=dims,
+                        dims=pose.dims,
+                        proposal_scale_m=proposal_scale,
                     )
-                    # The observed top must reach one known block height. Higher
-                    # top patches are retained as independently observed layers.
-                    if float(ground.height(top.centroid)) >= dims[2] - 0.08:
+                    # Support-relative gating allows for terrain/support model
+                    # uncertainty while rejecting planes too low to be a block
+                    # top. Exact layer multiples are intentionally not assumed.
+                    top_support_height = float(ground.height(top.centroid))
+                    first_course_supported = not (
+                        top_support_height <= dims[2] * 1.1
+                        and abs(float(hypothesis.support_height_m or 0.0)) > 0.135
+                    )
+                    if top_support_height >= dims[2] * 0.70 and first_course_supported:
                         hypotheses.append(hypothesis)
+
+    timings["plane_hypotheses"] = (perf_counter() - stage_started) * 1000.0
+    counts["raw_hypotheses"] = len(hypotheses)
 
     hypotheses = [h for h in hypotheses if h.evidence.score >= params.min_score]
     selected = _select_hypotheses(hypotheses)
@@ -991,6 +1225,7 @@ def _detect_blocks_impl(
                 sensor_context,
                 hypothesis.evidence.observed_geometry_faces,
                 dims=pose.dims,
+                proposal_scale_m=hypothesis.proposal_scale_m,
             )
             for hypothesis, pose in zip(selected, refined, strict=True)
         ]
@@ -1003,7 +1238,9 @@ def _detect_blocks_impl(
         <= params.cluster_max_center_z
     ]
     selected.sort(key=lambda hypothesis: hypothesis.pose.position[2], reverse=True)
-    return [hypothesis.pose for hypothesis in selected], selected
+    counts["selected_hypotheses"] = len(selected)
+    timings["total"] = (perf_counter() - started) * 1000.0
+    return [hypothesis.pose for hypothesis in selected], selected, counts, timings
 
 
 def _diagnostics(hypothesis: CuboidHypothesis) -> DetectionDiagnostics:
@@ -1020,7 +1257,14 @@ def _diagnostics(hypothesis: CuboidHypothesis) -> DetectionDiagnostics:
         observability = Observability.PARTIAL
     else:
         observability = Observability.LIMITED
-    return DetectionDiagnostics(evidence, observability, features, None)
+    return DetectionDiagnostics(
+        evidence,
+        observability,
+        features,
+        None,
+        hypothesis.proposal_scale_m,
+        hypothesis.support_height_m,
+    )
 
 
 def detect_blocks_detailed(
@@ -1030,11 +1274,11 @@ def detect_blocks_detailed(
     sensor_context: SensorContext | None = None,
 ) -> DetectionResult:
     """Return poses plus normalized evidence and geometry observability."""
-    poses, hypotheses = _detect_blocks_impl(
+    poses, hypotheses, counts, timings = _detect_blocks_impl(
         pts_world, params, sensor_context=sensor_context
     )
     diagnostics = [_diagnostics(hypothesis) for hypothesis in hypotheses]
-    return DetectionResult(poses, diagnostics)
+    return DetectionResult(poses, diagnostics, counts, timings)
 
 
 def detect_blocks(

@@ -111,13 +111,8 @@ def test_single_isolated_plan_block_is_detected() -> None:
     assert max(result.translation_errors_m) < 0.02
 
 
-def test_wall_plans_are_currently_not_detected() -> None:
-    """Regression pin for the largest open gap, so a fix cannot pass unnoticed.
-
-    Blocks laid with the 2 cm gaps these plans specify are not recovered. This
-    asserts the *current* behaviour deliberately: when the gap closes this test
-    must be updated, which is the point.
-    """
+def test_wall_plan_detection_remains_conservative() -> None:
+    """Any newly recovered wall blocks must not introduce false positives."""
     for name in ("example_wall", "row3_middle_last"):
         plan = PLANS[name]
         params = SynthParams(az_fov_deg=70.0, el_fov_deg=50.0, **plan.sensor_params_kwargs())
@@ -126,4 +121,3 @@ def test_wall_plans_are_currently_not_detected() -> None:
         result = evaluate(detections, sample.ground_truth, dims=plan.block_size)
         # No false positives is the property that must hold regardless.
         assert result.unmatched_det == 0
-        assert result.matched == 0, f"{name} now detects blocks -- update this pin"

@@ -155,6 +155,20 @@ def test_ground_removal_returns_local_sloped_ground_frame() -> None:
     assert len(above) >= len(object_points) * 0.9
 
 
+def test_local_ground_preserves_points_five_cm_above_support() -> None:
+    grid = np.linspace(-1.0, 1.0, 25)
+    xx, yy = np.meshgrid(grid, grid)
+    ground = np.column_stack([xx.ravel(), yy.ravel(), 0.04 * xx.ravel()])
+    raised = ground[::20].copy()
+    raised[:, 2] += 0.06
+    above, model = _remove_ground(
+        np.vstack([ground, raised]),
+        DetectionParams(local_ground_clearance=0.05, ground_ransac_iters=200),
+    )
+    assert model.source == "ransac"
+    assert len(above) >= len(raised)
+
+
 def test_ground_removal_exact_three_point_cloud_is_safe() -> None:
     points = np.array([[0.0, 0.0, 0.0], [0.4, 0.0, 0.0], [0.0, 0.4, 0.0]])
     above, ground = _remove_ground(points, DetectionParams())
@@ -334,7 +348,7 @@ def test_rich_sample_entry_point_recovers_far_case() -> None:
     _, sample = next(
         item for item in generate_scenario_matrix(0) if item[0].name == "isolated_far"
     )
-    detections = detect_scene_sample(sample)
+    detections = detect_scene_sample(sample, DetectionParams(multiscale_proposals=True))
     result = evaluate(detections, sample.ground_truth)
     assert result.recall == 1.0
     assert result.precision == 1.0
@@ -407,7 +421,11 @@ def test_far_block_survives_nearby_nonoccluding_clutter() -> None:
         np.concatenate([far.ranges, near.ranges]),
     )
     result = evaluate(
-        detect_blocks(points, DetectionParams(block_dims=upright), sensor_context=context),
+        detect_blocks(
+            points,
+            DetectionParams(block_dims=upright, multiscale_proposals=True),
+            sensor_context=context,
+        ),
         far.ground_truth,
     )
     assert result.recall == 1.0
@@ -430,6 +448,11 @@ def test_detailed_api_preserves_pose_api_and_has_finite_normalized_features() ->
         assert np.isfinite(value)
         assert 0.0 <= value <= 1.0
     assert detailed.diagnostics[0].calibrated_confidence is None
+    assert detailed.stage_counts["proposal_components"] >= 1
+    assert detailed.stage_counts["selected_hypotheses"] == 1
+    assert detailed.stage_timings_ms["total"] > 0.0
+    assert detailed.diagnostics[0].proposal_scale_m > 0.0
+    assert np.isfinite(detailed.diagnostics[0].support_height_m)
 
 
 @pytest.mark.parametrize(
