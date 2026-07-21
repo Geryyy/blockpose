@@ -1,11 +1,21 @@
 schema_version: 2
 snapshot: 1783429345_020967424_seq4
-annotation_complete: false
-annotated_roi: null
-notes: Upstream registration only; scene has not been exhaustively manually reviewed.
+annotation_complete: true
+annotated_roi:
+  min:
+  - -12.31292226635038
+  - -3.231261366711706
+  - -0.06803297539373318
+  max:
+  - -10.221053578307652
+  - -1.966857133478705
+  - 1.8000489118010305
+notes: Two observable blocks were manually reviewed in the annotated ROI. A third,
+  heavily occluded block has no defensible blind pose and is intentionally omitted;
+  it requires a future wall-plan prior and is not an observable detection target.
 blocks:
 - id: block_3
-  review_status: pending
+  review_status: approved
   provenance: upstream_registration
   visibility: unknown
   dimensions:
@@ -38,8 +48,8 @@ blocks:
     - -2.62009561601974
     - 0.38848199413955453
     orientation_xyzw:
-    - -0.0023139785835539113
-    - 0.00630200351525512
-    - 0.2112030015250878
+    - -0.0023139785835539117
+    - 0.006302003515255121
+    - 0.21120300152508784
     - 0.9774191641264266
 unmatched_detection_reviews: {}

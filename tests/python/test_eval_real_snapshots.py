@@ -50,8 +50,14 @@ def test_run_suite_produces_well_formed_metrics() -> None:
     assert 0 <= metrics["total_matched"] <= min(
         metrics["total_reference_targets"], metrics["total_detected"]
     )
-    assert metrics["precision"] is None
-    assert metrics["false_positives"] is None
+    if metrics["n_complete_annotations"]:
+        assert metrics["precision"] is not None
+        assert 0.0 <= metrics["precision"] <= 1.0
+        assert metrics["false_positives"] is not None
+        assert metrics["false_positives"] >= 0
+    else:
+        assert metrics["precision"] is None
+        assert metrics["false_positives"] is None
     assert metrics["n_matched_pose_errors"] == metrics["total_matched"]
     for entry in metrics["per_snapshot"]:
         assert entry["reference_targets"] >= 0
