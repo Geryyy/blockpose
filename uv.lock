@@ -199,6 +199,7 @@ dependencies = [
 dev = [
     { name = "ipykernel" },
     { name = "jupyterlab" },
+    { name = "plotly" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
@@ -213,6 +214,7 @@ requires-dist = [
     { name = "mcap-ros2-support", specifier = ">=0.5" },
     { name = "numpy", specifier = ">=1.26,<3" },
     { name = "open3d", specifier = "==0.19.0" },
+    { name = "plotly", marker = "extra == 'dev'", specifier = ">=5.20" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pytest-cov", marker = "extra == 'dev'" },
     { name = "pyyaml", specifier = ">=6" },
