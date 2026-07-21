@@ -5,8 +5,8 @@ world_frame: "world"
 image:
   frame_id: "blackfly_rotated"
   stamp:
-    sec: 1783429187
-    nanosec: 803817514
+    sec: 1783429044
+    nanosec: 3119554
   width: 1536
   height: 2048
   encoding: "bgr8"
@@ -14,15 +14,17 @@ image:
 cloud:
   frame_id: "seyond"
   stamp:
-    sec: 1783429187
-    nanosec: 821961984
-  width: 115703
+    sec: 1783429044
+    nanosec: 18652416
+  width: 114467
   height: 1
   file: cloud.pcd
-detections: 2
-registration_candidates: 2
+detections: 3
+registration_candidates: 3
 candidate_masks:
   - detection_id: 1
     file: masks/candidate_001_mask.png
   - detection_id: 2
     file: masks/candidate_002_mask.png
+  - detection_id: 3
+    file: masks/candidate_003_mask.png

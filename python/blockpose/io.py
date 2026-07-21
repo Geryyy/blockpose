@@ -59,6 +59,56 @@ def load_T_world_camera(config_path: str | Path | None = None) -> np.ndarray:
 
 
 @dataclass
+class TFSnapshot:
+    """Per-snapshot TF transforms captured at recording time (see `tf.yaml`).
+
+    Unlike the static `transforms_*.yaml` config, these reflect the crane's
+    actual joint state when the snapshot was taken, so they are the ones to
+    use to get the cloud/image aligned with the recorded ground truth.
+    """
+
+    reference_frame: str
+    image_frame: str
+    cloud_frame: str
+    transforms: dict[str, np.ndarray]  # name -> (4, 4) float64 matrix
+
+    def lookup(self, parent: str, child: str) -> np.ndarray:
+        name = f"T_{parent}_{child}"
+        if name not in self.transforms:
+            raise KeyError(f"{name} not found in tf snapshot (have: {sorted(self.transforms)})")
+        return self.transforms[name]
+
+    @property
+    def T_world_cloud(self) -> np.ndarray:
+        return self.lookup(self.reference_frame, self.cloud_frame)
+
+    @property
+    def T_world_camera(self) -> np.ndarray:
+        return self.lookup(self.reference_frame, self.image_frame)
+
+
+def load_tf_snapshot(path: str | Path) -> TFSnapshot:
+    """Load a snapshot's `tf.yaml`: the TF transforms captured at recording time."""
+    path = Path(path)
+    with path.open() as f:
+        data = yaml.safe_load(f)
+    transforms: dict[str, np.ndarray] = {}
+    for entry in data["transforms"]:
+        if not entry.get("available", True):
+            continue
+        T = np.array(entry["matrix"], dtype=np.float64)
+        if T.shape != (4, 4):
+            raise ValueError(f"Expected 4x4 matrix for {entry['name']!r}, got {T.shape}")
+        transforms[entry["name"]] = T
+    return TFSnapshot(
+        reference_frame=data["reference_frame"],
+        image_frame=data["image_frame"],
+        cloud_frame=data["cloud_frame"],
+        transforms=transforms,
+    )
+
+
+@dataclass
 class CameraModel:
     """Pinhole camera model with optional radial-tangential distortion.
 
@@ -172,14 +222,18 @@ def load_ground_truth(path: str | Path) -> list[BlockPose]:
 def load_snapshot(
     snapshot_dir: str | Path,
     config_path: str | Path | None = None,
+    T_world_cloud: np.ndarray | None = None,
 ) -> tuple[np.ndarray, list[BlockPose]]:
     """Load a registration snapshot: returns (pts_world, gt_poses).
 
     pts_world: (N, 3) float64 point cloud transformed to world frame.
     gt_poses: list of BlockPose objects from registrations.yaml.
+
+    `T_world_cloud` overrides the static config's T_world_seyond, e.g. with a
+    per-snapshot transform from `tf.yaml` (see `load_tf_snapshot`).
     """
     snapshot_dir = Path(snapshot_dir)
-    T = load_T_world_seyond(config_path)
+    T = T_world_cloud if T_world_cloud is not None else load_T_world_seyond(config_path)
     pts_sensor = load_pcd(snapshot_dir / "cloud.pcd")
     pts_world = apply_transform(pts_sensor, T)
     gt_poses = load_ground_truth(snapshot_dir / "registrations.yaml")

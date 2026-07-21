@@ -7,36 +7,36 @@ records:
     assigned_id: "block_0"
     reason: ""
     incoming_id: "block_1"
-    confidence: 0.797342
+    confidence: 0.501845
     pose_status: 2
     task_status: 1
     pose:
       frame_id: "world"
-      position: [-11.8809, -0.728545, 1.11937]
-      orientation_xyzw: [-0.0178309, 0.018701, -0.657591, 0.752932]
+      position: [-10.9243, -2.62914, 0.400582]
+      orientation_xyzw: [-0.0213811, 0.00514508, 0.167687, 0.985595]
   - detection_id: 2
     registration_ok: true
     upsert_ok: true
     assigned_id: "block_1"
     reason: ""
     incoming_id: "block_2"
-    confidence: 0.401993
+    confidence: 0.465569
     pose_status: 2
     task_status: 1
     pose:
       frame_id: "world"
-      position: [-11.6873, -0.598918, 0.427436]
-      orientation_xyzw: [-0.0320179, 0.0542546, -0.676686, 0.733572]
+      position: [-11.8772, -0.620233, 0.428261]
+      orientation_xyzw: [0.0215226, 0.0323727, -0.679375, 0.732761]
   - detection_id: 3
     registration_ok: true
     upsert_ok: true
     assigned_id: "block_2"
     reason: ""
     incoming_id: "block_3"
-    confidence: 0.833832
+    confidence: 0.82485
     pose_status: 2
     task_status: 1
     pose:
       frame_id: "world"
-      position: [-13.7449, 2.77113, 0.658986]
-      orientation_xyzw: [0.00673274, 0.016387, -0.716725, 0.69713]
+      position: [-13.7461, 2.77166, 0.651086]
+      orientation_xyzw: [0.00368544, 0.0196905, -0.71975, 0.693944]
