@@ -9,7 +9,9 @@ from blockpose.annotation_tool import (
     AnnotationController,
     AnnotationDocument,
     EditableTarget,
+    camera_ray,
     nearest_point_to_ray,
+    nearest_point_to_ray_with_distance,
     pick_oriented_box,
     save_annotations_atomic,
     snapshot_selection_index,
@@ -132,6 +134,25 @@ def test_point_ray_pick_rejects_empty_area_and_points_behind_camera() -> None:
     picked = nearest_point_to_ray(np.zeros(3), np.array([1.0, 0, 0]), points, 0.08)
     assert picked is not None and np.array_equal(picked, points[0])
     assert nearest_point_to_ray(np.zeros(3), np.array([0, 1.0, 0]), points, 0.08) is None
+    candidate = nearest_point_to_ray_with_distance(
+        np.zeros(3), np.array([1.0, 0, 0]), points
+    )
+    assert candidate is not None
+    assert np.array_equal(candidate[0], points[0])
+    assert np.isclose(candidate[1], 0.02)
+
+
+def test_camera_ray_normalizes_and_rejects_degenerate_endpoints() -> None:
+    origin, direction = camera_ray(np.zeros(3), np.array([2.0, 0.0, 0.0]))
+    assert np.array_equal(origin, np.zeros(3))
+    assert np.array_equal(direction, np.array([1.0, 0.0, 0.0]))
+    for point in (np.zeros(3), np.array([np.nan, 0.0, 0.0])):
+        try:
+            camera_ray(np.zeros(3), point)
+        except ValueError as error:
+            assert "degenerate" in str(error)
+        else:
+            raise AssertionError("invalid camera ray accepted")
 
 
 def test_point_ray_and_manual_draft_reject_nonfinite_coordinates() -> None:

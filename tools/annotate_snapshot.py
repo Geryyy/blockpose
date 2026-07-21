@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -20,11 +21,13 @@ from open3d.visualization import gui, rendering
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "python"))
 
+from blockpose.annotation_snap import snap_block_to_cloud  # noqa: E402
 from blockpose.annotation_tool import (  # noqa: E402
     VISIBILITIES,
     AnnotationController,
     AnnotationDocument,
-    nearest_point_to_ray,
+    camera_ray,
+    nearest_point_to_ray_with_distance,
     pick_oriented_box,
     save_annotations_atomic,
     snapshot_selection_index,
@@ -44,7 +47,10 @@ BOX_COLORS = {
     "approved": (0.1, 0.9, 0.2, 1.0),
     "rejected": (0.9, 0.15, 0.15, 1.0),
 }
-MAX_CTRL_CLICK_RAY_DISTANCE_M = 0.08
+INITIAL_EYE = np.array([0.0, 0.0, 0.0])
+INITIAL_LOOK_AT = np.array([-1.0, 0.0, 0.0])
+INITIAL_UP = np.array([0.0, 0.0, 1.0])
+DEFAULT_PICK_RADIUS_M = 0.30
 
 
 def discover_snapshot_dirs(root: Path) -> list[Path]:
@@ -60,9 +66,10 @@ def discover_snapshot_dirs(root: Path) -> list[Path]:
 
 
 class AnnotatorWindow:
-    def __init__(self, root: Path, initial: Path, config: Path):
+    def __init__(self, root: Path, initial: Path, config: Path, pick_radius: float):
         self.root = root
         self.config = config
+        self.pick_radius = pick_radius
         self.snapshots = discover_snapshot_dirs(root)
         if not self.snapshots:
             raise ValueError(f"No snapshots containing cloud.pcd under {root}")
@@ -71,6 +78,7 @@ class AnnotatorWindow:
         self.points = np.empty((0, 3))
         self.rgb_colors: np.ndarray | None = None
         self.controller: AnnotationController
+        self._last_button_down_s = -np.inf
 
         app = gui.Application.instance
         self.window = app.create_window("Block annotation", 1500, 900)
@@ -157,6 +165,7 @@ class AnnotatorWindow:
         review.add_child(self._button("Abort edit", self._abort))
         review.add_child(self._button("Reset", self._reset))
         self.panel.add_child(review)
+        self.panel.add_child(self._button("Snap selected to cloud", self._snap_selected))
         self.panel.add_child(gui.Label("Visibility / ignored target"))
         self.panel.add_child(self.visibility)
         self.panel.add_child(self.ignore_reason)
@@ -270,7 +279,12 @@ class AnnotatorWindow:
             self.scene.scene.add_geometry(f"block-{index}", lines, line_material)
         if reset_camera:
             bounds = self.scene.scene.bounding_box
+            # Match visualize_snapshot.py's initial view exactly: place the
+            # viewer at the world origin, keep world +Z upright, and look down
+            # world -X. setup_camera establishes suitable projection/clipping
+            # planes for the scene; look_at then replaces only the view pose.
             self.scene.setup_camera(60.0, bounds, bounds.get_center())
+            self.scene.look_at(INITIAL_LOOK_AT, INITIAL_EYE, INITIAL_UP)
         self.scene.force_redraw()
 
     def _pose_fields_changed(self) -> None:
@@ -327,6 +341,31 @@ class AnnotatorWindow:
         self._load_document_widgets()
         self._refresh_scene()
 
+    def _snap_selected(self, seed: np.ndarray | None = None) -> bool:
+        target = self.controller.target
+        if target is None:
+            self.status.text = "Select a block before snapping."
+            return False
+        result = snap_block_to_cloud(
+            self.points, target.position if seed is None else np.asarray(seed, dtype=float)
+        )
+        if not result.success:
+            self.status.text = f"Snap failed: {result.reason}; pose unchanged."
+            return False
+        assert result.position is not None
+        assert result.rotation is not None
+        assert result.dimensions is not None
+        self.controller.apply_snapped_pose(
+            result.position, result.rotation, result.dimensions
+        )
+        self._load_document_widgets()
+        self._refresh_scene()
+        self.status.text = (
+            f"Snapped pending proposal: score {result.score:.2f}, "
+            f"{result.inlier_count} surface points. Review and approve manually."
+        )
+        return True
+
     def _add_at_fields(self) -> None:
         self.controller.add_manual(np.array([field.double_value for field in self.add_fields]))
         self._load_document_widgets()
@@ -352,26 +391,97 @@ class AnnotatorWindow:
         y = event.y - self.scene.frame.y
         camera = self.scene.scene.camera
         dimensions = (self.scene.frame.width, self.scene.frame.height)
-        near = np.asarray(camera.unproject(x, y, 0.0, *dimensions))
-        far = np.asarray(camera.unproject(x, y, 1.0, *dimensions))
-        return near, far - near
+        # Depth=1 may represent infinity in Open3D's projection and produced a
+        # zero/NaN direction on real clicks. Use the camera eye plus a stable
+        # mid-depth world point instead.
+        inverse_view = np.linalg.inv(np.asarray(camera.get_view_matrix(), dtype=float))
+        eye = inverse_view[:3, 3]
+        point = camera.unproject(x, y, 0.5, *dimensions)
+        return camera_ray(eye, point)
+
+    def _show_click_ray(
+        self,
+        origin: np.ndarray,
+        direction: np.ndarray,
+        candidate: np.ndarray | None,
+        accepted: bool,
+    ) -> None:
+        try:
+            origin, unit = camera_ray(origin, np.asarray(origin) + np.asarray(direction))
+        except ValueError as error:
+            self.status.text = f"Cannot draw click ray: {error}"
+            return
+        extent = max(float(np.linalg.norm(np.ptp(self.points, axis=0))), 20.0)
+        end = origin + unit * extent
+        ray = o3d.geometry.LineSet(
+            o3d.utility.Vector3dVector(np.vstack([origin, end])),
+            o3d.utility.Vector2iVector([[0, 1]]),
+        )
+        material = rendering.MaterialRecord()
+        material.shader = "unlitLine"
+        material.line_width = 4.0
+        material.base_color = (0.1, 0.8, 1.0, 1.0)
+        for name in ("click-ray", "click-candidate"):
+            if self.scene.scene.has_geometry(name):
+                self.scene.scene.remove_geometry(name)
+        self.scene.scene.add_geometry("click-ray", ray, material)
+        if candidate is not None:
+            marker = o3d.geometry.TriangleMesh.create_sphere(radius=0.10)
+            marker.translate(candidate)
+            marker.compute_vertex_normals()
+            marker_material = rendering.MaterialRecord()
+            marker_material.shader = "defaultLit"
+            marker_material.base_color = (
+                (0.1, 1.0, 0.2, 1.0) if accepted else (1.0, 0.1, 0.1, 1.0)
+            )
+            self.scene.scene.add_geometry("click-candidate", marker, marker_material)
+        self.scene.force_redraw()
 
     def _on_mouse(self, event):
         if event.type != gui.MouseEvent.BUTTON_DOWN or not event.is_button_down(
             gui.MouseButton.LEFT
         ):
             return gui.Widget.EventCallbackResult.IGNORED
-        origin, direction = self._ray(event)
+        now = time.monotonic()
+        if now - self._last_button_down_s < 0.25:
+            # Open3D reports a double-click as two button-down events. Treat it
+            # as one selection/add operation; double-click has no separate action.
+            return gui.Widget.EventCallbackResult.HANDLED
+        self._last_button_down_s = now
+        try:
+            origin, direction = self._ray(event)
+        except (ValueError, np.linalg.LinAlgError) as error:
+            self.status.text = f"Cannot compute click ray: {error}"
+            return gui.Widget.EventCallbackResult.HANDLED
         if event.is_modifier_down(gui.KeyModifier.CTRL):
-            point = nearest_point_to_ray(
-                origin, direction, self.points, MAX_CTRL_CLICK_RAY_DISTANCE_M
+            candidate = nearest_point_to_ray_with_distance(origin, direction, self.points)
+            point = (
+                candidate[0]
+                if candidate is not None and candidate[1] <= self.pick_radius
+                else None
             )
             if point is not None:
                 self.controller.add_manual(point)
                 self._load_document_widgets()
                 self._refresh_scene()
+                snapped = self._snap_selected(point)
+                self._show_click_ray(origin, direction, point, True)
+                if not snapped:
+                    # _snap_selected already explains that the original draft
+                    # was retained.  Keep the successful pick visible as well.
+                    self.status.text += " Click shown in green."
             else:
-                self.status.text = "No cloud point near click ray; use exact XYZ fields."
+                nearest = None if candidate is None else candidate[0]
+                distance = None if candidate is None else candidate[1]
+                self._show_click_ray(origin, direction, nearest, False)
+                self.status.text = (
+                    f"No cloud point within {self.pick_radius:.2f} m of click ray; "
+                    + (
+                        "no forward point found."
+                        if distance is None
+                        else f"nearest is {distance:.2f} m away (red marker)."
+                    )
+                )
             return gui.Widget.EventCallbackResult.HANDLED
         selected = pick_oriented_box(origin, direction, self.controller.document.targets)
         if selected is not None:
@@ -472,7 +582,16 @@ def main() -> None:
     parser.add_argument("snapshot", nargs="?", type=Path)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument(
+        "--pick-radius",
+        type=float,
+        default=DEFAULT_PICK_RADIUS_M,
+        help="World-space radius around a Ctrl-click ray used to find a cloud point "
+        f"(default: {DEFAULT_PICK_RADIUS_M:.2f} m).",
+    )
     args = parser.parse_args()
+    if not np.isfinite(args.pick_radius) or args.pick_radius <= 0:
+        parser.error("--pick-radius must be a positive finite number")
     root = args.root.resolve()
     snapshots = discover_snapshot_dirs(root)
     if not snapshots:
@@ -481,7 +600,7 @@ def main() -> None:
     if initial.parent != root:
         raise ValueError(f"Snapshot {initial} must be a direct child of {root}")
     gui.Application.instance.initialize()
-    AnnotatorWindow(root, initial, args.config.resolve())
+    AnnotatorWindow(root, initial, args.config.resolve(), args.pick_radius)
     gui.Application.instance.run()
 
 

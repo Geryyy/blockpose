@@ -214,6 +214,42 @@ class AnnotationController:
             )
         )
 
+    def apply_snapped_pose(
+        self,
+        position: np.ndarray,
+        rotation: np.ndarray,
+        dimensions: tuple[float, float, float],
+    ) -> None:
+        """Apply a fitter proposal as one undoable edit without approving it."""
+        if self.target is None:
+            return
+        position = np.asarray(position, dtype=float)
+        rotation = np.asarray(rotation, dtype=float)
+        dims = tuple(float(value) for value in dimensions)
+        valid = (
+            position.shape == (3,)
+            and rotation.shape == (3, 3)
+            and len(dims) == 3
+            and np.all(np.isfinite(position))
+            and np.all(np.isfinite(rotation))
+            and np.all(np.isfinite(dims))
+            and np.all(np.asarray(dims) > 0)
+            and np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-5)
+            and np.linalg.det(rotation) > 0.0
+        )
+        if not valid:
+            raise ValueError("snapped pose must contain a finite rigid transform and dimensions")
+
+        def apply() -> None:
+            assert self.target is not None
+            self.target.position = position.copy()
+            self.target.rotation = rotation.copy()
+            self.target.dimensions = dims
+            self.target.review_status = "pending"
+            self.target.rejection_reason = None
+
+        self._change(apply)
+
     def set_review(self, status: str, reason: str | None = None) -> None:
         if self.target is None or status not in {"pending", "approved", "rejected"}:
             return
@@ -258,11 +294,13 @@ class AnnotationController:
         if match is not None:
             position = match.position.copy()
             rotation = match.rotation.copy()
+            dimensions = match.dimensions
 
             def restore_pose() -> None:
                 assert self.target is not None
                 self.target.position = position
                 self.target.rotation = rotation
+                self.target.dimensions = dimensions
 
             self._change(restore_pose)
 
@@ -322,6 +360,19 @@ def nearest_point_to_ray(
     max_distance: float,
 ) -> np.ndarray | None:
     """Pick a forward cloud point only when it lies close enough to the view ray."""
+    candidate = nearest_point_to_ray_with_distance(ray_origin, ray_direction, points)
+    if candidate is None or not np.isfinite(max_distance) or max_distance < 0:
+        return None
+    point, distance = candidate
+    return point if distance <= max_distance else None
+
+
+def nearest_point_to_ray_with_distance(
+    ray_origin: np.ndarray,
+    ray_direction: np.ndarray,
+    points: np.ndarray,
+) -> tuple[np.ndarray, float] | None:
+    """Return the nearest finite forward point and its perpendicular ray distance."""
     points = np.asarray(points, dtype=float)
     origin = np.asarray(ray_origin, dtype=float)
     direction = np.asarray(ray_direction, dtype=float)
@@ -333,8 +384,6 @@ def nearest_point_to_ray(
         and direction.shape == (3,)
         and np.all(np.isfinite(origin))
         and np.all(np.isfinite(direction))
-        and np.isfinite(max_distance)
-        and max_distance >= 0
         and np.isfinite(norm)
         and norm >= 1e-12
     )
@@ -352,7 +401,25 @@ def nearest_point_to_ray(
     projected = origin + along[valid, None] * unit
     distances = np.linalg.norm(candidates - projected, axis=1)
     nearest = int(np.argmin(distances))
-    return candidates[nearest].copy() if distances[nearest] <= max_distance else None
+    return candidates[nearest].copy(), float(distances[nearest])
+
+
+def camera_ray(eye: np.ndarray, unprojected_point: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Build a finite, non-degenerate world-space ray from a camera eye and point."""
+    origin = np.asarray(eye, dtype=float).reshape(-1)
+    point = np.asarray(unprojected_point, dtype=float).reshape(-1)
+    if origin.shape != (3,) or point.shape != (3,):
+        raise ValueError("camera eye and unprojected point must each contain three values")
+    direction = point - origin
+    norm = np.linalg.norm(direction)
+    if (
+        not np.all(np.isfinite(origin))
+        or not np.all(np.isfinite(point))
+        or not np.isfinite(norm)
+        or norm < 1e-9
+    ):
+        raise ValueError("camera produced a non-finite or degenerate click ray")
+    return origin, direction / norm
 
 
 def snapshot_selection_index(snapshots: list[Path], current: Path) -> int:

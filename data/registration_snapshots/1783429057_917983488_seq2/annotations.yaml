@@ -1,7 +1,46 @@
-schema_version: 1
+schema_version: 2
 snapshot: 1783429057_917983488_seq2
 annotation_complete: false
 annotated_roi: null
-notes: No successful upstream registrations; scene has not been exhaustively manually reviewed.
-blocks: []
+notes: No successful upstream registrations; scene has not been exhaustively manually
+  reviewed.
+blocks:
+- id: manual_1
+  review_status: approved
+  provenance: manual
+  visibility: unknown
+  dimensions:
+  - 0.9
+  - 0.6
+  - 0.6
+  confidence: 0.0
+  pose:
+    position:
+    - -10.916431460758256
+    - -2.58389577226129
+    - 0.39119595349105335
+    orientation_xyzw:
+    - -0.006183610267942363
+    - 0.006971950799128166
+    - 0.17789020669698502
+    - 0.9840062140186985
+- id: manual_2
+  review_status: approved
+  provenance: manual
+  visibility: unknown
+  dimensions:
+  - 0.9
+  - 0.6
+  - 0.6
+  confidence: 0.0
+  pose:
+    position:
+    - -11.185355848709325
+    - -2.7979629601061338
+    - 1.2111992579051964
+    orientation_xyzw:
+    - -0.03798501304547397
+    - -0.007545200640545783
+    - 0.3019893510341742
+    - 0.9525243517061321
 unmatched_detection_reviews: {}
