@@ -21,7 +21,7 @@ from open3d.visualization import gui, rendering
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "python"))
 
-from blockpose.annotation_snap import snap_block_to_cloud  # noqa: E402
+from blockpose.annotation_snap import SnapParams, snap_block_to_cloud  # noqa: E402
 from blockpose.annotation_tool import (  # noqa: E402
     VISIBILITIES,
     AnnotationController,
@@ -39,6 +39,16 @@ from blockpose.io import (  # noqa: E402
     load_tf_snapshot,
 )
 from blockpose.projection import colorize_world_points  # noqa: E402
+from blockpose.rgb_annotation import (  # noqa: E402
+    AsyncSegmentationWorker,
+    MaskSelectionParams,
+    TransformersSam2Backend,
+    build_projection_cache,
+    candidate_mask_at,
+    load_candidate_masks,
+    map_widget_to_image,
+    select_points_from_mask,
+)
 
 DEFAULT_ROOT = REPO_ROOT / "data" / "registration_snapshots"
 DEFAULT_CONFIG = REPO_ROOT / "config" / "transforms_pzs100_initial_pose_1.yaml"
@@ -66,7 +76,16 @@ def discover_snapshot_dirs(root: Path) -> list[Path]:
 
 
 class AnnotatorWindow:
-    def __init__(self, root: Path, initial: Path, config: Path, pick_radius: float):
+    def __init__(
+        self,
+        root: Path,
+        initial: Path,
+        config: Path,
+        pick_radius: float,
+        sam_model: str | None = None,
+        sam_device: str = "auto",
+        sam_offline: bool = False,
+    ):
         self.root = root
         self.config = config
         self.pick_radius = pick_radius
@@ -79,11 +98,26 @@ class AnnotatorWindow:
         self.rgb_colors: np.ndarray | None = None
         self.controller: AnnotationController
         self._last_button_down_s = -np.inf
+        self.rgb: np.ndarray | None = None
+        self.projection_cache = None
+        self.candidate_masks: dict[int, np.ndarray] = {}
+        self.selected_rgb_points = np.empty((0, 3))
+        self.selected_mask: np.ndarray | None = None
+        self.sam_backend = (
+            None
+            if sam_model is None
+            else TransformersSam2Backend(sam_model, sam_device, local_files_only=sam_offline)
+        )
+        self.sam_worker = (
+            None if self.sam_backend is None else AsyncSegmentationWorker(self.sam_backend)
+        )
 
         app = gui.Application.instance
         self.window = app.create_window("Block annotation", 1500, 900)
         self.scene = gui.SceneWidget()
         self.scene.scene = rendering.Open3DScene(self.window.renderer)
+        self.rgb_view = gui.ImageWidget()
+        self.rgb_view.set_on_mouse(self._on_rgb_mouse)
         self.panel = gui.Vert(6, gui.Margins(8, 8, 8, 8))
         self.status = gui.Label("")
         self.snapshot_combo = gui.Combobox()
@@ -117,6 +151,7 @@ class AnnotatorWindow:
         for field in self.roi_fields:
             field.set_on_value_changed(lambda _value: self._mark_widget_dirty())
         self.window.add_child(self.scene)
+        self.window.add_child(self.rgb_view)
         self.window.add_child(self.panel)
         self.window.set_on_layout(self._layout)
         self.window.set_on_close(self._on_close)
@@ -192,7 +227,12 @@ class AnnotatorWindow:
     def _layout(self, context) -> None:
         rect = self.window.content_rect
         panel_width = min(470, int(rect.width * 0.38))
-        self.scene.frame = gui.Rect(rect.x, rect.y, rect.width - panel_width, rect.height)
+        view_width = rect.width - panel_width
+        scene_width = int(view_width * 0.62)
+        self.scene.frame = gui.Rect(rect.x, rect.y, scene_width, rect.height)
+        self.rgb_view.frame = gui.Rect(
+            rect.x + scene_width, rect.y, view_width - scene_width, rect.height
+        )
         self.panel.frame = gui.Rect(
             rect.get_right() - panel_width, rect.y, panel_width, rect.height
         )
@@ -206,14 +246,28 @@ class AnnotatorWindow:
         tf = load_tf_snapshot(snapshot / "tf.yaml")
         self.points, _ = load_snapshot(snapshot, self.config, T_world_cloud=tf.T_world_cloud)
         self.rgb_colors = None
+        self.rgb = None
+        self.projection_cache = None
+        self.candidate_masks = {}
+        self.selected_rgb_points = np.empty((0, 3))
+        self.selected_mask = None
+        if self.sam_worker is not None:
+            self.sam_worker.invalidate()
         if (snapshot / "rgb.png").is_file():
             try:
+                self.rgb = load_rgb(snapshot / "rgb.png")
+                camera = load_camera_model()
                 self.rgb_colors, _ = colorize_world_points(
                     self.points,
                     tf.T_world_camera,
-                    load_camera_model(),
-                    load_rgb(snapshot / "rgb.png"),
+                    camera,
+                    self.rgb,
                 )
+                self.projection_cache = build_projection_cache(
+                    self.points, tf.T_world_camera, camera
+                )
+                self.candidate_masks = load_candidate_masks(snapshot, self.rgb.shape[:2])
+                self._refresh_rgb()
             except (ValueError, KeyError):
                 self.rgb_colors = None
         self._changing_snapshot_combo = True
@@ -264,6 +318,13 @@ class AnnotatorWindow:
         material.shader = "defaultUnlit"
         material.point_size = 2.0
         self.scene.scene.add_geometry("cloud", cloud, material)
+        if len(self.selected_rgb_points):
+            selected = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(self.selected_rgb_points))
+            selected.paint_uniform_color((1.0, 0.1, 0.8))
+            selected_material = rendering.MaterialRecord()
+            selected_material.shader = "defaultUnlit"
+            selected_material.point_size = 6.0
+            self.scene.scene.add_geometry("rgb-mask-points", selected, selected_material)
         for index, target in enumerate(self.controller.document.targets):
             box = o3d.geometry.OrientedBoundingBox(
                 target.position, target.rotation, target.dimensions
@@ -286,6 +347,119 @@ class AnnotatorWindow:
             self.scene.setup_camera(60.0, bounds, bounds.get_center())
             self.scene.look_at(INITIAL_LOOK_AT, INITIAL_EYE, INITIAL_UP)
         self.scene.force_redraw()
+
+    def _refresh_rgb(self) -> None:
+        if self.rgb is None:
+            return
+        shown = self.rgb.copy()
+        if self.selected_mask is not None:
+            overlay = np.zeros_like(shown)
+            overlay[..., 0] = 255
+            shown[self.selected_mask] = (
+                0.55 * shown[self.selected_mask] + 0.45 * overlay[self.selected_mask]
+            ).astype(np.uint8)
+        self.rgb_view.update_image(o3d.geometry.Image(np.ascontiguousarray(shown)))
+
+    def _on_rgb_mouse(self, event):
+        if event.type != gui.MouseEvent.BUTTON_DOWN or not event.is_button_down(
+            gui.MouseButton.LEFT
+        ):
+            return gui.Widget.EventCallbackResult.IGNORED
+        if self.rgb is None or self.projection_cache is None:
+            self.status.text = "This snapshot has no usable RGB/calibration data."
+            return gui.Widget.EventCallbackResult.HANDLED
+        point = map_widget_to_image(
+            event.x - self.rgb_view.frame.x,
+            event.y - self.rgb_view.frame.y,
+            self.rgb_view.frame.width,
+            self.rgb_view.frame.height,
+            self.rgb.shape[1],
+            self.rgb.shape[0],
+        )
+        if point is None:
+            self.status.text = "Click inside the displayed RGB image."
+            return gui.Widget.EventCallbackResult.HANDLED
+        snapshot = self.snapshot
+        if self.sam_backend is None:
+            candidate = candidate_mask_at(self.candidate_masks, point)
+            if candidate is None:
+                self.status.text = "No stored candidate mask at this pixel; enable --sam-model."
+            else:
+                self._apply_rgb_mask(candidate[1], point, f"candidate {candidate[0]}")
+            return gui.Widget.EventCallbackResult.HANDLED
+
+        assert self.sam_worker is not None
+
+        def schedule(callback) -> None:
+            gui.Application.instance.post_to_main_thread(self.window, callback)
+
+        def finish(mask, error, completed_snapshot) -> None:
+            if completed_snapshot != self.snapshot:
+                return
+            if error is not None or mask is None:
+                fallback = candidate_mask_at(self.candidate_masks, point)
+                if fallback is None:
+                    self.status.text = f"SAM failed: {error}"
+                else:
+                    self._apply_rgb_mask(
+                        fallback[1], point, f"candidate {fallback[0]} (SAM failed)"
+                    )
+            else:
+                self._apply_rgb_mask(mask, point, "SAM")
+
+        accepted = self.sam_worker.submit(self.rgb, point, snapshot, schedule, finish)
+        self.status.text = (
+            "Running SAM segmentation…"
+            if accepted
+            else "SAM is busy; wait for the current prompt to finish."
+        )
+        return gui.Widget.EventCallbackResult.HANDLED
+
+    def _apply_rgb_mask(self, mask: np.ndarray, prompt: tuple[int, int], source: str) -> None:
+        assert self.projection_cache is not None
+        result = select_points_from_mask(
+            self.points,
+            self.projection_cache,
+            mask,
+            prompt,
+            MaskSelectionParams(),
+        )
+        self.selected_mask = result.mask
+        self.selected_rgb_points = result.points
+        self._refresh_rgb()
+        self._refresh_scene()
+        if not result.success:
+            self.status.text = f"{source} selection failed: {result.reason}."
+            return
+        # Seed the plane snapper at the actual prompted surface, not at the
+        # centroid/median (which can lie inside the block or between faces).
+        selected_uv = self.projection_cache.uv[result.indices]
+        pixel_distance = np.linalg.norm(selected_uv - np.asarray(prompt), axis=1)
+        near_prompt = np.flatnonzero(pixel_distance <= max(float(pixel_distance.min()), 8.0))
+        seed_local = near_prompt[
+            int(np.argmin(self.projection_cache.depth[result.indices[near_prompt]]))
+        ]
+        seed = result.points[seed_local]
+        # The RGB mask provides explicit object identity, so a deterministic
+        # best candidate is more useful than rejecting translational ambiguity.
+        # It remains pending and visibly requires human validation.
+        snap = snap_block_to_cloud(result.points, seed, SnapParams(reject_ambiguous=False))
+        if not snap.success:
+            self.status.text = (
+                f"{source}: selected {len(result.points)} points, but fit failed: "
+                f"{snap.reason}. No annotation was changed."
+            )
+            return
+        assert snap.position is not None and snap.rotation is not None
+        assert snap.dimensions is not None
+        self.controller.add_manual(snap.position)
+        self.controller.apply_snapped_pose(snap.position, snap.rotation, snap.dimensions)
+        self._load_document_widgets()
+        self._refresh_scene()
+        self.status.text = (
+            f"{source}: fitted pending block from {len(result.points)} selected points "
+            f"(score {snap.score:.2f}). Correct and approve, or abort."
+        )
 
     def _pose_fields_changed(self) -> None:
         if self._loading_widgets or self.controller.target is None:
@@ -356,9 +530,7 @@ class AnnotatorWindow:
         assert result.position is not None
         assert result.rotation is not None
         assert result.dimensions is not None
-        self.controller.apply_snapped_pose(
-            result.position, result.rotation, result.dimensions
-        )
+        self.controller.apply_snapped_pose(result.position, result.rotation, result.dimensions)
         self._load_document_widgets()
         self._refresh_scene()
         self.status.text = (
@@ -432,9 +604,7 @@ class AnnotatorWindow:
             marker.compute_vertex_normals()
             marker_material = rendering.MaterialRecord()
             marker_material.shader = "defaultLit"
-            marker_material.base_color = (
-                (0.1, 1.0, 0.2, 1.0) if accepted else (1.0, 0.1, 0.1, 1.0)
-            )
+            marker_material.base_color = (0.1, 1.0, 0.2, 1.0) if accepted else (1.0, 0.1, 0.1, 1.0)
             self.scene.scene.add_geometry("click-candidate", marker, marker_material)
         self.scene.force_redraw()
 
@@ -457,9 +627,7 @@ class AnnotatorWindow:
         if event.is_modifier_down(gui.KeyModifier.CTRL):
             candidate = nearest_point_to_ray_with_distance(origin, direction, self.points)
             point = (
-                candidate[0]
-                if candidate is not None and candidate[1] <= self.pick_radius
-                else None
+                candidate[0] if candidate is not None and candidate[1] <= self.pick_radius else None
             )
             if point is not None:
                 self.controller.add_manual(point)
@@ -555,9 +723,7 @@ class AnnotatorWindow:
 
     def _cancel_dirty_dialog(self) -> None:
         self._changing_snapshot_combo = True
-        self.snapshot_combo.selected_index = snapshot_selection_index(
-            self.snapshots, self.snapshot
-        )
+        self.snapshot_combo.selected_index = snapshot_selection_index(self.snapshots, self.snapshot)
         self._changing_snapshot_combo = False
         self.window.close_dialog()
 
@@ -567,8 +733,12 @@ class AnnotatorWindow:
         chosen = self.snapshots[index]
         if chosen == self.snapshot:
             return
+        if self.sam_worker is not None:
+            self.sam_worker.invalidate()
+
         def action() -> None:
             self._load_snapshot(chosen)
+
         if self.controller.dirty:
             self._confirm_dirty(action)
         else:
@@ -576,8 +746,12 @@ class AnnotatorWindow:
 
     def _on_close(self) -> bool:
         if self.controller.dirty:
+            if self.sam_worker is not None:
+                self.sam_worker.invalidate()
             self._confirm_dirty(self.window.close)
             return False
+        if self.sam_worker is not None:
+            self.sam_worker.close()
         return True
 
 
@@ -593,6 +767,25 @@ def main() -> None:
         help="World-space radius around a Ctrl-click ray used to find a cloud point "
         f"(default: {DEFAULT_PICK_RADIUS_M:.2f} m).",
     )
+    parser.add_argument(
+        "--sam-model",
+        nargs="?",
+        const="facebook/sam2.1-hiera-small",
+        default=None,
+        help="Enable RGB point-prompt segmentation (default model when flag has no value: "
+        "facebook/sam2.1-hiera-small). Without it, stored candidate masks are used.",
+    )
+    parser.add_argument(
+        "--sam-device",
+        choices=("auto", "cpu", "cuda", "mps"),
+        default="auto",
+        help="Torch device for SAM (default: auto).",
+    )
+    parser.add_argument(
+        "--sam-offline",
+        action="store_true",
+        help="Use only locally cached SAM configuration and weights.",
+    )
     args = parser.parse_args()
     if not np.isfinite(args.pick_radius) or args.pick_radius <= 0:
         parser.error("--pick-radius must be a positive finite number")
@@ -607,7 +800,15 @@ def main() -> None:
     # Keep the Python owner alive for the entire GUI event loop. Discarding the
     # temporary AnnotatorWindow before run() can destroy Open3D's renderer and
     # GLX pbuffer while Filament still uses it (GLXBadPbuffer on startup/click).
-    annotator = AnnotatorWindow(root, initial, args.config.resolve(), args.pick_radius)
+    annotator = AnnotatorWindow(
+        root,
+        initial,
+        args.config.resolve(),
+        args.pick_radius,
+        args.sam_model,
+        args.sam_device,
+        args.sam_offline,
+    )
     gui.Application.instance.run()
     del annotator
 

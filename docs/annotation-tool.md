@@ -7,6 +7,28 @@ python tools/annotate_snapshot.py
 python tools/annotate_snapshot.py data/registration_snapshots/<snapshot-name>
 ```
 
+The window shows the interactive point cloud and RGB image side by side. Click a
+block in RGB to use an existing candidate mask as a 3D selection. To use SAM 2.1
+point-prompt segmentation instead, install the optional dependencies and enable
+the model explicitly (the first run downloads its weights):
+
+```bash
+uv sync --extra sam
+uv run python tools/annotate_snapshot.py --sam-model --sam-device auto
+```
+
+Use `--sam-offline` to prohibit network access and load only already cached
+model files. While one prompt is running, further RGB clicks are ignored with a
+busy status; switching snapshots or closing the window safely discards its
+result.
+
+RGB masks are dilated slightly for calibration error, then filtered by camera
+depth and 3D connectivity to reject background bleed. Selected LiDAR points are
+highlighted magenta and the fitted box is created as **pending**. Correct it with
+the existing pose controls and explicitly approve it, or use **Abort edit**. If
+SAM is disabled or inference fails, clicking a checked-in candidate mask still
+works. A failed selection or fit never changes the annotation document.
+
 The viewer uses Open3D's normal left-drag orbit, middle/right-drag pan, and wheel
 zoom controls. A click on a highlighted box selects it; the block list is the
 fallback when boxes overlap. `Ctrl`+left-click creates a pending manual block at

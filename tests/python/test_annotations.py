@@ -6,16 +6,28 @@ from blockpose.annotations import load_annotations
 REPO_ROOT = Path(__file__).parents[2]
 
 
-def test_all_real_snapshots_have_truthful_partial_manifests() -> None:
+def test_all_real_snapshots_have_valid_review_manifests() -> None:
     paths = sorted((REPO_ROOT / "data" / "registration_snapshots").glob("*/annotations.yaml"))
     assert len(paths) == 4
     annotations = [load_annotations(path) for path in paths]
+    # These development snapshots remain partial until a human explicitly
+    # defines and exhaustively reviews an ROI.
     assert all(not item.annotation_complete for item in annotations)
     assert all(not item.has_complete_roi for item in annotations)
-    assert sum(len(item.targets) for item in annotations) == 4
-    assert {target.provenance for item in annotations for target in item.targets} == {
-        "upstream_registration"
+    targets = [target for item in annotations for target in item.targets]
+    assert targets
+    assert all(target.review_status in {"pending", "approved", "rejected"} for target in targets)
+    assert {target.provenance for target in targets} <= {
+        "manual",
+        "upstream_registration",
     }
+    assert {target.provenance for target in targets} == {
+        "manual",
+        "upstream_registration",
+    }
+    assert all(
+        len({target.id for target in item.targets}) == len(item.targets) for item in annotations
+    )
 
 
 def test_complete_manifest_requires_roi(tmp_path: Path) -> None:

@@ -25,9 +25,12 @@ dev = [
     "jupyterlab",
     "plotly>=5.20",
 ]
+sam = [
+    "torch>=2.5",
+    "transformers>=4.57",
+]
 
-# Phase 7 (gated) — do NOT install until the learned-component gate triggers.
-# learned = ["torch", ...]
+# SAM remains opt-in: normal detector and annotator installs do not pull model runtimes.
 
 [tool.uv]
 package = true

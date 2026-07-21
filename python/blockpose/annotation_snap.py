@@ -27,6 +27,7 @@ class SnapParams:
     min_score: float = 0.30
     ambiguity_score_ratio: float = 0.96
     ambiguity_distance_m: float = 0.08
+    reject_ambiguous: bool = True
 
 
 @dataclass(frozen=True)
@@ -371,14 +372,15 @@ def snap_block_to_cloud(
         return _failure(f"insufficient cuboid surface support ({count} inliers)")
     if best[0] < params.min_score:
         return _failure(f"cuboid fit score {best[0]:.2f} is below {params.min_score:.2f}")
-    for competitor in candidates[1:]:
-        if competitor[0] < best[0] * params.ambiguity_score_ratio:
-            break
-        distance = float(np.linalg.norm(competitor[2] - best[2]))
-        if distance >= params.ambiguity_distance_m:
-            return _failure(
-                f"ambiguous fit: near-equal candidates are {distance:.2f} m apart"
-            )
+    if params.reject_ambiguous:
+        for competitor in candidates[1:]:
+            if competitor[0] < best[0] * params.ambiguity_score_ratio:
+                break
+            distance = float(np.linalg.norm(competitor[2] - best[2]))
+            if distance >= params.ambiguity_distance_m:
+                return _failure(
+                    f"ambiguous fit: near-equal candidates are {distance:.2f} m apart"
+                )
     return SnapResult(
         True,
         best[2].copy(),
