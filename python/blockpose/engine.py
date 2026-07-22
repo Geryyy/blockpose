@@ -117,21 +117,54 @@ class HybridBlockDetector:
                 raise ValueError(message)
 
     def _points(
-        self, source: FrameInput
-    ) -> tuple[np.ndarray, tuple[str, ...], np.ndarray | None, np.ndarray | None]:
+        self, source: FrameInput, *, deadline_s: float | None = None
+    ) -> tuple[
+        np.ndarray,
+        tuple[str, ...],
+        np.ndarray | None,
+        np.ndarray | None,
+        np.ndarray | None,
+        np.ndarray | None,
+    ]:
         if isinstance(source, FrameBurst):
-            fused = source.fuse()
-            return fused.points_world, fused.unavailable_evidence, None, None
+            fused = source.fuse(deadline_s=deadline_s)
+            origin = (
+                fused.point_origins_world[-1]
+                if fused.point_origins_world is not None and len(fused.point_origins_world)
+                else fused.no_return_origins_world[-1]
+                if fused.no_return_origins_world is not None
+                and len(fused.no_return_origins_world)
+                else None
+            )
+            return (
+                fused.points_world,
+                fused.unavailable_evidence,
+                origin,
+                fused.no_return_directions_world,
+                fused.point_origins_world,
+                fused.no_return_origins_world,
+            )
         if isinstance(source, PointFrame):
             points = source.points_in_world()
-            if source.sensor_trajectory is None:
-                return points, source.unavailable_evidence, None, None
-            transform = source.sensor_trajectory.sample(np.array([source.timestamp]))[0]
-            origin = transform[:3, 3]
-            misses = None
-            if source.no_return_rays is not None:
-                misses = source.no_return_rays @ transform[:3, :3].T
-            return points, source.unavailable_evidence, origin, misses
+            origins = source.point_origins_in_world()
+            misses = source.no_return_rays_in_world()
+            if origins is None:
+                return points, source.unavailable_evidence, None, None, None, None
+            origin = (
+                origins[-1]
+                if len(origins)
+                else misses[0][-1]
+                if misses is not None and len(misses[0])
+                else None
+            )
+            return (
+                points,
+                source.unavailable_evidence,
+                origin,
+                None if misses is None else misses[1],
+                origins,
+                None if misses is None else misses[0],
+            )
         points = np.asarray(source, dtype=np.float64)
         if points.ndim != 2 or points.shape[1] != 3 or not np.all(np.isfinite(points)):
             raise ValueError("point input must have shape (N, 3) and be finite")
@@ -140,19 +173,32 @@ class HybridBlockDetector:
             "relative_time",
             "beam_id",
             "no_return_rays",
+            "per_point_sensor_origins",
+            "no_return_ray_origins",
             "gripper_trajectory",
         )
-        return points, unavailable, None, None
+        return points, unavailable, None, None, None, None
 
     @staticmethod
     def _sensor_context(
-        points: np.ndarray, origin: np.ndarray | None, misses: np.ndarray | None
+        points: np.ndarray,
+        origin: np.ndarray | None,
+        misses: np.ndarray | None,
+        ray_origins: np.ndarray | None = None,
+        miss_origins: np.ndarray | None = None,
     ) -> SensorContext | None:
         if origin is None:
             return None
-        context = SensorContext.from_points(origin, points)
+        context = SensorContext.from_points(origin, points, ray_origins=ray_origins)
         if misses is not None:
-            context = SensorContext(context.origin, context.ray_directions, context.ranges, misses)
+            context = SensorContext(
+                context.origin,
+                context.ray_directions,
+                context.ranges,
+                misses,
+                context.ray_origins,
+                miss_origins,
+            )
         return context
 
     def detect_free(
@@ -160,7 +206,11 @@ class HybridBlockDetector:
     ) -> QueryResult:
         started = time.perf_counter()
         try:
-            points, unavailable, origin, misses = self._points(source)
+            points, unavailable, origin, misses, ray_origins, miss_origins = self._points(
+                source, deadline_s=started + self.timeout_ms / 1000.0
+            )
+        except TimeoutError as exc:
+            return self._failure(started, QueryErrorCode.TIMEOUT, str(exc))
         except ValueError as exc:
             code = (
                 QueryErrorCode.UNAVAILABLE_TRANSFORM
@@ -181,10 +231,13 @@ class HybridBlockDetector:
                 or np.any(low >= high)
             ):
                 return self._failure(started, QueryErrorCode.INVALID_INPUT, "invalid workspace ROI")
-            points = points[np.all((points >= low) & (points <= high), axis=1)]
+            mask = np.all((points >= low) & (points <= high), axis=1)
+            points = points[mask]
+            if ray_origins is not None:
+                ray_origins = ray_origins[mask]
         if not len(points):
             return self._failure(started, QueryErrorCode.EMPTY_ROI, "no points in workspace ROI")
-        context = self._sensor_context(points, origin, misses)
+        context = self._sensor_context(points, origin, misses, ray_origins, miss_origins)
         result = detect_blocks_detailed(points, self.params, sensor_context=context)
         blocks = []
         for pose, diag in zip(result.poses, result.diagnostics, strict=True):
@@ -212,7 +265,11 @@ class HybridBlockDetector:
     def verify_placed(self, source: FrameInput, expected_blocks: list[BlockPose]) -> QueryResult:
         started = time.perf_counter()
         try:
-            points, unavailable, origin, misses = self._points(source)
+            points, unavailable, origin, misses, ray_origins, miss_origins = self._points(
+                source, deadline_s=started + self.timeout_ms / 1000.0
+            )
+        except TimeoutError as exc:
+            return self._failure(started, QueryErrorCode.TIMEOUT, str(exc))
         except ValueError as exc:
             code = (
                 QueryErrorCode.UNAVAILABLE_TRANSFORM
@@ -226,7 +283,7 @@ class HybridBlockDetector:
             self._validate_poses(expected_blocks)
         except ValueError as exc:
             return self._failure(started, QueryErrorCode.INVALID_INPUT, str(exc))
-        context = self._sensor_context(points, origin, misses)
+        context = self._sensor_context(points, origin, misses, ray_origins, miss_origins)
         if self.verify_placed_v1:
             verified = verify_placed_blocks(
                 points,

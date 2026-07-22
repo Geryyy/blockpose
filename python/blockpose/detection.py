@@ -227,18 +227,38 @@ class SensorContext:
     supply them they are the strongest available free-space evidence.
     """
 
+    # ``origin`` remains the scalar compatibility/reference origin used by
+    # older callers and proposal heuristics.  Evidence functions use the
+    # optional per-ray origins below when present.
     origin: np.ndarray
     ray_directions: np.ndarray
     ranges: np.ndarray
     miss_directions: np.ndarray = field(default_factory=lambda: np.zeros((0, 3)))
+    ray_origins: np.ndarray | None = None
+    miss_origins: np.ndarray | None = None
 
     @classmethod
-    def from_points(cls, origin: np.ndarray, points: np.ndarray) -> SensorContext:
+    def from_points(
+        cls, origin: np.ndarray, points: np.ndarray, *, ray_origins: np.ndarray | None = None
+    ) -> SensorContext:
         origin = np.asarray(origin, dtype=np.float64)
-        vectors = np.asarray(points, dtype=np.float64) - origin
+        points = np.asarray(points, dtype=np.float64)
+        origins = (
+            np.broadcast_to(origin, points.shape)
+            if ray_origins is None
+            else np.asarray(ray_origins, dtype=np.float64)
+        )
+        if origins.shape != points.shape or not np.all(np.isfinite(origins)):
+            raise ValueError("ray_origins must have one finite world origin per point")
+        vectors = points - origins
         ranges = np.linalg.norm(vectors, axis=1)
         valid = ranges > 1e-9
-        return cls(origin, vectors[valid] / ranges[valid, None], ranges[valid])
+        return cls(
+            origin,
+            vectors[valid] / ranges[valid, None],
+            ranges[valid],
+            ray_origins=origins[valid],
+        )
 
 
 def _validate_sensor_context(context: SensorContext) -> SensorContext:
@@ -261,11 +281,37 @@ def _validate_sensor_context(context: SensorContext) -> SensorContext:
     if np.any(~np.isfinite(norms)) or np.any(norms <= 1e-12):
         raise ValueError("sensor_context.ray_directions must have non-zero finite norms")
     misses = np.asarray(context.miss_directions, dtype=np.float64)
-    if misses.size and (misses.ndim != 2 or misses.shape[1] != 3):
+    if misses.size == 0:
+        misses = np.zeros((0, 3), dtype=np.float64)
+    if misses.ndim != 2 or misses.shape[1] != 3:
         raise ValueError("sensor_context.miss_directions must have shape (M, 3)")
-    if misses.size and not np.all(np.isfinite(misses)):
+    if not np.all(np.isfinite(misses)):
         raise ValueError("sensor_context.miss_directions must be finite")
-    return SensorContext(origin, directions / norms[:, None], ranges, misses)
+    miss_norms = np.linalg.norm(misses, axis=1)
+    if np.any(~np.isfinite(miss_norms)) or np.any(miss_norms <= 1e-12):
+        raise ValueError("sensor_context.miss_directions must have non-zero finite norms")
+    ray_origins = (
+        np.broadcast_to(origin, directions.shape)
+        if context.ray_origins is None
+        else np.asarray(context.ray_origins, dtype=np.float64)
+    )
+    if ray_origins.shape != directions.shape or not np.all(np.isfinite(ray_origins)):
+        raise ValueError("sensor_context.ray_origins must have shape (N, 3) and be finite")
+    miss_origins = (
+        np.broadcast_to(origin, misses.shape)
+        if context.miss_origins is None
+        else np.asarray(context.miss_origins, dtype=np.float64)
+    )
+    if miss_origins.shape != misses.shape or not np.all(np.isfinite(miss_origins)):
+        raise ValueError("sensor_context.miss_origins must have shape (M, 3) and be finite")
+    return SensorContext(
+        origin,
+        directions / norms[:, None],
+        ranges,
+        misses / miss_norms[:, None],
+        ray_origins,
+        miss_origins,
+    )
 
 
 def _ray_box_interval(
@@ -311,43 +357,45 @@ def visibility_evidence(
     away from the sensor are not expected and also stay neutral.
     """
     context = _validate_sensor_context(context)
-    origin_local = pose.rotation.T @ (context.origin - pose.position)
+    origins_local = (context.ray_origins - pose.position) @ pose.rotation
     half = np.asarray(dims, dtype=np.float64) / 2.0
 
     # A ray intersecting the tolerance-expanded box must intersect its bounding
     # sphere. Use that exact necessary condition to avoid applying six slab/face
     # tests to the entire scan for every raw hypothesis. This changes no evidence
     # semantics: every potentially incident/supporting/violating ray is retained.
-    center_vector = pose.position - context.origin
-    projections = context.ray_directions @ center_vector
+    center_vector = pose.position[None, :] - context.ray_origins
+    projections = np.einsum("ij,ij->i", context.ray_directions, center_vector)
     perpendicular_sq = np.maximum(
-        float(center_vector @ center_vector) - projections * projections, 0.0
+        np.einsum("ij,ij->i", center_vector, center_vector) - projections * projections, 0.0
     )
     radius_sq = float(np.sum((half + tolerance) ** 2))
-    if float(center_vector @ center_vector) <= radius_sq:
-        # The sensor lies inside the conservative sphere; no angular rejection
-        # is safe (including rays initially directed away from its centre).
-        relevant = np.ones(len(context.ray_directions), dtype=bool)
-    else:
-        relevant = (projections > 0.0) & (perpendicular_sq <= radius_sq + 1e-12)
+    # A moving sensor may have some origins inside the conservative sphere and
+    # others outside, so this remains a per-ray decision.
+    inside_sphere = np.einsum("ij,ij->i", center_vector, center_vector) <= radius_sq
+    relevant = inside_sphere | ((projections > 0.0) & (perpendicular_sq <= radius_sq + 1e-12))
     directions = context.ray_directions[relevant]
     ranges = context.ranges[relevant]
+    origins_local = origins_local[relevant]
     dirs_local = directions @ pose.rotation
 
     expected_faces = covered_faces = supported_rays = incident_rays = 0
     for axis in range(3):
         for sign in (-1.0, 1.0):
             face_coord = sign * half[axis]
-            if sign * (origin_local[axis] - face_coord) <= 0.0:
+            front = sign * (origins_local[:, axis] - face_coord) > 0.0
+            if not np.any(front):
                 continue
             expected_faces += 1
             denom = dirs_local[:, axis]
-            valid = np.abs(denom) > 1e-9
+            valid = front & (np.abs(denom) > 1e-9)
             distance = np.zeros(len(denom), dtype=np.float64)
-            distance[valid] = (face_coord - origin_local[axis]) / denom[valid]
+            distance[valid] = (face_coord - origins_local[valid, axis]) / denom[valid]
             valid &= distance > 0.0
             intersections = np.zeros_like(dirs_local)
-            intersections[valid] = origin_local + distance[valid, None] * dirs_local[valid]
+            intersections[valid] = (
+                origins_local[valid] + distance[valid, None] * dirs_local[valid]
+            )
             for other in range(3):
                 if other != axis:
                     valid &= np.abs(intersections[:, other]) <= half[other] + tolerance
@@ -360,7 +408,7 @@ def visibility_evidence(
                 covered_faces += 1
 
     shrunk = np.maximum(half - tolerance, 1e-3)
-    _, t_exit, intersects = _ray_box_interval(origin_local, dirs_local, shrunk)
+    _, t_exit, intersects = _ray_box_interval(origins_local, dirs_local, shrunk)
     violations = int(np.count_nonzero(intersects & (ranges > t_exit + tolerance)))
     return expected_faces, covered_faces, violations, supported_rays, incident_rays
 
@@ -379,12 +427,21 @@ def free_space_violations_from_misses(
     conclusive evidence against the hypothesis -- stronger than a terminating
     ray, which could always be explained by a surface behind the block.
     """
-    directions = np.asarray(miss_directions, dtype=np.float64)
-    if directions.ndim != 2 or directions.shape[1] != 3 or len(directions) == 0:
+    raw_directions = np.asarray(miss_directions, dtype=np.float64)
+    if raw_directions.ndim != 2 or raw_directions.shape[1] != 3 or len(raw_directions) == 0:
         return 0
-    norms = np.linalg.norm(directions, axis=1)
-    directions = directions[norms > 1e-12] / norms[norms > 1e-12, None]
-    origin_local = pose.rotation.T @ (np.asarray(origin, dtype=np.float64) - pose.position)
+    origins = np.asarray(origin, dtype=np.float64)
+    if origins.shape == (3,):
+        origins = np.broadcast_to(origins, raw_directions.shape)
+    if origins.shape != raw_directions.shape or not np.all(np.isfinite(origins)):
+        raise ValueError("miss-ray origins must be finite shape (3,) or (M, 3)")
+    norms = np.linalg.norm(raw_directions, axis=1)
+    valid = norms > 1e-12
+    directions = raw_directions[valid] / norms[valid, None]
+    if not len(directions):
+        return 0
+    origins = origins[valid]
+    origin_local = (origins - pose.position) @ pose.rotation
     dirs_local = directions @ pose.rotation
     half = np.maximum(np.asarray(dims, dtype=np.float64) / 2.0 - tolerance, 1e-3)
     _, _, intersects = _ray_box_interval(origin_local, dirs_local, half)
@@ -1007,7 +1064,14 @@ def _make_hypothesis(
         )
         # No-return beams crossing the volume are conclusive counter-evidence.
         violations += free_space_violations_from_misses(
-            pose, sensor_context.origin, sensor_context.miss_directions, dims
+            pose,
+            (
+                sensor_context.miss_origins
+                if sensor_context.miss_origins is not None
+                else sensor_context.origin
+            ),
+            sensor_context.miss_directions,
+            dims,
         )
     evidence = HypothesisEvidence(
         support_points,

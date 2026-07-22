@@ -29,6 +29,7 @@ from blockpose.detection import (
     detect_blocks,
     detect_blocks_detailed,
     detect_scene_sample,
+    free_space_violations_from_misses,
     visibility_evidence,
 )
 from blockpose.evaluate import evaluate, rotation_error_deg
@@ -462,6 +463,32 @@ def test_visibility_keeps_intersecting_rays_when_sensor_is_inside_bounding_spher
     # This is the exact unfiltered slab-test result: a sensor inside the box
     # sees no outward-facing surface, while both rays cross its shrunk volume.
     assert (expected, covered, violations, supported, incident) == (0, 0, 2, 0, 0)
+
+
+def test_per_ray_miss_origins_prevent_false_free_space_evidence() -> None:
+    pose = _make_pose_for_selection((0.0, 0.0, 0.45))
+    directions = np.array([[1.0, 0.0, 0.0]])
+    # The legacy scalar origin intersects the planned volume, while the actual
+    # moving-sensor ray at y=2 m does not. Using the scalar would falsely turn
+    # absent returns into counter-evidence.
+    assert free_space_violations_from_misses(
+        pose, np.array([-5.0, 0.0, 0.45]), directions, (0.6, 0.6, 0.9)
+    ) == 1
+    assert free_space_violations_from_misses(
+        pose, np.array([[-5.0, 2.0, 0.45]]), directions, (0.6, 0.6, 0.9)
+    ) == 0
+
+
+def test_per_ray_origin_evidence_is_permutation_stable() -> None:
+    pose = _make_pose_for_selection((0.0, 0.0, 0.45))
+    origins = np.array([[-5.0, 0.0, 0.45], [-5.0, 2.0, 0.45], [-5.0, 0.0, 0.45]])
+    directions = np.tile(np.array([[1.0, 0.0, 0.0]]), (3, 1))
+    first = free_space_violations_from_misses(pose, origins, directions, (0.6, 0.6, 0.9))
+    order = np.array([2, 0, 1])
+    second = free_space_violations_from_misses(
+        pose, origins[order], directions[order], (0.6, 0.6, 0.9)
+    )
+    assert (first, second) == (2, 2)
 
 
 def test_far_block_survives_nearby_nonoccluding_clutter() -> None:

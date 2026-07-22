@@ -160,6 +160,54 @@ def test_actual_through_volume_rays_can_call_missing() -> None:
     assert result.free_space_rays >= 3
 
 
+def test_per_ray_miss_origins_keep_moving_sensor_absence_not_observable() -> None:
+    prior = BlockPose(np.array([0.0, 0.0, 0.3]), np.eye(3))
+    # The scalar compatibility origin intersects the block, but the recorded
+    # no-return ray originated two metres aside after sensor motion. It must
+    # not be interpreted as a through-volume ray and therefore cannot call the
+    # block Missing.
+    context = SensorContext(
+        np.array([-5.0, 0.0, 0.3]),
+        np.empty((0, 3)),
+        np.empty(0),
+        np.array([[1.0, 0.0, 0.0]]),
+        miss_origins=np.array([[-5.0, 2.0, 0.3]]),
+    )
+    result = verify_placed_blocks(
+        np.empty((0, 3)),
+        [prior],
+        sensor_context=context,
+        params=VerifyPlacedParams(missing_min_rays=1),
+    )[0]
+    assert result.status == PlacedStatus.NOT_OBSERVABLE
+    assert result.free_space_rays == 0
+
+
+def test_missing_uses_actual_ray_origin_for_planned_neighbor_occlusion() -> None:
+    front = BlockPose(np.array([-0.9, 0.0, 0.3]), np.eye(3))
+    target = BlockPose(np.array([0.0, 0.0, 0.3]), np.eye(3))
+    # From the scalar representative origin at +X, the target appears visible.
+    # The actual no-return ray originated at -X and crosses the planned front
+    # block first. The old representative-origin gate falsely called target
+    # Missing; the ray is plan-occluded and must remain neutral.
+    context = SensorContext(
+        np.array([5.0, 0.0, 0.3]),
+        np.empty((0, 3)),
+        np.empty(0),
+        np.array([[1.0, 0.0, 0.0]]),
+        miss_origins=np.array([[-5.0, 0.0, 0.3]]),
+    )
+    results = verify_placed_blocks(
+        np.empty((0, 3)),
+        [front, target],
+        sensor_context=context,
+        params=VerifyPlacedParams(missing_min_rays=1),
+    )
+    assert results[1].status == PlacedStatus.NOT_OBSERVABLE
+    assert results[1].free_space_rays == 0
+    assert results[1].diagnostics["neighbor_occluded_free_space_rays"] == 1
+
+
 def test_hidden_plan_neighbor_is_not_observable() -> None:
     front = BlockSpec(-0.9, 0.0)
     hidden = BlockSpec(0.0, 0.0)

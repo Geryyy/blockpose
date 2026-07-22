@@ -17,20 +17,27 @@ and [verify-placed.md](verify-placed.md).
 **Default:** `HybridBlockDetector` accepts a world-frame XYZ array. Its result
 has pose, dimensions, raw score/features, an observability label, runtime, and
 unavailable-evidence fields. A 500 ms post-hoc soft deadline discards results
-if processing already exceeded the deadline; it does not interrupt Python work.
+if processing already exceeded the deadline. Burst fusion checks the same
+deadline cooperatively between frames, but the major detection, clustering,
+plane fitting, and refinement stages remain non-interruptible Python calls.
+The public timeout is therefore not yet a hard full-query deadline.
 
 **Opt-in:** `PointFrame` supports per-point relative time, a sensor trajectory,
 no-return rays, and a gripper trajectory. Points are deskewed into world frame
-when a sensor trajectory and relative times are supplied. `FrameBurst` fuses
-deskewed points, but the engine currently drops per-point/per-frame ray origins
-and no-return rays on that path; fused blind and verification queries therefore
-have no `SensorContext`. A single `PointFrame` builds one context using the
-sensor pose at its frame timestamp, so its ray calculations still use one origin
-after deskewing rather than a per-point origin.
+when a sensor trajectory and relative times are supplied. `PointFrame` retains
+the interpolated world-space sensor origin for every returned point, and
+`FrameBurst` preserves those origins, transformed no-return directions, their
+per-ray origins, and source-frame/source-point provenance. A zero-return frame
+can still build a `SensorContext` from valid no-return origins.
 
-**Planned:** scan-consistent ray evidence with per-point origins, retained
-no-return rays through fusion, transform uncertainty, and time-interpolated
-gripper geometry.
+No-return rays from a moving trajectory require
+`no_return_relative_time`. If those times are absent, the rays are withheld and
+reported unavailable rather than all being attached to the frame-start pose. An
+untimed no-return ray is accepted only for a trajectory whose transforms are
+identical throughout the scan. Raw XYZ and world-frame clouds without a sensor
+trajectory remain geometry-only fallbacks.
+
+**Planned:** transform uncertainty and time-interpolated gripper geometry.
 
 ## DetectFree — geometry-only discovery
 
@@ -42,11 +49,13 @@ refinement. Its runtime `confidence` and `covariance` fields are currently
 always `None`. Offline synthetic calibration utilities exist, but no confidence
 model is loaded or injected into the detector runtime.
 
-The detector can use a single-origin `SensorContext` to score returned-ray and
-no-return free-space consistency. Raw XYZ input has no sensor context and
-reports missing evidence channels instead. The current public default does not
-enable multi-orientation candidates (`candidate_dims=[]`) or multiscale
-proposals, and retains no additional conflict alternatives
+The detector can use scalar-origin or per-ray-origin `SensorContext` evidence to
+score returned-ray and no-return free-space consistency. Raw XYZ input has no
+sensor context and reports missing evidence channels instead. Proposal density
+scaling and clustering still use one representative origin, so moving-sensor
+range adaptation is not fully scan-consistent even though free-space evidence
+is. The current public default does not enable multi-orientation candidates
+(`candidate_dims=[]`) or multiscale proposals, and retains no additional conflict alternatives
 (`conflict_alternatives=1`).
 
 **Known limits:** blind clustering cannot reliably split touching or seamless
@@ -86,7 +95,12 @@ rank/weak-direction analysis, and geometric covariance when the fit has enough
 constraint. `Confirmed` means fit residual is acceptable and deviation is at
 most 3 cm and 2°; a supported in-bound fit outside that tolerance is `Deviated`.
 `Missing` additionally requires at least three returned/no-return free-space
-rays through a visible planned volume; raw silence remains `NotObservable`.
+rays through the planned volume. Each ray uses its actual sensor origin and is
+counted only when the target volume is reached before every planned neighbor;
+neighbor-occluded or near-equal joint rays remain neutral. Raw silence remains
+`NotObservable`. Expected-face assignment and its human-readable
+visible/occluded-face diagnostics still use one representative origin, but that
+representative-origin result no longer gates `Missing`.
 
 V1 covariance is a fit-curvature estimate, not a calibrated end-to-end
 uncertainty: it excludes sensor-pose error and lacks empirical coverage gates.
@@ -150,8 +164,8 @@ inspect its per-target results.
 ## What must change before production acceptance
 
 **Planned:** consolidate legacy and v1 into one documented verification
-contract; preserve per-point scan geometry and no-return evidence end to end;
-implement gripper-aware estimation; and collect held-out, plan-identified real
+contract; thread a cooperative deadline through the major detector/refinement
+stages; implement gripper-aware estimation; and collect held-out, plan-identified real
 wall captures with course membership recorded at capture time. Acceptance should
 then gate status correctness (especially false `Missing`), identity, pose by
 observability, covariance coverage, and latency on held-out recording sessions.

@@ -20,7 +20,6 @@ from blockpose.detection import (
     SensorContext,
     _ray_box_interval,
     _validate_sensor_context,
-    free_space_violations_from_misses,
 )
 from blockpose.pose import BLOCK_DIMS, BlockPose, frame_alignments
 from blockpose.refine import _exp_so3
@@ -210,10 +209,8 @@ def _ray_entry(
     dirs_local = directions @ pose.rotation
     half = np.asarray(pose.dims) / 2.0 + margin
     entries = np.full(len(origins), np.inf)
-    for index, (origin, direction) in enumerate(zip(origins_local, dirs_local, strict=True)):
-        enter, _, hit = _ray_box_interval(origin, direction[None], half)
-        if hit[0]:
-            entries[index] = max(float(enter[0]), 0.0)
+    enter, _, hit = _ray_box_interval(origins_local, dirs_local, half)
+    entries[hit] = np.maximum(enter[hit], 0.0)
     return entries
 
 
@@ -1232,12 +1229,38 @@ def _apply_course_constraints(
     return updated
 
 
-def _returned_free_space_rays(pose: BlockPose, context: SensorContext, tolerance: float) -> int:
-    origin_local = pose.rotation.T @ (context.origin - pose.position)
-    directions_local = context.ray_directions @ pose.rotation
+def _unoccluded_free_space_rays(
+    pose: BlockPose,
+    neighbors: list[BlockPose],
+    origins: np.ndarray,
+    directions: np.ndarray,
+    tolerance: float,
+    neighbor_margin: float,
+    ranges: np.ndarray | None = None,
+) -> tuple[int, int]:
+    """Count target-through rays for which the target is the first planned volume."""
+    if not len(directions):
+        return 0, 0
+    origin_local = (origins - pose.position) @ pose.rotation
+    directions_local = directions @ pose.rotation
     half = np.maximum(np.asarray(pose.dims) / 2.0 - tolerance, 1e-3)
-    _, exit_distance, hit = _ray_box_interval(origin_local, directions_local, half)
-    return int(np.count_nonzero(hit & (context.ranges > exit_distance + tolerance)))
+    entry_distance, exit_distance, hit = _ray_box_interval(
+        origin_local, directions_local, half
+    )
+    candidates = hit.copy()
+    if ranges is not None:
+        candidates &= ranges > exit_distance + tolerance
+    target_entry = np.maximum(entry_distance, 0.0)
+    target_first = candidates.copy()
+    for neighbor in neighbors:
+        neighbor_entry = _ray_entry(neighbor, origins, directions, neighbor_margin)
+        # Near-equal entries at a planned joint are ambiguous, so suppress them
+        # rather than turning uncertain visibility into a Missing claim.
+        target_first &= neighbor_entry > target_entry + neighbor_margin
+    return (
+        int(np.count_nonzero(target_first)),
+        int(np.count_nonzero(candidates & ~target_first)),
+    )
 
 
 def verify_placed_blocks(
@@ -1270,8 +1293,8 @@ def verify_placed_blocks(
     )
     assigned = _assign_expected_faces(points, expected_poses, settings.assign_band_m, visibility)
     results = []
-    for prior, owned_data, (visible, occluded) in zip(
-        expected_poses, assigned, visibility, strict=True
+    for block_index, (prior, owned_data, (visible, occluded)) in enumerate(
+        zip(expected_poses, assigned, visibility, strict=True)
     ):
         owned, face_axes, face_signs = owned_data
         pose, fitted, covariance, unconstrained, rms, diagnostics = _bounded_fit(
@@ -1286,15 +1309,29 @@ def verify_placed_blocks(
         rotation = _rotation_deviation_deg(prior, pose)
         returned_free = 0
         missed_free = 0
+        neighbor_occluded_free = 0
         if context is not None:
-            returned_free = _returned_free_space_rays(prior, context, settings.surface_tolerance_m)
-            missed_free = free_space_violations_from_misses(
+            neighbors = [
+                pose for index, pose in enumerate(expected_poses) if index != block_index
+            ]
+            returned_free, returned_blocked = _unoccluded_free_space_rays(
                 prior,
-                context.origin,
-                context.miss_directions,
-                prior.dims,
+                neighbors,
+                context.ray_origins,
+                context.ray_directions,
                 settings.surface_tolerance_m,
+                settings.neighbor_margin_m,
+                context.ranges,
             )
+            missed_free, missed_blocked = _unoccluded_free_space_rays(
+                prior,
+                neighbors,
+                context.miss_origins,
+                context.miss_directions,
+                settings.surface_tolerance_m,
+                settings.neighbor_margin_m,
+            )
+            neighbor_occluded_free = returned_blocked + missed_blocked
         free_rays = returned_free + missed_free
         fit_rejected_nearby = diagnostics.get("fit_reason") in {
             "search_bound",
@@ -1316,7 +1353,6 @@ def verify_placed_blocks(
                 observability = PlacedObservability.SYMMETRY_AMBIGUOUS
         elif (
             free_rays >= settings.missing_min_rays
-            and visible
             and not fit_rejected_nearby
             and len(owned) < settings.min_support_points
         ):
@@ -1352,6 +1388,7 @@ def verify_placed_blocks(
                     **diagnostics,
                     "returned_free_space_rays": returned_free,
                     "no_return_free_space_rays": missed_free,
+                    "neighbor_occluded_free_space_rays": neighbor_occluded_free,
                 },
             )
         )

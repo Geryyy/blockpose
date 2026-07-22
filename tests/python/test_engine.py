@@ -9,7 +9,7 @@ from blockpose.detection import (
     Observability,
 )
 from blockpose.engine import HybridBlockDetector, QueryErrorCode, QueryStatus
-from blockpose.frames import PointFrame
+from blockpose.frames import FrameBurst, PointFrame, PoseTrajectory, TimedPose
 from blockpose.plan_prior import PlanPriorResult
 from blockpose.pose import BlockPose
 
@@ -83,8 +83,6 @@ def test_point_frame_trajectory_builds_sensor_context(monkeypatch) -> None:
         lambda *_args, **kwargs: captured.setdefault("context", kwargs["sensor_context"])
         and DetectionResult([], []),
     )
-    from blockpose.frames import PoseTrajectory, TimedPose
-
     trajectory = PoseTrajectory((TimedPose(0.0, np.eye(4)),))
     frame = PointFrame(
         np.array([[1.0, 0.0, 0.0]]),
@@ -95,3 +93,60 @@ def test_point_frame_trajectory_builds_sensor_context(monkeypatch) -> None:
     HybridBlockDetector().detect_free(frame)
     assert captured["context"] is not None
     np.testing.assert_allclose(captured["context"].miss_directions, [[0.0, 1.0, 0.0]])
+
+
+def test_burst_uses_per_return_and_no_return_origins_in_sensor_context(monkeypatch) -> None:
+    captured = {}
+    monkeypatch.setattr(
+        engine_module,
+        "detect_blocks_detailed",
+        lambda *_args, **kwargs: captured.setdefault("context", kwargs["sensor_context"])
+        and DetectionResult([], []),
+    )
+
+    def translated(time_s: float, x: float) -> PoseTrajectory:
+        transform = np.eye(4)
+        transform[0, 3] = x
+        return PoseTrajectory((TimedPose(time_s, transform),))
+
+    burst = FrameBurst(
+        (
+            PointFrame(
+                np.array([[1.0, 0.0, 0.0]]),
+                timestamp=0.0,
+                sensor_trajectory=translated(0.0, 0.0),
+                no_return_rays=np.array([[0.0, 1.0, 0.0]]),
+            ),
+            PointFrame(
+                np.array([[1.0, 0.0, 0.0]]),
+                timestamp=1.0,
+                sensor_trajectory=translated(1.0, 2.0),
+                no_return_rays=np.array([[0.0, -1.0, 0.0]]),
+            ),
+        )
+    )
+    HybridBlockDetector().detect_free(burst)
+    np.testing.assert_allclose(captured["context"].ray_origins, [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
+    np.testing.assert_allclose(captured["context"].miss_origins, [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
+
+
+def test_zero_return_frame_keeps_valid_miss_ray_context(monkeypatch) -> None:
+    captured = {}
+    monkeypatch.setattr(
+        engine_module,
+        "verify_placed_blocks",
+        lambda _points, _expected, **kwargs: captured.setdefault(
+            "context", kwargs["sensor_context"]
+        )
+        and [],
+    )
+    frame = PointFrame(
+        np.empty((0, 3)),
+        sensor_trajectory=PoseTrajectory((TimedPose(0.0, np.eye(4)),)),
+        no_return_rays=np.array([[1.0, 0.0, 0.0]]),
+    )
+    prior = BlockPose(np.array([0.0, 0.0, 0.3]), np.eye(3))
+    HybridBlockDetector(verify_placed_v1=True).verify_placed(frame, [prior])
+    assert captured["context"] is not None
+    assert captured["context"].ray_origins.shape == (0, 3)
+    np.testing.assert_allclose(captured["context"].miss_origins, [[0.0, 0.0, 0.0]])
