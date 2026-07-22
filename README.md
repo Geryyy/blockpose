@@ -13,14 +13,14 @@ export of models and configuration from the source ROS workspace.
 
 ## Start here
 
-- [`docs/implementation-plan.md`](docs/implementation-plan.md) is the
-  canonical implementation plan and the source of truth for agentic work,
-  including the Python-prototype-first phasing (Phase P) and the later
-  C++/ROS 2 phases.
+- [`docs/current-detector-pipeline.md`](docs/current-detector-pipeline.md) is
+  the canonical description of current, as-built detector behavior, including
+  its default and opt-in paths, limits, and reproducible diagnostics.
+- [`docs/implementation-plan.md`](docs/implementation-plan.md) is the future
+  architecture and migration plan, including the later C++/ROS 2 phases; it is
+  not a description of the current implementation.
 - [`docs/ENVIRONMENT.md`](docs/ENVIRONMENT.md) explains the Docker and local
   development workflow.
-- [`source_manifest.yaml`](source_manifest.yaml) records where exported
-  reference material came from and what has not yet been exported.
 - [`config/`](config/) contains calibration, perception, initialization, block
   seed, transform, and world-model configuration.
 - [`assets/`](assets/) contains the block model, registration templates,
@@ -45,8 +45,8 @@ urdf/             reference robot and sensor descriptions
 reference/provenance material rather than a finished standalone runtime. Some
 files still name packages from the original ROS workspace and are intentionally
 kept unchanged so their origin and integration assumptions remain inspectable.
-Consult `source_manifest.yaml` before treating an exported file as maintained
-Blockpose code.
+Treat those exported reference files as unmaintained unless their use is
+documented by the current pipeline or environment documentation.
 
 ## Clone and large assets
 
