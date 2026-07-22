@@ -12,7 +12,4 @@ For non-trivial changes:
 
 ## Filesystem safety
 
-- Never delete files or directories.
-- Do not use `rm`, `rmdir`, `unlink`, `shred`, `find -delete`, or equivalent APIs.
-- When a file becomes obsolete, leave it in place and report it to the user.
 - Never use `git clean` or `git reset --hard`.
