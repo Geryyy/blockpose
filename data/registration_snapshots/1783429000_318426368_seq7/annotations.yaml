@@ -1,0 +1,45 @@
+schema_version: 2
+snapshot: 1783429000_318426368_seq7
+annotation_complete: false
+annotated_roi: null
+notes: Provisional batch initialization; every pending target requires manual review.
+blocks:
+- id: rgb_candidate_1
+  review_status: pending
+  provenance: rgb_candidate_fit
+  visibility: unknown
+  dimensions:
+  - 0.9
+  - 0.6
+  - 0.6
+  confidence: 0.7752036114539629
+  pose:
+    position:
+    - -11.871643792712037
+    - -0.596501275036462
+    - 0.4306936115641023
+    orientation_xyzw:
+    - 0.007024258052876058
+    - 0.014491311292987679
+    - -0.6778845831550318
+    - 0.7349919411915653
+- id: rgb_candidate_2
+  review_status: pending
+  provenance: rgb_candidate_fit
+  visibility: unknown
+  dimensions:
+  - 0.9
+  - 0.6
+  - 0.6
+  confidence: 0.7964434940196755
+  pose:
+    position:
+    - -11.469685451929216
+    - -1.6580661010538298
+    - 1.4420345896316626
+    orientation_xyzw:
+    - 0.010494321751480466
+    - 0.022660729855432972
+    - 0.8620704950377462
+    - -0.5061727196508824
+unmatched_detection_reviews: {}

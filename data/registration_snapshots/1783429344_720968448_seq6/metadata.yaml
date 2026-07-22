@@ -1,0 +1,28 @@
+mode: "SCENE_DISCOVERY"
+sequence: 6
+target_block_id: ""
+world_frame: "world"
+image:
+  frame_id: "blackfly_rotated"
+  stamp:
+    sec: 1783429344
+    nanosec: 705069491
+  width: 1536
+  height: 2048
+  encoding: "bgr8"
+  file: rgb.png
+cloud:
+  frame_id: "seyond"
+  stamp:
+    sec: 1783429344
+    nanosec: 720968448
+  width: 115369
+  height: 1
+  file: cloud.pcd
+detections: 2
+registration_candidates: 2
+candidate_masks:
+  - detection_id: 1
+    file: masks/candidate_001_mask.png
+  - detection_id: 2
+    file: masks/candidate_002_mask.png

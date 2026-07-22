@@ -1,0 +1,65 @@
+# TF snapshot for this scene-discovery dump.
+# Convention: T_parent_child maps points from child coords into parent coords
+#   (p_parent = T_parent_child * p_child).
+# lookup: "stamp" = at the cloud stamp, "latest" = newest available (see note),
+#   "identity" = parent == child.
+# rgb.png is in image_frame, cloud.pcd is in cloud_frame, block poses are in reference_frame.
+reference_frame: "world"
+stamp:
+  sec: 1783429041
+  nanosec: 18743040
+image_frame: "blackfly_rotated"
+cloud_frame: "seyond"
+transforms:
+  - name: "T_world_blackfly_rotated"
+    parent: "world"
+    child: "blackfly_rotated"
+    lookup: "stamp"
+    available: true
+    xyz: [-6.96137986, -0.400542888, 3.65555528]
+    rpy: [-1.99893753, -0.0161024527, 1.79672764]
+    quaternion_xyzw: [0.520542795, 0.660756034, -0.418800661, -0.342114992]
+    matrix:
+      - [-0.223985061, 0.401347617, -0.888116424, -6.96137986]
+      - [0.974459556, 0.107282409, -0.19727914, -0.400542888]
+      - [0.0161017568, -0.909621116, -0.415126677, 3.65555528]
+      - [0.0, 0.0, 0.0, 1.0]
+  - name: "T_world_seyond"
+    parent: "world"
+    child: "seyond"
+    lookup: "stamp"
+    available: true
+    xyz: [-6.99756321, -0.238632697, 3.64393921]
+    rpy: [1.40682522, 0.400012365, 2.9256634]
+    quaternion_xyzw: [-0.0823263287, 0.646565544, 0.72923698, 0.208299783]
+    matrix:
+      - [-0.899667152, -0.410258544, 0.149288118, -6.99756321]
+      - [0.197341074, -0.0771283946, 0.977296123, -0.238632697]
+      - [-0.389429732, 0.908701897, 0.150350745, 3.64393921]
+      - [0.0, 0.0, 0.0, 1.0]
+  - name: "T_seyond_blackfly_rotated"
+    parent: "seyond"
+    child: "blackfly_rotated"
+    lookup: "stamp"
+    available: true
+    xyz: [-0.0690281416, 0.00819888869, -0.151085974]
+    rpy: [3.06951325, -1.1714572, 0.0807570151]
+    quaternion_xyzw: [0.832893692, 0.0137143692, 0.553209471, 0.00770029995]
+    matrix:
+      - [0.387542395, 0.0143254655, 0.921740567, -0.0690281416]
+      - [0.031364981, -0.999505243, 0.00234677538, 0.00819888869]
+      - [0.921318148, 0.0280009004, -0.387799973, -0.151085974]
+      - [0.0, 0.0, 0.0, 1.0]
+  - name: "T_world_K0_mounting_base"
+    parent: "world"
+    child: "K0_mounting_base"
+    lookup: "stamp"
+    available: true
+    xyz: [-6.94684183, 0.349800124, 1.14073095]
+    rpy: [-0.000175217767, 0.00729504826, 3.14159265]
+    quaternion_xyzw: [-0.00364751603, -8.76083005e-05, 0.999993344, -3.19554807e-07]
+    matrix:
+      - [-0.999973391, 1.27821072e-06, -0.00729498344, -6.94684183]
+      - [1.22464765e-16, -0.999999985, -0.000175217766, 0.349800124]
+      - [-0.00729498356, -0.000175213104, 0.999973376, 1.14073095]
+      - [0.0, 0.0, 0.0, 1.0]

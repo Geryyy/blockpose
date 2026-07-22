@@ -1,0 +1,26 @@
+schema_version: 2
+snapshot: 1783427923_718112512_seq5
+annotation_complete: false
+annotated_roi: null
+notes: Provisional batch initialization; every pending target requires manual review.
+blocks:
+- id: rgb_candidate_1
+  review_status: pending
+  provenance: rgb_candidate_fit
+  visibility: unknown
+  dimensions:
+  - 0.9
+  - 0.6
+  - 0.6
+  confidence: 0.7885614876423928
+  pose:
+    position:
+    - -11.65333678887391
+    - 2.582162728098728
+    - 0.6291270304702853
+    orientation_xyzw:
+    - 0.0053924050980932526
+    - -0.01728129194289028
+    - 0.7129817654695371
+    - -0.7009488433716006
+unmatched_detection_reviews: {}

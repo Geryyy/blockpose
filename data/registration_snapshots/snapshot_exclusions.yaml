@@ -1,0 +1,10 @@
+schema_version: 1
+excluded_snapshots:
+  - snapshot: 1783428861_719600128_seq3
+    reason: Missing T_world_seyond; cloud and registered poses cannot be placed in a common world frame with guaranteed integrity.
+  - snapshot: 1783428498_520086272_seq4
+    reason: Duplicate capture of the retained sequence-3 snapshot.
+    retained_snapshot: 1783428498_520086272_seq3
+  - snapshot: 1783428995_118905856_seq6
+    reason: Duplicate capture; the retained sequence-1 snapshot has successful upstream registrations.
+    retained_snapshot: 1783428995_118905856_seq1

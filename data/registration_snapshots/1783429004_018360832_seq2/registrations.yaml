@@ -1,0 +1,29 @@
+registrations_ok: 2
+coarse_upserts_ok: 0
+records:
+  - detection_id: 1
+    registration_ok: true
+    upsert_ok: true
+    assigned_id: "block_1"
+    reason: ""
+    incoming_id: "block_1"
+    confidence: 0.625749
+    pose_status: 2
+    task_status: 1
+    pose:
+      frame_id: "world"
+      position: [-11.8594, -0.602732, 0.423276]
+      orientation_xyzw: [-0.00783608, 0.0054228, -0.680965, 0.732254]
+  - detection_id: 2
+    registration_ok: true
+    upsert_ok: true
+    assigned_id: "block_3"
+    reason: ""
+    incoming_id: "block_2"
+    confidence: 0.889299
+    pose_status: 2
+    task_status: 1
+    pose:
+      frame_id: "world"
+      position: [-10.8122, -2.90761, 1.15201]
+      orientation_xyzw: [-0.0790058, -0.0248905, 0.208328, 0.974545]
