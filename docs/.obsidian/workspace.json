@@ -20,23 +20,8 @@
               "icon": "lucide-file",
               "title": "implementation-plan"
             }
-          },
-          {
-            "id": "0f1a7c49e196cfa7",
-            "type": "leaf",
-            "state": {
-              "type": "markdown",
-              "state": {
-                "file": "Snapshot Annotation.md",
-                "mode": "source",
-                "source": false
-              },
-              "icon": "lucide-file",
-              "title": "Snapshot Annotation"
-            }
           }
-        ],
-        "currentTab": 1
+        ]
       }
     ],
     "direction": "vertical"
@@ -198,14 +183,16 @@
       "bases:Create new base": false
     }
   },
-  "active": "0f1a7c49e196cfa7",
+  "active": "22e1d8aa044621e8",
   "lastOpenFiles": [
-    "python-detector-contract.md",
-    "PERCEPTION_PIPELINE.md",
-    "cleanup-inventory-2026-07-22.md",
-    "current-detector-pipeline.md",
     "verify-placed.md",
-    "implementation-plan.md",
-    "Snapshot Annotation.md"
+    "python-detector-contract.md",
+    "detector-plan.md",
+    "current-detector-pipeline.md",
+    "cleanup-inventory-2026-07-22.md",
+    "annotation-tool.md",
+    "Snapshot Annotation.md",
+    "PERCEPTION_PIPELINE.md",
+    "implementation-plan.md"
   ]
 }
