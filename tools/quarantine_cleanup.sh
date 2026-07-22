@@ -7,9 +7,12 @@ LC_ALL=C
 
 readonly BACKUP_COMMIT='48f10e307b855195a64342b8a140ad064c8042b0'
 readonly EXPECTED_CANONICAL=23
-readonly EXPECTED_BACKUPS=54
-readonly EXPECTED_TRACKED_BACKUPS=5
-readonly EXPECTED_UNTRACKED_BACKUPS=49
+# The reviewed backup set was removed in 07d2ec2 after canonical annotations
+# were committed. Keep the exact-zero guard so preview stays idempotent and a
+# newly generated backup cannot silently enter this historical allowlist.
+readonly EXPECTED_BACKUPS=0
+readonly EXPECTED_TRACKED_BACKUPS=0
+readonly EXPECTED_UNTRACKED_BACKUPS=0
 readonly SCRIPT_NAME="${0##*/}"
 
 if (( BASH_VERSINFO[0] < 4 )); then
