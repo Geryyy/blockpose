@@ -1,8 +1,19 @@
 schema_version: 2
 snapshot: 1783428549_619338496_seq1
-annotation_complete: false
-annotated_roi: null
-notes: Provisional batch initialization; every pending target requires manual review.
+annotation_complete: true
+annotated_roi:
+  min:
+  - -69.16214177335246
+  - -60.50355467314527
+  - -0.16869568220526898
+  max:
+  - -7.041029624674679
+  - 11.721915807367436
+  - 20.056281295352015
+notes: 'Provisional batch initialization; every pending target requires manual review.
+
+  User confirmed every visible block in the entire snapshot is annotated. The annotated
+  ROI is the full finite point-cloud AABB in world coordinates with 0.01 m padding.'
 blocks:
 - id: block_0
   review_status: approved

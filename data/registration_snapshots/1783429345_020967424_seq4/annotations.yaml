@@ -3,16 +3,19 @@ snapshot: 1783429345_020967424_seq4
 annotation_complete: true
 annotated_roi:
   min:
-  - -12.31292226635038
-  - -3.231261366711706
-  - -0.06803297539373318
+  - -73.46179542363538
+  - -66.95971835735864
+  - -0.1613122319260245
   max:
-  - -10.221053578307652
-  - -1.966857133478705
-  - 1.8000489118010305
-notes: Two observable blocks were manually reviewed in the annotated ROI. A third,
+  - -6.852513712158257
+  - 2.2695249583687893
+  - 20.08051242035431
+notes: 'Two observable blocks were manually reviewed in the annotated ROI. A third,
   heavily occluded block has no defensible blind pose and is intentionally omitted;
   it requires a future wall-plan prior and is not an observable detection target.
+
+  User confirmed every visible block in the entire snapshot is annotated. The annotated
+  ROI is the full finite point-cloud AABB in world coordinates with 0.01 m padding.'
 blocks:
 - id: block_3
   review_status: approved

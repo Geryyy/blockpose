@@ -11,9 +11,9 @@ def test_all_real_snapshots_have_valid_review_manifests() -> None:
     assert len(paths) >= 4
     annotations = [load_annotations(path) for path in paths]
     complete = [item for item in annotations if item.annotation_complete]
-    assert {item.snapshot for item in complete} == {"1783429345_020967424_seq4"}
+    assert len(complete) == 23
+    assert len(complete) == len(annotations)
     assert all(item.has_complete_roi for item in complete)
-    assert all(not item.has_complete_roi for item in annotations if not item.annotation_complete)
     targets = [target for item in annotations for target in item.targets]
     assert targets
     assert all(target.review_status in {"pending", "approved", "rejected"} for target in targets)

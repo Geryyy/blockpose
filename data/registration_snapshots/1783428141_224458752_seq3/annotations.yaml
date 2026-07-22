@@ -1,9 +1,20 @@
 schema_version: 2
 snapshot: 1783428141_224458752_seq3
-annotation_complete: false
-annotated_roi: null
-notes: No successful upstream registrations; scene has not been exhaustively manually
+annotation_complete: true
+annotated_roi:
+  min:
+  - -88.8048976115424
+  - -6.047053103292081
+  - -0.1996751758125057
+  max:
+  - -7.213799382811002
+  - 82.68227498981891
+  - 15.769533013072351
+notes: 'No successful upstream registrations; scene has not been exhaustively manually
   reviewed.
+
+  User confirmed every visible block in the entire snapshot is annotated. The annotated
+  ROI is the full finite point-cloud AABB in world coordinates with 0.01 m padding.'
 blocks:
 - id: manual_2
   review_status: approved
