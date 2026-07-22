@@ -29,6 +29,7 @@ Testing/
 htmlcov/
 
 # Runtime captures and generated diagnostics
+/.cleanup-quarantine/
 /reference_bag_export/
 /scene_discovery_dump/
 /python/blockpose/confidence_calibration.json
