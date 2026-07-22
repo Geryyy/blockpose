@@ -59,3 +59,34 @@ partition at a seamless planned joint cannot become boundary evidence. Planned
 joints are never synthesized as observations.
 Course-aware mode remains experimental and the legacy verifier remains default
 until the full touching-row yaw, pose, status, identity, and latency gates pass.
+
+### Opt-in shared-course yaw
+
+`VerifyPlacedParams(enable_course_yaw_refinement=True)` additionally enables a
+conservative pooled raw-geometry yaw search for a course. It is disabled by
+default and does not alter engine defaults or snapshot topology.
+
+The solve accepts only a named wall plan with at least three level members,
+common nominal yaw, connected exact plan offsets, and no snapshot-source
+provenance. It uses one fixed raw course crop, exclusive face assignment on a
+deterministic 0.5°/0.1° search over ±10°, and gives each block equal robust
+point-plane influence. At least three independently supported yaw-sensitive
+anchors, an interior optimum, positive curvature, and material absolute and
+relative improvement are required. A timeout, non-finite score, missing anchor,
+or confidence-gate failure preserves independent outputs.
+
+Course members are canonicalized by stable block ID before scoring, so plan
+serialization order cannot affect the solve. Inputs over
+`course_yaw_max_input_points` (250,000 by default) are rejected in O(1) before
+cropping or sorting; accepted inputs are then capped deterministically and
+equally at 2,000 candidate points per member before the grid search.
+
+Only independently `Confirmed` or `Deviated` members can be changed. Missing,
+hidden, and unsupported members are never promoted or adjusted. Accepted yaw
+updates keep centers fixed, preserve the frozen evidence-derived status and
+deviation fields, retain the independent roll/pitch, report `LayoutInferred`,
+and conservatively inflate yaw covariance. Diagnostics retain both the data
+pose and layout-filled pose. Per-anchor and leave-one-out yaw agreement reject
+a locally mis-yawed member rather than averaging the deviation away. The
+`course_yaw_refinement` diagnostic records acceptance and all relevant
+objective gates.

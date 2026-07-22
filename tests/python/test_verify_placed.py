@@ -17,6 +17,9 @@ from blockpose.verify_placed import (
     PlacedVerification,
     VerifyPlacedParams,
     _apply_course_constraints,
+    _apply_course_yaw_refinement,
+    _balanced_course_point_cap,
+    _course_yaw_trial,
     _observed_face_boundaries,
     _rotation_deviation_deg,
     expected_visibility,
@@ -58,6 +61,49 @@ def _three_face_cloud(dx: float, dy: float, yaw_deg: float = 0.0) -> np.ndarray:
         [[np.cos(angle), -np.sin(angle), 0.0], [np.sin(angle), np.cos(angle), 0.0], [0, 0, 1]]
     )
     return local @ rotation.T + np.array([dx, dy, 0.3])
+
+
+_NAMED_ROW_IDS = ("c0_b0", "c0_b1", "c0_b2")
+_NAMED_ROW_POSITIONS = (
+    np.array([-15.0, -3.0, 0.3]),
+    np.array([-14.08, -3.0, 0.3]),
+    np.array([-13.16, -3.0, 0.3]),
+)
+
+
+def _named_row_course() -> CourseConstraint:
+    return CourseConstraint(
+        "named_row",
+        _NAMED_ROW_IDS,
+        {
+            ("c0_b0", "c0_b1"): np.array([0.92, 0.0, 0.0]),
+            ("c0_b1", "c0_b2"): np.array([0.92, 0.0, 0.0]),
+        },
+        plan_name="example_wall",
+    )
+
+
+def _named_row_priors() -> list[PlacedBlockPrior]:
+    return [
+        PlacedBlockPrior(identifier, BlockPose(position, np.eye(3)), course_id="named_row")
+        for identifier, position in zip(_NAMED_ROW_IDS, _NAMED_ROW_POSITIONS, strict=True)
+    ]
+
+
+def _named_row_scene(yaw_deg: float, seed: int):
+    return generate_scene(
+        [
+            BlockSpec(*position, yaw_deg=yaw_deg)
+            for position in _NAMED_ROW_POSITIONS
+        ],
+        SynthParams(
+            sensor_pos=(-20.0, -8.0, 4.0),
+            look_at=(-14.08, -3.0, 0.3),
+            ang_res_deg=0.3,
+            range_noise_std=0.003,
+        ),
+        np.random.default_rng(seed),
+    )
 
 
 def test_touching_blocks_keep_identity_and_refine_inside_bounds() -> None:
@@ -551,3 +597,341 @@ def test_seamless_owned_face_partition_has_no_boundary_observation() -> None:
     ]
     results = verify_placed_blocks(continuous_top, priors)
     assert all(result.diagnostics["observed_boundaries"] == [] for result in results)
+
+
+def test_named_course_yaw_opt_in_recovers_common_three_degree_row() -> None:
+    errors = []
+    center_errors = []
+    for seed in range(4):
+        sample = _named_row_scene(3.0, seed)
+        independent = verify_placed_blocks(
+            sample.points,
+            _named_row_priors(),
+            sensor_context=_context(sample),
+            course_constraints=[_named_row_course()],
+        )
+        refined = verify_placed_blocks(
+            sample.points,
+            _named_row_priors(),
+            sensor_context=_context(sample),
+            params=VerifyPlacedParams(enable_course_yaw_refinement=True),
+            course_constraints=[_named_row_course()],
+        )
+        errors.extend(
+            rotation_error_deg(result.pose, target)
+            for result, target in zip(refined, sample.ground_truth, strict=True)
+        )
+        center_errors.extend(
+            np.linalg.norm(after.pose.position - before.pose.position)
+            for before, after in zip(independent, refined, strict=True)
+        )
+        assert all(result.diagnostics["course_yaw_refinement"]["accepted"] for result in refined)
+        assert all(
+            after.status == before.status
+            and after.translation_from_plan_m == before.translation_from_plan_m
+            and after.rotation_from_plan_deg == before.rotation_from_plan_deg
+            and after.observability == PlacedObservability.LAYOUT_INFERRED
+            and "yaw" in after.diagnostics["layout_filled_directions"]
+            and "data_pose" in after.diagnostics
+            and "layout_pose" in after.diagnostics
+            for before, after in zip(independent, refined, strict=True)
+        )
+        assert all(
+            result.status in {PlacedStatus.CONFIRMED, PlacedStatus.DEVIATED}
+            for result in refined
+        )
+        assert all(result.rotation_from_plan_deg <= 10.0 for result in refined)
+    assert np.percentile(errors, 95) <= 1.0
+    assert max(center_errors) <= 0.002
+
+
+def test_course_yaw_zero_correction_and_default_path_are_unchanged() -> None:
+    sample = _named_row_scene(0.0, 12)
+    independent = verify_placed_blocks(
+        sample.points,
+        _named_row_priors(),
+        sensor_context=_context(sample),
+    )
+    attempted = _apply_course_yaw_refinement(
+        independent,
+        _named_row_priors(),
+        [_named_row_course()],
+        sample.points,
+        VerifyPlacedParams(enable_course_yaw_refinement=True),
+    )
+    for before, after in zip(independent, attempted, strict=True):
+        np.testing.assert_allclose(after.pose.position, before.pose.position, atol=0.0)
+        np.testing.assert_allclose(after.pose.rotation, before.pose.rotation, atol=0.0)
+        assert after.status == before.status
+        assert after.diagnostics["course_yaw_refinement"]["accepted"] is False
+
+
+def test_course_yaw_rejects_source_and_two_block_topology() -> None:
+    source = "1783427923_718112512_seq5"
+    source_priors = [
+        PlacedBlockPrior(
+            identifier,
+            BlockPose(position, np.eye(3)),
+            source_snapshot_ids=(source,),
+        )
+        for identifier, position in zip(_NAMED_ROW_IDS, _NAMED_ROW_POSITIONS, strict=True)
+    ]
+    source_constraint = CourseConstraint(
+        "source_row",
+        _NAMED_ROW_IDS,
+        {
+            ("c0_b0", "c0_b1"): np.array([0.92, 0.0, 0.0]),
+            ("c0_b1", "c0_b2"): np.array([0.92, 0.0, 0.0]),
+        },
+        source_snapshot_ids=(source,),
+    )
+    with pytest.raises(ValueError, match="does not accept source snapshot"):
+        verify_placed_blocks(
+            np.empty((0, 3)),
+            source_priors,
+            params=VerifyPlacedParams(enable_course_yaw_refinement=True),
+            course_constraints=[source_constraint],
+        )
+    with pytest.raises(ValueError, match="at least three blocks"):
+        verify_placed_blocks(
+            np.empty((0, 3)),
+            [
+                PlacedBlockPrior(identifier, BlockPose(position, np.eye(3)), course_id="two")
+                for identifier, position in zip(
+                    _NAMED_ROW_IDS[:2], _NAMED_ROW_POSITIONS[:2], strict=True
+                )
+            ],
+            params=VerifyPlacedParams(enable_course_yaw_refinement=True),
+            course_constraints=[
+                CourseConstraint(
+                    "two",
+                    _NAMED_ROW_IDS[:2],
+                    {("c0_b0", "c0_b1"): np.array([0.92, 0.0, 0.0])},
+                    plan_name="example_wall",
+                )
+            ],
+        )
+
+
+def test_course_yaw_is_permutation_stable_and_fast() -> None:
+    sample = _named_row_scene(3.0, 30)
+    settings = VerifyPlacedParams(enable_course_yaw_refinement=True)
+    started = time.perf_counter()
+    first = verify_placed_blocks(
+        sample.points,
+        _named_row_priors(),
+        sensor_context=_context(sample),
+        params=settings,
+        course_constraints=[_named_row_course()],
+    )
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    permutation = np.random.default_rng(31).permutation(len(sample.points))
+    second = verify_placed_blocks(
+        sample.points[permutation],
+        _named_row_priors(),
+        sensor_context=_context(sample),
+        params=settings,
+        course_constraints=[_named_row_course()],
+    )
+    assert elapsed_ms <= 250.0
+    for left, right in zip(first, second, strict=True):
+        np.testing.assert_allclose(left.pose.position, right.pose.position, atol=1e-12)
+        np.testing.assert_allclose(left.pose.rotation, right.pose.rotation, atol=1e-12)
+        assert left.status == right.status
+        assert (
+            left.diagnostics["course_yaw_refinement"]
+            == right.diagnostics["course_yaw_refinement"]
+        )
+
+
+def test_course_yaw_objective_rejects_top_faces_and_caps_dense_blocks() -> None:
+    poses = [prior.pose for prior in _named_row_priors()]
+    grid = np.linspace(-0.25, 0.25, 30)
+    top_only = np.vstack(
+        [
+            np.array(
+                [[pose.position[0] + x, pose.position[1] + y, 0.6] for x in grid for y in grid]
+            )
+            for pose in poses
+        ]
+    )
+    assert (
+        _course_yaw_trial(
+            top_only,
+            poses,
+            0.0,
+            VerifyPlacedParams(enable_course_yaw_refinement=True),
+            time.perf_counter() + 1.0,
+        )
+        is None
+    )
+    dense = np.repeat(top_only, 5, axis=0)
+    first = _balanced_course_point_cap(
+        dense,
+        poses,
+        VerifyPlacedParams(),
+        time.perf_counter() + 1.0,
+    )
+    second = _balanced_course_point_cap(
+        dense[::-1].copy(),
+        poses,
+        VerifyPlacedParams(),
+        time.perf_counter() + 1.0,
+    )
+    assert len(first) <= 2000 * len(poses)
+    np.testing.assert_allclose(first, second, atol=0.0)
+
+
+def test_course_yaw_rejects_overlapping_membership_upfront() -> None:
+    priors = [
+        PlacedBlockPrior(identifier, BlockPose(position, np.eye(3)))
+        for identifier, position in zip(_NAMED_ROW_IDS, _NAMED_ROW_POSITIONS, strict=True)
+    ]
+    first = _named_row_course()
+    second = CourseConstraint(
+        "overlap",
+        _NAMED_ROW_IDS,
+        first.nominal_offsets,
+        plan_name="example_wall",
+    )
+    with pytest.raises(ValueError, match="overlapping course membership"):
+        verify_placed_blocks(
+            np.empty((0, 3)),
+            priors,
+            params=VerifyPlacedParams(enable_course_yaw_refinement=True),
+            course_constraints=[first, second],
+        )
+
+
+def test_three_anchor_local_yaw_outlier_rejects_pooled_solve() -> None:
+    yaws = (3.0, 3.0, 8.0)
+    sample = generate_scene(
+        [
+            BlockSpec(*position, yaw_deg=yaw)
+            for position, yaw in zip(_NAMED_ROW_POSITIONS, yaws, strict=True)
+        ],
+        SynthParams(
+            sensor_pos=(-20.0, -8.0, 4.0),
+            look_at=(-14.08, -3.0, 0.3),
+            ang_res_deg=0.3,
+            range_noise_std=0.003,
+        ),
+        np.random.default_rng(44),
+    )
+    independent = verify_placed_blocks(
+        sample.points,
+        _named_row_priors(),
+        sensor_context=_context(sample),
+    )
+    attempted = _apply_course_yaw_refinement(
+        independent,
+        _named_row_priors(),
+        [_named_row_course()],
+        sample.points,
+        VerifyPlacedParams(enable_course_yaw_refinement=True),
+    )
+    for before, after in zip(independent, attempted, strict=True):
+        np.testing.assert_allclose(after.pose.position, before.pose.position, atol=0.0)
+        np.testing.assert_allclose(after.pose.rotation, before.pose.rotation, atol=0.0)
+        assert after.status == before.status
+        assert after.diagnostics["course_yaw_refinement"]["accepted"] is False
+
+
+def test_course_yaw_dense_timeout_preserves_independent_outputs() -> None:
+    sample = _named_row_scene(3.0, 52)
+    independent = verify_placed_blocks(
+        sample.points,
+        _named_row_priors(),
+        sensor_context=_context(sample),
+    )
+    dense = np.repeat(sample.points, 200, axis=0)
+    started = time.perf_counter()
+    attempted = _apply_course_yaw_refinement(
+        independent,
+        _named_row_priors(),
+        [_named_row_course()],
+        dense,
+        VerifyPlacedParams(
+            enable_course_yaw_refinement=True,
+            course_yaw_max_input_points=10_000_000,
+        ),
+    )
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    assert elapsed_ms <= 350.0
+    for before, after in zip(independent, attempted, strict=True):
+        np.testing.assert_allclose(after.pose.position, before.pose.position, atol=0.0)
+        np.testing.assert_allclose(after.pose.rotation, before.pose.rotation, atol=0.0)
+        assert after.status == before.status
+        assert after.diagnostics["course_yaw_refinement"]["reason"] == "timeout"
+
+
+def test_course_yaw_member_order_is_canonical() -> None:
+    sample = _named_row_scene(3.0, 61)
+    independent = verify_placed_blocks(
+        sample.points,
+        _named_row_priors(),
+        sensor_context=_context(sample),
+    )
+    forward = _apply_course_yaw_refinement(
+        independent,
+        _named_row_priors(),
+        [_named_row_course()],
+        sample.points,
+        VerifyPlacedParams(enable_course_yaw_refinement=True),
+    )
+    reversed_course = CourseConstraint(
+        "named_row",
+        tuple(reversed(_NAMED_ROW_IDS)),
+        _named_row_course().nominal_offsets,
+        plan_name="example_wall",
+    )
+    reversed_results = _apply_course_yaw_refinement(
+        independent,
+        _named_row_priors(),
+        [reversed_course],
+        sample.points,
+        VerifyPlacedParams(enable_course_yaw_refinement=True),
+    )
+    for left, right in zip(forward, reversed_results, strict=True):
+        np.testing.assert_allclose(left.pose.position, right.pose.position, atol=0.0)
+        np.testing.assert_allclose(left.pose.rotation, right.pose.rotation, atol=0.0)
+        assert left.status == right.status
+        assert left.observability == right.observability
+        assert left.diagnostics["course_yaw_refinement"] == right.diagnostics[
+            "course_yaw_refinement"
+        ]
+
+
+def test_course_yaw_input_limit_rejects_million_points_in_constant_time() -> None:
+    sample = _named_row_scene(3.0, 62)
+    independent = verify_placed_blocks(
+        sample.points,
+        _named_row_priors(),
+        sensor_context=_context(sample),
+    )
+    excessive = np.repeat(sample.points[:1], 1_000_001, axis=0)
+    started = time.perf_counter()
+    attempted = _apply_course_yaw_refinement(
+        independent,
+        _named_row_priors(),
+        [_named_row_course()],
+        excessive,
+        VerifyPlacedParams(enable_course_yaw_refinement=True),
+    )
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    assert elapsed_ms <= 50.0
+    for before, after in zip(independent, attempted, strict=True):
+        np.testing.assert_allclose(after.pose.position, before.pose.position, atol=0.0)
+        np.testing.assert_allclose(after.pose.rotation, before.pose.rotation, atol=0.0)
+        assert after.status == before.status
+        assert after.diagnostics["course_yaw_refinement"]["reason"] == "input_point_limit"
+        assert after.diagnostics["course_yaw_refinement"]["input_points"] == 1_000_001
+
+
+def test_course_yaw_input_limit_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="count parameters"):
+        verify_placed_blocks(
+            np.empty((0, 3)),
+            _named_row_priors(),
+            params=VerifyPlacedParams(course_yaw_max_input_points=0),
+        )
