@@ -39,6 +39,73 @@ def test_discovers_every_checked_in_snapshot_as_tf_enabled() -> None:
     with_tf, without_tf = eval_real_snapshots.discover_snapshots(SNAPSHOTS_DIR)
     assert len(with_tf) >= 1
     assert without_tf == []
+    assert all(path.name != "1783428861_719600128_seq3" for path in with_tf)
+    assert all(path.name != "1783428498_520086272_seq4" for path in with_tf)
+    assert all(path.name != "1783428995_118905856_seq6" for path in with_tf)
+
+
+def test_run_suite_reports_exclusions_and_survives_bad_snapshot(
+    monkeypatch, tmp_path: Path
+) -> None:
+    (tmp_path / "good").mkdir()
+    (tmp_path / "bad").mkdir()
+    (tmp_path / "excluded").mkdir()
+    for name in ("good", "bad", "excluded"):
+        (tmp_path / name / "tf.yaml").touch()
+    (tmp_path / "snapshot_exclusions.yaml").write_text(
+        "schema_version: 1\nexcluded_snapshots:\n"
+        "  - {snapshot: excluded, reason: unusable}\n"
+    )
+
+    def evaluate(path, *_args):
+        return {
+            "snapshot": path.name,
+            "annotation_complete": False,
+            "reference_targets": 0,
+            "detected": 0,
+            "matched": 0,
+            "unknown_detections": 0,
+            "false_positives": None,
+            "translation_errors_m": [],
+            "rotation_errors_deg": [],
+            "match_curves": {key: {"matched": 0} for key in ("5cm", "10cm", "25cm", "50cm")},
+            "runtime_ms": 1.0,
+        }
+
+    monkeypatch.setattr(eval_real_snapshots, "evaluate_snapshot", evaluate)
+    monkeypatch.setattr(
+        eval_real_snapshots,
+        "load_tf_snapshot",
+        lambda path: (
+            (_ for _ in ()).throw(ValueError("invalid TF"))
+            if path.parent.name == "bad"
+            else SimpleNamespace(T_world_cloud=np.eye(4))
+        ),
+    )
+    metrics = eval_real_snapshots.run_suite(tmp_path, TRANSFORM_CONFIG)
+    assert metrics["snapshot_ids"] == ["good"]
+    assert metrics["n_snapshots_failed_integrity"] == 1
+    assert metrics["integrity_failures"][0]["snapshot"] == "bad"
+    assert metrics["n_snapshots_excluded"] == 1
+    assert metrics["excluded_snapshots"][0]["snapshot"] == "excluded"
+
+
+def test_run_suite_does_not_hide_detector_or_evaluator_errors(monkeypatch, tmp_path: Path) -> None:
+    snapshot = tmp_path / "scene"
+    snapshot.mkdir()
+    (snapshot / "tf.yaml").touch()
+    monkeypatch.setattr(
+        eval_real_snapshots,
+        "load_tf_snapshot",
+        lambda _path: SimpleNamespace(T_world_cloud=np.eye(4)),
+    )
+    monkeypatch.setattr(
+        eval_real_snapshots,
+        "evaluate_snapshot",
+        lambda *_args: (_ for _ in ()).throw(ValueError("detector regression")),
+    )
+    with np.testing.assert_raises_regex(ValueError, "detector regression"):
+        eval_real_snapshots.run_suite(tmp_path, TRANSFORM_CONFIG)
 
 
 def test_run_suite_produces_well_formed_metrics() -> None:

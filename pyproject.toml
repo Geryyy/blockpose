@@ -27,6 +27,7 @@ dev = [
 ]
 sam = [
     "torch>=2.5",
+    "torchvision>=0.20",
     "transformers>=4.57",
 ]
 

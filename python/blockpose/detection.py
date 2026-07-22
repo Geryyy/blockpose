@@ -36,6 +36,9 @@ class DetectionParams:
     ransac_dist_thresh: float = 0.02
     ransac_n: int = 3
     ransac_num_iterations: int = 1000
+    # Bound only candidate-plane search for oversized proposal regions. The
+    # winner is still scored and least-squares-refitted against the full region.
+    ransac_search_max_points: int | None = 2048
     # Seed for the in-repo deterministic RANSAC (blockpose.ransac).
     ransac_seed: int = 0
     max_planes: int = 5
@@ -281,8 +284,27 @@ def visibility_evidence(
     """
     context = _validate_sensor_context(context)
     origin_local = pose.rotation.T @ (context.origin - pose.position)
-    dirs_local = context.ray_directions @ pose.rotation
     half = np.asarray(dims, dtype=np.float64) / 2.0
+
+    # A ray intersecting the tolerance-expanded box must intersect its bounding
+    # sphere. Use that exact necessary condition to avoid applying six slab/face
+    # tests to the entire scan for every raw hypothesis. This changes no evidence
+    # semantics: every potentially incident/supporting/violating ray is retained.
+    center_vector = pose.position - context.origin
+    projections = context.ray_directions @ center_vector
+    perpendicular_sq = np.maximum(
+        float(center_vector @ center_vector) - projections * projections, 0.0
+    )
+    radius_sq = float(np.sum((half + tolerance) ** 2))
+    if float(center_vector @ center_vector) <= radius_sq:
+        # The sensor lies inside the conservative sphere; no angular rejection
+        # is safe (including rays initially directed away from its centre).
+        relevant = np.ones(len(context.ray_directions), dtype=bool)
+    else:
+        relevant = (projections > 0.0) & (perpendicular_sq <= radius_sq + 1e-12)
+    directions = context.ray_directions[relevant]
+    ranges = context.ranges[relevant]
+    dirs_local = directions @ pose.rotation
 
     expected_faces = covered_faces = supported_rays = incident_rays = 0
     for axis in range(3):
@@ -305,7 +327,7 @@ def visibility_evidence(
                 continue
             incident_rays += int(np.count_nonzero(valid))
             supported = int(
-                np.count_nonzero(np.abs(context.ranges[valid] - distance[valid]) <= tolerance)
+                np.count_nonzero(np.abs(ranges[valid] - distance[valid]) <= tolerance)
             )
             supported_rays += supported
             if supported:
@@ -313,7 +335,7 @@ def visibility_evidence(
 
     shrunk = np.maximum(half - tolerance, 1e-3)
     _, t_exit, intersects = _ray_box_interval(origin_local, dirs_local, shrunk)
-    violations = int(np.count_nonzero(intersects & (context.ranges > t_exit + tolerance)))
+    violations = int(np.count_nonzero(intersects & (ranges > t_exit + tolerance)))
     return expected_faces, covered_faces, violations, supported_rays, incident_rays
 
 
@@ -603,25 +625,42 @@ def _cluster_points(
 
 def _fit_planes(
     pts: np.ndarray, params: DetectionParams
-) -> list[PlanePatch]:
+) -> tuple[list[PlanePatch], dict[str, int], dict[str, float]]:
     """Iteratively fit planes using RANSAC.
 
     Returns list of (normal, centroid, inlier_pts) tuples.
     """
     remaining = pts.copy()
     planes = []
+    counts = {
+        "plane_fit_calls": 0,
+        "plane_search_points": 0,
+        "plane_full_points_scored": 0,
+        "plane_trials_evaluated": 0,
+        "plane_valid_trials": 0,
+    }
+    timings = {"plane_search": 0.0, "plane_full_score_refit": 0.0}
     for index in range(params.max_planes):
         if len(remaining) < params.min_inliers:
             break
         # Vary the seed per extraction so successive planes are not drawn from
         # the same sample sequence, while staying reproducible overall.
-        plane_model, inlier_idx = segment_plane(
+        plane_model, inlier_idx, fit_diag = segment_plane(
             remaining,
             distance_threshold=params.ransac_dist_thresh,
             ransac_n=params.ransac_n,
             num_iterations=params.ransac_num_iterations,
             seed=params.ransac_seed + index,
+            max_search_points=params.ransac_search_max_points,
+            return_diagnostics=True,
         )
+        counts["plane_fit_calls"] += 1
+        counts["plane_search_points"] += fit_diag.search_points
+        counts["plane_full_points_scored"] += fit_diag.input_points
+        counts["plane_trials_evaluated"] += fit_diag.trials_evaluated
+        counts["plane_valid_trials"] += fit_diag.valid_trials
+        timings["plane_search"] += fit_diag.search_ms
+        timings["plane_full_score_refit"] += fit_diag.full_score_refit_ms
         inlier_idx = list(inlier_idx)
         if len(inlier_idx) < params.min_inliers:
             break
@@ -638,7 +677,7 @@ def _fit_planes(
         mask = np.ones(len(remaining), dtype=np.bool_)
         mask[inlier_idx] = False
         remaining = remaining[mask]
-    return planes
+    return planes, counts, timings
 
 
 def _classify_planes(
@@ -1083,8 +1122,33 @@ def _detect_blocks_impl(
     if params is None:
         params = DetectionParams()
     started = perf_counter()
-    timings: dict[str, float] = {}
-    counts: dict[str, int] = {"input_points": len(pts_world)}
+    timings: dict[str, float] = {
+        "voxel_downsample": 0.0,
+        "ground_model": 0.0,
+        "proposals": 0.0,
+        "region_split": 0.0,
+        "plane_search": 0.0,
+        "plane_full_score_refit": 0.0,
+        "hypothesis_generation_evidence": 0.0,
+        "plane_hypotheses": 0.0,
+        "selection": 0.0,
+        "refinement": 0.0,
+        "total": 0.0,
+    }
+    counts: dict[str, int] = {
+        "input_points": len(pts_world),
+        "downsampled_points": 0,
+        "above_support_points": 0,
+        "proposal_components": 0,
+        "plane_regions": 0,
+        "plane_fit_calls": 0,
+        "plane_search_points": 0,
+        "plane_full_points_scored": 0,
+        "plane_trials_evaluated": 0,
+        "plane_valid_trials": 0,
+        "raw_hypotheses": 0,
+        "selected_hypotheses": 0,
+    }
 
     if sensor_context is not None:
         sensor_context = _validate_sensor_context(sensor_context)
@@ -1100,6 +1164,7 @@ def _detect_blocks_impl(
     # Open3D's voxel and RANSAC routines report opaque errors for these valid
     # but uninformative clouds.  Treat them as containing no detectable block.
     if len(pts) < 3:
+        timings["total"] = (perf_counter() - started) * 1000.0
         return [], [], counts, timings
     pts = pts[np.lexsort((pts[:, 2], pts[:, 1], pts[:, 0]))]
 
@@ -1108,6 +1173,7 @@ def _detect_blocks_impl(
     timings["voxel_downsample"] = (perf_counter() - started) * 1000.0
     counts["downsampled_points"] = len(pts)
     if len(pts) < 3:
+        timings["total"] = (perf_counter() - started) * 1000.0
         return [], [], counts, timings
 
     # Stage 2: Ground removal
@@ -1116,6 +1182,7 @@ def _detect_blocks_impl(
     timings["ground_model"] = (perf_counter() - stage_started) * 1000.0
     counts["above_support_points"] = len(pts)
     if len(pts) == 0:
+        timings["total"] = (perf_counter() - started) * 1000.0
         return [], [], counts, timings
 
     # Stage 3: DBSCAN clustering
@@ -1131,6 +1198,7 @@ def _detect_blocks_impl(
 
     # Stage 4–6: Per-cluster plane fitting and pose synthesis
     hypotheses: list[CuboidHypothesis] = []
+    plane_subtimings = {"plane_search": 0.0, "plane_full_score_refit": 0.0}
     stage_started = perf_counter()
     for cluster, proposal_scale in clusters:
         if sensor_context is not None:
@@ -1143,7 +1211,9 @@ def _detect_blocks_impl(
             )
         else:
             cluster_params = params
+        split_started = perf_counter()
         regions = _split_connected_region(cluster, cluster_params)
+        timings["region_split"] += (perf_counter() - split_started) * 1000.0
         if len(regions) == 1 and np.any(
             np.ptp(cluster, axis=0)[:2] > params.cluster_max_extent_xy
         ):
@@ -1151,9 +1221,15 @@ def _detect_blocks_impl(
             # an elongated object, not a license to tile it with known boxes.
             continue
         for region in regions:
-            planes = _fit_planes(region, cluster_params)
+            counts["plane_regions"] += 1
+            planes, fit_counts, fit_timings = _fit_planes(region, cluster_params)
+            for name, value in fit_counts.items():
+                counts[name] += value
+            for name, value in fit_timings.items():
+                plane_subtimings[name] += value
             if not planes:
                 continue
+            hypothesis_started = perf_counter()
             # One hypothesis set per candidate orientation. The wrong orientation
             # puts faces where no returns are and leaves observed surface
             # unexplained, so `surface_explained` and `free_space_consistency`
@@ -1193,14 +1269,21 @@ def _detect_blocks_impl(
                     )
                     if top_support_height >= dims[2] * 0.70 and first_course_supported:
                         hypotheses.append(hypothesis)
+            timings["hypothesis_generation_evidence"] += (
+                perf_counter() - hypothesis_started
+            ) * 1000.0
 
     timings["plane_hypotheses"] = (perf_counter() - stage_started) * 1000.0
+    timings.update(plane_subtimings)
     counts["raw_hypotheses"] = len(hypotheses)
 
+    selection_started = perf_counter()
     hypotheses = [h for h in hypotheses if h.evidence.score >= params.min_score]
     selected = _select_hypotheses(hypotheses)
+    timings["selection"] = (perf_counter() - selection_started) * 1000.0
 
     if params.refine_enabled and selected:
+        refinement_started = perf_counter()
         # Refine against the above-ground cloud, then rebuild evidence from the
         # refined pose so diagnostics describe the pose actually returned. The
         # top-face centre is recomputed from the pose rather than reusing the
@@ -1229,6 +1312,7 @@ def _detect_blocks_impl(
             )
             for hypothesis, pose in zip(selected, refined, strict=True)
         ]
+        timings["refinement"] = (perf_counter() - refinement_started) * 1000.0
 
     selected = [
         hypothesis

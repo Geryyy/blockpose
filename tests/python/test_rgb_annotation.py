@@ -114,6 +114,19 @@ def test_sam_backend_is_lazy() -> None:
     assert backend._processor is None
 
 
+def test_sam_backend_reports_missing_torchvision_with_install_command(monkeypatch) -> None:
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "torchvision", None)
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        types.SimpleNamespace(Sam2Model=object, Sam2Processor=object),
+    )
+    backend = TransformersSam2Backend("unused")
+    with np.testing.assert_raises_regex(RuntimeError, "torchvision.*uv sync --extra sam"):
+        backend._load()
+
+
 def test_fake_backend_contract_and_shape_validation() -> None:
     class FakeBackend:
         def segment(self, rgb: np.ndarray, point_xy: tuple[int, int]) -> np.ndarray:
@@ -235,6 +248,7 @@ def test_transformers_backend_uses_official_prompt_shape(monkeypatch) -> None:
         inference_mode=lambda: __import__("contextlib").nullcontext(),
     )
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "torchvision", types.SimpleNamespace())
     monkeypatch.setitem(
         sys.modules,
         "transformers",

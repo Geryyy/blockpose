@@ -50,6 +50,15 @@ Pending priors are yellow, approved targets green, rejected priors red, and the
 selection blue. Edit position and XYZ Euler angles numerically or with the 1 cm /
 1 degree step buttons. `Z` and `Y`, or the visible buttons, undo and redo.
 
+Every annotation uses one block convention: dimensions `(0.9, 0.6, 0.6)` in
+local XYZ, with local X always the physical 0.9 m long axis. Standing versus
+laying is encoded solely by the pose rotation, never by permuting dimensions.
+The read-only orientation line reports this long axis's world azimuth and
+elevation and labels it **Standing** or **Laying**. The editable roll/pitch/yaw
+fields are extrinsic-looking XYZ Euler coordinates of the complete canonical
+block frame; equivalent box symmetries can therefore have quite different RPY,
+so use the long-axis summary when checking standing versus laying.
+
 `Approve` is the only action that makes a block evaluation ground truth. `Reject`
 requires a reason. `Abort edit` restores the selected prior and returns it to
 pending; `Reset` restores its last recorded state without changing review status.

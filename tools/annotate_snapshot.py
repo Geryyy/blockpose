@@ -27,7 +27,9 @@ from blockpose.annotation_tool import (  # noqa: E402
     AnnotationController,
     AnnotationDocument,
     camera_ray,
+    initial_camera_focus,
     nearest_point_to_ray_with_distance,
+    orientation_summary,
     pick_oriented_box,
     save_annotations_atomic,
     snapshot_selection_index,
@@ -49,6 +51,7 @@ from blockpose.rgb_annotation import (  # noqa: E402
     map_widget_to_image,
     select_points_from_mask,
 )
+from blockpose.snapshot_exclusions import load_snapshot_exclusions  # noqa: E402
 
 DEFAULT_ROOT = REPO_ROOT / "data" / "registration_snapshots"
 DEFAULT_CONFIG = REPO_ROOT / "config" / "transforms_pzs100_initial_pose_1.yaml"
@@ -58,20 +61,22 @@ BOX_COLORS = {
     "rejected": (0.9, 0.15, 0.15, 1.0),
 }
 INITIAL_EYE = np.array([0.0, 0.0, 0.0])
-INITIAL_LOOK_AT = np.array([-1.0, 0.0, 0.0])
 INITIAL_UP = np.array([0.0, 0.0, 1.0])
+INITIAL_DIRECTION = np.array([-1.0, 0.0, 0.0])
 DEFAULT_PICK_RADIUS_M = 0.30
 
 
 def discover_snapshot_dirs(root: Path) -> list[Path]:
     if not root.is_dir():
         raise NotADirectoryError(f"Snapshot root does not exist: {root}")
+    excluded = load_snapshot_exclusions(root)
     return sorted(
         item
         for item in root.iterdir()
         if item.is_dir()
         and (item / "cloud.pcd").is_file()
         and (item / "annotations.yaml").is_file()
+        and item.name not in excluded
     )
 
 
@@ -92,6 +97,10 @@ class AnnotatorWindow:
         self.snapshots = discover_snapshot_dirs(root)
         if not self.snapshots:
             raise ValueError(f"No snapshots containing cloud.pcd under {root}")
+        if initial not in self.snapshots:
+            exclusion = load_snapshot_exclusions(root).get(initial.name)
+            detail = f": {exclusion.reason}" if exclusion is not None else ""
+            raise ValueError(f"Snapshot {initial.name} is not annotatable{detail}")
         self.snapshot = initial
         self._changing_snapshot_combo = False
         self.points = np.empty((0, 3))
@@ -131,6 +140,7 @@ class AnnotatorWindow:
         self.rgb_toggle.checked = True
         self.rgb_toggle.set_on_checked(lambda _checked: self._refresh_scene())
         self.fields = [self._number() for _ in range(6)]
+        self.orientation_label = gui.Label("No block selected")
         for field in self.fields:
             field.set_on_value_changed(lambda _value: self._pose_fields_changed())
         self.visibility = gui.Combobox()
@@ -178,7 +188,8 @@ class AnnotatorWindow:
         self.panel.add_child(self.rgb_toggle)
         self.panel.add_child(gui.Label("Blocks: pending=yellow, approved=green, rejected=red"))
         self.panel.add_child(self.target_list)
-        self.panel.add_child(gui.Label("Position XYZ (m), Euler XYZ (deg)"))
+        self.panel.add_child(gui.Label("Position XYZ (m), Euler XYZ (deg; canonical block frame)"))
+        self.panel.add_child(self.orientation_label)
         grid = gui.VGrid(2, 4)
         for label, field in zip(("X", "Y", "Z", "Roll", "Pitch", "Yaw"), self.fields, strict=True):
             grid.add_child(gui.Label(label))
@@ -200,6 +211,7 @@ class AnnotatorWindow:
         review.add_child(self._button("Abort edit", self._abort))
         review.add_child(self._button("Reset", self._reset))
         self.panel.add_child(review)
+        self.panel.add_child(self._button("Delete selected…", self._confirm_delete_selected))
         self.panel.add_child(self._button("Snap selected to cloud", self._snap_selected))
         self.panel.add_child(gui.Label("Visibility / ignored target"))
         self.panel.add_child(self.visibility)
@@ -213,6 +225,7 @@ class AnnotatorWindow:
         history = gui.Horiz(4)
         history.add_child(self._button("Undo", self._undo))
         history.add_child(self._button("Redo", self._redo))
+        history.add_child(self._button("Reset camera", self._reset_camera))
         self.panel.add_child(history)
         self.panel.add_child(self.complete)
         self.panel.add_child(gui.Label("ROI min XYZ / max XYZ"))
@@ -299,12 +312,14 @@ class AnnotatorWindow:
     def _load_target_widgets(self) -> None:
         target = self.controller.target
         if target is None:
+            self.orientation_label.text = "No block selected"
             return
         self._loading_widgets = True
         for field, value in zip(self.fields, [*target.position, *target.euler_deg], strict=True):
             field.double_value = float(value)
         self.visibility.selected_index = VISIBILITIES.index(target.visibility)
         self.ignore_reason.text_value = target.ignore_reason or ""
+        self.orientation_label.text = orientation_summary(target.rotation)
         self._loading_widgets = False
 
     def _refresh_scene(self, reset_camera: bool = False) -> None:
@@ -345,7 +360,12 @@ class AnnotatorWindow:
             # world -X. setup_camera establishes suitable projection/clipping
             # planes for the scene; look_at then replaces only the view pose.
             self.scene.setup_camera(60.0, bounds, bounds.get_center())
-            self.scene.look_at(INITIAL_LOOK_AT, INITIAL_EYE, INITIAL_UP)
+            self._reset_camera()
+        self.scene.force_redraw()
+
+    def _reset_camera(self) -> None:
+        focus = initial_camera_focus(self.points, INITIAL_EYE, INITIAL_DIRECTION)
+        self.scene.look_at(focus, INITIAL_EYE, INITIAL_UP)
         self.scene.force_redraw()
 
     def _refresh_rgb(self) -> None:
@@ -515,6 +535,47 @@ class AnnotatorWindow:
         self.controller.reset_selected()
         self._load_document_widgets()
         self._refresh_scene()
+
+    def _confirm_delete_selected(self) -> None:
+        target = self.controller.target
+        if target is None:
+            self.status.text = "Select a block before deleting."
+            return
+        target_id, target_status = target.id, target.review_status
+        dialog = gui.Dialog("Delete annotation candidate")
+        layout = gui.Vert(8, gui.Margins(12, 12, 12, 12))
+        layout.add_child(
+            gui.Label(
+                f"Delete {target_id!r} [{target_status}]?\n"
+                "This affects only the in-memory draft until Validate & Save."
+            )
+        )
+        buttons = gui.Horiz(6)
+        buttons.add_child(
+            self._button(
+                f"Delete {target_id}",
+                lambda: self._finish_delete(target_id, target_status),
+            )
+        )
+        buttons.add_child(self._button("Cancel", self.window.close_dialog))
+        layout.add_child(buttons)
+        dialog.add_child(layout)
+        self.window.show_dialog(dialog)
+
+    def _finish_delete(self, target_id: str, target_status: str) -> None:
+        deleted = self.controller.delete_selected(
+            expected_id=target_id, expected_status=target_status
+        )
+        self.window.close_dialog()
+        if not deleted:
+            self.status.text = "Selection changed; nothing was deleted."
+            return
+        self._load_document_widgets()
+        self._refresh_scene()
+        self.status.text = (
+            f"Deleted {target_id!r} [{target_status}] from the draft. "
+            "Undo is available; use Validate & Save to persist."
+        )
 
     def _snap_selected(self, seed: np.ndarray | None = None) -> bool:
         target = self.controller.target

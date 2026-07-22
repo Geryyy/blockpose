@@ -52,6 +52,7 @@ from blockpose.detection import DetectionParams, SensorContext, detect_blocks_de
 from blockpose.evaluate import rotation_error_deg, translation_error  # noqa: E402
 from blockpose.io import load_snapshot, load_tf_snapshot  # noqa: E402
 from blockpose.pose import rotmat_to_quat_xyzw  # noqa: E402
+from blockpose.snapshot_exclusions import load_snapshot_exclusions  # noqa: E402
 from scipy.optimize import linear_sum_assignment  # noqa: E402
 
 _DEFAULT_TRANSFORM = REPO_ROOT / "config" / "transforms_pzs100_initial_pose_1.yaml"
@@ -67,9 +68,12 @@ def discover_snapshots(snapshots_dir: Path) -> tuple[list[Path], list[Path]]:
     """
     if not snapshots_dir.is_dir():
         return [], []
+    excluded = load_snapshot_exclusions(snapshots_dir)
     with_tf, without_tf = [], []
     for entry in sorted(snapshots_dir.iterdir()):
         if not entry.is_dir():
+            continue
+        if entry.name in excluded:
             continue
         if (entry / "tf.yaml").is_file():
             with_tf.append(entry)
@@ -272,7 +276,19 @@ def run_suite(
     if params is None:
         params = DetectionParams(min_score=0.4)
     with_tf, without_tf = discover_snapshots(snapshots_dir)
-    per_snapshot = [evaluate_snapshot(s, config_path, params) for s in with_tf]
+    per_snapshot = []
+    integrity_failures = []
+    for snapshot in with_tf:
+        try:
+            # Keep this catch strictly around TF input preflight. Detector and
+            # metric exceptions must remain visible as suite failures.
+            tf_snapshot = load_tf_snapshot(snapshot / "tf.yaml")
+            _ = tf_snapshot.T_world_cloud
+        except (KeyError, OSError, TypeError, ValueError) as error:
+            integrity_failures.append({"snapshot": snapshot.name, "reason": str(error)})
+            continue
+        per_snapshot.append(evaluate_snapshot(snapshot, config_path, params))
+    exclusions = load_snapshot_exclusions(snapshots_dir)
 
     t_errors = [value for metric in per_snapshot for value in metric["translation_errors_m"]]
     r_errors = [value for metric in per_snapshot for value in metric["rotation_errors_deg"]]
@@ -298,9 +314,20 @@ def run_suite(
         git_revision = None
 
     return {
-        "n_snapshots_scored": len(with_tf),
+        "n_snapshots_scored": len(per_snapshot),
         "n_snapshots_skipped_no_tf": len(without_tf),
         "skipped_snapshots": [s.name for s in without_tf],
+        "n_snapshots_excluded": len(exclusions),
+        "excluded_snapshots": [
+            {
+                "snapshot": entry.snapshot,
+                "reason": entry.reason,
+                "retained_snapshot": entry.retained_snapshot,
+            }
+            for entry in exclusions.values()
+        ],
+        "n_snapshots_failed_integrity": len(integrity_failures),
+        "integrity_failures": integrity_failures,
         "n_snapshots_with_zero_reference_targets": sum(
             metric["reference_targets"] == 0 for metric in per_snapshot
         ),

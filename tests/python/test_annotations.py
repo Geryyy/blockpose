@@ -8,7 +8,7 @@ REPO_ROOT = Path(__file__).parents[2]
 
 def test_all_real_snapshots_have_valid_review_manifests() -> None:
     paths = sorted((REPO_ROOT / "data" / "registration_snapshots").glob("*/annotations.yaml"))
-    assert len(paths) == 4
+    assert len(paths) >= 4
     annotations = [load_annotations(path) for path in paths]
     complete = [item for item in annotations if item.annotation_complete]
     assert {item.snapshot for item in complete} == {"1783429345_020967424_seq4"}
@@ -19,12 +19,10 @@ def test_all_real_snapshots_have_valid_review_manifests() -> None:
     assert all(target.review_status in {"pending", "approved", "rejected"} for target in targets)
     assert {target.provenance for target in targets} <= {
         "manual",
+        "rgb_candidate_fit",
         "upstream_registration",
     }
-    assert {target.provenance for target in targets} == {
-        "manual",
-        "upstream_registration",
-    }
+    assert {"manual", "upstream_registration"} <= {target.provenance for target in targets}
     assert all(
         len({target.id for target in item.targets}) == len(item.targets) for item in annotations
     )

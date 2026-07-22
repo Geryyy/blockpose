@@ -20,9 +20,41 @@ import yaml
 from scipy.spatial.transform import Rotation
 
 from blockpose.annotations import AnnotationTarget, load_annotations
-from blockpose.pose import BLOCK_DIMS, rotmat_to_quat_xyzw
+from blockpose.pose import BLOCK_DIMS, frame_alignments, rotmat_to_quat_xyzw
 
 VISIBILITIES = ("unknown", "full", "partial", "heavy_occlusion")
+
+
+def canonicalize_block_frame(
+    rotation: np.ndarray, dimensions: tuple[float, float, float]
+) -> np.ndarray:
+    """Re-express a physical 0.9 x 0.6 x 0.6 box in the canonical local frame."""
+    dims = tuple(float(value) for value in dimensions)
+    alignments = frame_alignments(dims, BLOCK_DIMS)
+    if not alignments:
+        raise ValueError(
+            f"block dimensions {dims!r} are not a permutation of canonical {BLOCK_DIMS!r}"
+        )
+    # frame_alignments is generated in a stable signed-permutation order.  The
+    # first representative is deterministic; all alternatives are exact box
+    # symmetries and therefore describe the same world-space OBB.
+    return np.asarray(rotation, dtype=float) @ alignments[0]
+
+
+def orientation_summary(rotation: np.ndarray) -> str:
+    """Human-readable, symmetry-stable direction of canonical local +X."""
+    axis = np.asarray(rotation, dtype=float)[:, 0]
+    # The long axis is unoriented. Pick its upper hemisphere, then a stable
+    # horizontal half-plane at zero elevation, so symmetric frames agree.
+    if axis[2] < -1e-12 or (
+        abs(axis[2]) <= 1e-12
+        and (axis[0] < -1e-12 or (abs(axis[0]) <= 1e-12 and axis[1] < 0))
+    ):
+        axis = -axis
+    elevation = float(np.degrees(np.arctan2(axis[2], np.hypot(axis[0], axis[1]))))
+    azimuth = float(np.degrees(np.arctan2(axis[1], axis[0]))) % 180.0
+    orientation_class = "Standing" if elevation >= 45.0 else "Laying"
+    return f"{orientation_class} — long-axis azimuth {azimuth:.1f}°, elevation {elevation:.1f}°"
 
 
 @dataclass
@@ -71,9 +103,15 @@ class AnnotationDocument:
     @classmethod
     def load(cls, path: str | Path) -> AnnotationDocument:
         loaded = load_annotations(path)
+        targets = []
+        for target in loaded.targets:
+            editable = EditableTarget.from_annotation(target)
+            editable.rotation = canonicalize_block_frame(editable.rotation, editable.dimensions)
+            editable.dimensions = BLOCK_DIMS
+            targets.append(editable)
         return cls(
             loaded.snapshot,
-            [EditableTarget.from_annotation(target) for target in loaded.targets],
+            targets,
             loaded.annotation_complete,
             None if loaded.roi_min is None else loaded.roi_min.copy(),
             None if loaded.roi_max is None else loaded.roi_max.copy(),
@@ -94,6 +132,8 @@ class AnnotationDocument:
             if any(target.review_status == "pending" for target in self.targets):
                 errors.append("Resolve every pending prior before marking the ROI complete")
         for target in self.targets:
+            if not np.allclose(target.dimensions, BLOCK_DIMS, atol=1e-9, rtol=0.0):
+                errors.append(f"{target.id}: dimensions must use canonical {BLOCK_DIMS}")
             if target.visibility not in VISIBILITIES:
                 errors.append(f"{target.id}: invalid visibility")
             if target.review_status == "rejected" and not target.rejection_reason:
@@ -106,6 +146,13 @@ class AnnotationDocument:
         return errors
 
     def as_mapping(self) -> dict:
+        errors = [
+            target.id
+            for target in self.targets
+            if not np.allclose(target.dimensions, BLOCK_DIMS, atol=1e-9, rtol=0.0)
+        ]
+        if errors:
+            raise ValueError(f"non-canonical block dimensions for: {', '.join(errors)}")
         blocks = []
         for target in self.targets:
             item = {
@@ -239,12 +286,13 @@ class AnnotationController:
         )
         if not valid:
             raise ValueError("snapped pose must contain a finite rigid transform and dimensions")
+        rotation = canonicalize_block_frame(rotation, dims)
 
         def apply() -> None:
             assert self.target is not None
             self.target.position = position.copy()
             self.target.rotation = rotation.copy()
-            self.target.dimensions = dims
+            self.target.dimensions = BLOCK_DIMS
             self.target.review_status = "pending"
             self.target.rejection_reason = None
 
@@ -286,6 +334,32 @@ class AnnotationController:
             return
         self.reset_selected()
         self.set_review("pending")
+
+    def delete_selected(
+        self,
+        *,
+        expected_id: str | None = None,
+        expected_status: str | None = None,
+    ) -> bool:
+        """Delete the selected target as one undoable, in-memory operation.
+
+        The optional expectations let a confirmation dialog prove that its
+        answer still refers to the item that was displayed to the user.
+        """
+        target = self.target
+        if target is None:
+            return False
+        if expected_id is not None and target.id != expected_id:
+            return False
+        if expected_status is not None and target.review_status != expected_status:
+            return False
+        index = self.selected
+        assert index is not None
+        self._change(lambda: self.document.targets.pop(index))
+        self.selected = (
+            min(index, len(self.document.targets) - 1) if self.document.targets else None
+        )
+        return True
 
     def reset_selected(self) -> None:
         if self.target is None:
@@ -420,6 +494,44 @@ def camera_ray(eye: np.ndarray, unprojected_point: np.ndarray) -> tuple[np.ndarr
     ):
         raise ValueError("camera produced a non-finite or degenerate click ray")
     return origin, direction / norm
+
+
+def initial_camera_focus(
+    points: np.ndarray,
+    eye: np.ndarray,
+    direction: np.ndarray,
+    *,
+    fallback_depth: float = 5.0,
+    min_depth: float = 1.0,
+    max_depth: float = 50.0,
+) -> np.ndarray:
+    """Choose a robust look-at point while preserving the requested view direction.
+
+    A realistic focus depth makes Open3D's mouse pan scale useful. Invalid or
+    behind-camera clouds use the finite fallback; extreme depths are clamped.
+    """
+    cloud = np.asarray(points, dtype=float)
+    origin = np.asarray(eye, dtype=float)
+    vector = np.asarray(direction, dtype=float)
+    if origin.shape != (3,) or vector.shape != (3,) or not np.all(np.isfinite(origin)):
+        raise ValueError("camera eye and direction must contain three finite values")
+    norm = float(np.linalg.norm(vector))
+    limits = np.asarray([fallback_depth, min_depth, max_depth], dtype=float)
+    if not np.isfinite(norm) or norm < 1e-12 or not np.all(np.isfinite(limits)):
+        raise ValueError("camera direction and depth limits must be finite")
+    if min_depth <= 0 or max_depth < min_depth:
+        raise ValueError("camera depth limits must satisfy 0 < min_depth <= max_depth")
+    unit = vector / norm
+    depth = fallback_depth
+    if cloud.ndim == 2 and cloud.shape[1:] == (3,):
+        finite = cloud[np.all(np.isfinite(cloud), axis=1)]
+        if len(finite):
+            forward = (finite - origin) @ unit
+            forward = forward[forward > 0]
+            if len(forward):
+                depth = float(np.median(forward))
+    depth = float(np.clip(depth, min_depth, max_depth))
+    return origin + unit * depth
 
 
 def snapshot_selection_index(snapshots: list[Path], current: Path) -> int:

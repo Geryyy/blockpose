@@ -373,9 +373,14 @@ class TransformersSam2Backend:
     def _load(self) -> None:
         try:
             import torch
+            import torchvision  # noqa: F401 - validates the complete SAM2 runtime
             from transformers import Sam2Model, Sam2Processor
         except ImportError as error:
-            raise RuntimeError("SAM requires the optional 'sam' dependencies") from error
+            missing = error.name or "an optional dependency"
+            raise RuntimeError(
+                f"SAM2 is missing {missing!r}. Install/update the optional dependencies with "
+                "`uv sync --extra sam`, then launch the annotator through `uv run`."
+            ) from error
         if self.device == "auto":
             if torch.cuda.is_available():
                 self.device = "cuda"

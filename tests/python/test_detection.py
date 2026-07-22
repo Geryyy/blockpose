@@ -29,6 +29,7 @@ from blockpose.detection import (
 )
 from blockpose.evaluate import evaluate, rotation_error_deg
 from blockpose.io import load_snapshot
+from blockpose.snapshot_exclusions import load_snapshot_exclusions
 from blockpose.synth import BlockSpec, ClutterParams, SynthParams, generate_scene
 from conftest import snapshot_with_ground_truth
 
@@ -36,7 +37,12 @@ REPO_ROOT = Path(__file__).parent.parent.parent
 SNAPSHOTS_DIR = REPO_ROOT / "data" / "registration_snapshots"
 TRANSFORM_CONFIG = REPO_ROOT / "config" / "transforms_pzs100_initial_pose_1.yaml"
 
-SNAPSHOT_DIRS = sorted(SNAPSHOTS_DIR.iterdir())
+_EXCLUDED_SNAPSHOTS = load_snapshot_exclusions(SNAPSHOTS_DIR)
+SNAPSHOT_DIRS = sorted(
+    path
+    for path in SNAPSHOTS_DIR.iterdir()
+    if path.is_dir() and path.name not in _EXCLUDED_SNAPSHOTS
+)
 
 
 @pytest.fixture(scope="module")
@@ -394,6 +400,25 @@ def test_parallel_rays_do_not_emit_runtime_warning() -> None:
         visibility_evidence(pose, context, (0.6, 0.6, 0.9))
 
 
+def test_visibility_keeps_intersecting_rays_when_sensor_is_inside_bounding_sphere() -> None:
+    """The angular prefilter must become a no-op when the sensor is inside it."""
+    pose = _make_pose_for_selection((0.0, 0.0, 0.45))
+    # Put the sensor at the cuboid centre. Both rays initially have zero
+    # projection toward the centre, but traverse the cuboid and terminate well
+    # beyond it. An unconditional projection filter would incorrectly drop both.
+    context = SensorContext(
+        pose.position.copy(),
+        np.array([[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]]),
+        np.array([1.0, 1.0]),
+    )
+    expected, covered, violations, supported, incident = visibility_evidence(
+        pose, context, (0.6, 0.6, 0.9)
+    )
+    # This is the exact unfiltered slab-test result: a sensor inside the box
+    # sees no outward-facing surface, while both rays cross its shrunk volume.
+    assert (expected, covered, violations, supported, incident) == (0, 0, 2, 0, 0)
+
+
 def test_far_block_survives_nearby_nonoccluding_clutter() -> None:
     upright = (0.6, 0.6, 0.9)
     sensor = (-5.0, 0.0, 4.0)
@@ -453,6 +478,40 @@ def test_detailed_api_preserves_pose_api_and_has_finite_normalized_features() ->
     assert detailed.stage_timings_ms["total"] > 0.0
     assert detailed.diagnostics[0].proposal_scale_m > 0.0
     assert np.isfinite(detailed.diagnostics[0].support_height_m)
+
+
+def test_detailed_api_reports_stable_plane_work_diagnostics_for_empty_input() -> None:
+    result = detect_blocks_detailed(np.empty((0, 3), dtype=np.float64))
+    assert result.poses == []
+    assert result.stage_counts == {
+        "input_points": 0,
+        "downsampled_points": 0,
+        "above_support_points": 0,
+        "proposal_components": 0,
+        "plane_regions": 0,
+        "plane_fit_calls": 0,
+        "plane_search_points": 0,
+        "plane_full_points_scored": 0,
+        "plane_trials_evaluated": 0,
+        "plane_valid_trials": 0,
+        "raw_hypotheses": 0,
+        "selected_hypotheses": 0,
+    }
+    expected_timings = {
+        "voxel_downsample",
+        "ground_model",
+        "proposals",
+        "region_split",
+        "plane_search",
+        "plane_full_score_refit",
+        "hypothesis_generation_evidence",
+        "plane_hypotheses",
+        "selection",
+        "refinement",
+        "total",
+    }
+    assert set(result.stage_timings_ms) == expected_timings
+    assert all(value >= 0.0 for value in result.stage_timings_ms.values())
 
 
 @pytest.mark.parametrize(

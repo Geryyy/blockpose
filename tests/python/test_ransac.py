@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from blockpose.ransac import segment_plane
+from blockpose.ransac import PlaneFitDiagnostics, segment_plane
 
 
 def _plane_cloud(normal, offset, count=600, noise=0.002, seed=0):
@@ -92,6 +92,46 @@ def test_adaptive_stop_does_not_degrade_a_clean_fit() -> None:
     assert abs(abs(float(few[:3] @ many[:3])) - 1.0) < 1e-4
 
 
+def test_bounded_search_refits_and_returns_inliers_from_full_input() -> None:
+    plane = _plane_cloud([0.0, 0.0, 1.0], -0.4, count=1200, seed=13)
+    outliers = np.random.default_rng(14).uniform(-2.0, 2.0, size=(300, 3))
+    points = np.vstack([plane, outliers])
+    model, inliers, diagnostics = segment_plane(
+        points,
+        0.01,
+        seed=4,
+        max_search_points=128,
+        return_diagnostics=True,
+    )
+    assert isinstance(diagnostics, PlaneFitDiagnostics)
+    assert diagnostics.input_points == 1500
+    assert diagnostics.search_points == 128
+    assert diagnostics.trials_evaluated > 0
+    assert 0 < diagnostics.valid_trials <= diagnostics.trials_evaluated
+    assert diagnostics.search_ms >= 0.0
+    assert diagnostics.full_score_refit_ms >= 0.0
+    # Consensus is scored on all 1,500 points, not capped to the search subset.
+    assert len(inliers) > 1100
+    assert float(np.median(np.abs(points[inliers] @ model[:3] + model[3]))) < 0.005
+
+
+def test_bounded_search_is_permutation_stable() -> None:
+    plane = _plane_cloud([0.2, -0.1, 0.97], 0.3, count=1000, seed=15)
+    outliers = np.random.default_rng(16).uniform(-2.0, 2.0, size=(250, 3))
+    points = np.vstack([plane, outliers])
+    permuted = np.random.default_rng(17).permutation(points)
+    first_model, first_inliers = segment_plane(points, 0.01, seed=2, max_search_points=128)
+    second_model, second_inliers = segment_plane(
+        permuted, 0.01, seed=2, max_search_points=128
+    )
+    np.testing.assert_allclose(first_model, second_model, atol=1e-12)
+    first_consensus = points[first_inliers]
+    second_consensus = permuted[second_inliers]
+    first_consensus = first_consensus[np.lexsort(first_consensus.T[::-1])]
+    second_consensus = second_consensus[np.lexsort(second_consensus.T[::-1])]
+    np.testing.assert_allclose(first_consensus, second_consensus, atol=0.0)
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
@@ -99,6 +139,7 @@ def test_adaptive_stop_does_not_degrade_a_clean_fit() -> None:
         ({"distance_threshold": -1.0}, "distance_threshold must be positive"),
         ({"distance_threshold": np.nan}, "distance_threshold must be positive"),
         ({"distance_threshold": 0.01, "num_iterations": 0}, "num_iterations must be positive"),
+        ({"distance_threshold": 0.01, "max_search_points": 2}, "at least 3"),
     ],
 )
 def test_rejects_invalid_parameters(kwargs, message) -> None:

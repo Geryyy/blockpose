@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.spatial import cKDTree
 
-from blockpose.pose import BLOCK_DIMS, BLOCK_DIMS_UPRIGHT, BlockPose
+from blockpose.pose import BLOCK_DIMS, BLOCK_DIMS_UPRIGHT, BlockPose, frame_alignments
 from blockpose.ransac import segment_plane
 from blockpose.refine import refine_pose
 
@@ -381,11 +381,12 @@ def snap_block_to_cloud(
                 return _failure(
                     f"ambiguous fit: near-equal candidates are {distance:.2f} m apart"
                 )
+    alignment = frame_alignments(tuple(best[4]), BLOCK_DIMS)[0]
     return SnapResult(
         True,
         best[2].copy(),
-        best[3].copy(),
-        best[4],
+        best[3] @ alignment,
+        BLOCK_DIMS,
         best[0],
         best[1],
         "fit accepted as pending proposal",

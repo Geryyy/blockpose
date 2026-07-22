@@ -60,7 +60,8 @@ def test_snap_upright_block_and_is_permutation_deterministic() -> None:
     first = snap_block_to_cloud(points, points[10])
     second = snap_block_to_cloud(points[::-1], points[10])
     assert first.success and second.success
-    assert first.dimensions == second.dimensions == (0.6, 0.6, 0.9)
+    assert first.dimensions == second.dimensions == (0.9, 0.6, 0.6)
+    assert abs(first.rotation[2, 0]) > 0.99
     assert np.array_equal(first.position, second.position)
     assert np.array_equal(first.rotation, second.rotation)
 
@@ -80,7 +81,8 @@ def test_controller_snap_is_one_undo_and_keeps_pending() -> None:
     controller.apply_snapped_pose(position, rotation, (0.6, 0.6, 0.9))
     assert controller.target is not None
     assert np.array_equal(controller.target.position, position)
-    assert controller.target.dimensions == (0.6, 0.6, 0.9)
+    assert controller.target.dimensions == (0.9, 0.6, 0.6)
+    assert abs(controller.target.rotation[2, 0]) > 0.99
     assert controller.target.review_status == "pending"
     assert controller.undo()
     assert controller.target is not None

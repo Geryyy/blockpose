@@ -17,6 +17,7 @@ sys.path.insert(0, str(_REPO_ROOT / "python"))
 from blockpose.detection import DetectionParams, SensorContext, detect_blocks  # noqa: E402
 from blockpose.evaluate import evaluate  # noqa: E402
 from blockpose.io import load_snapshot, load_T_world_seyond, load_tf_snapshot  # noqa: E402
+from blockpose.snapshot_exclusions import load_snapshot_exclusions  # noqa: E402
 
 _DEFAULT_TRANSFORM = _REPO_ROOT / "config" / "transforms_pzs100_initial_pose_1.yaml"
 _DEFAULT_SNAPSHOTS = _REPO_ROOT / "data" / "registration_snapshots"
@@ -173,8 +174,22 @@ def main() -> None:
 
     if args.snapshots:
         snap_dirs = [Path(p) for p in args.snapshots]
+        exclusions = load_snapshot_exclusions(_DEFAULT_SNAPSHOTS)
+        for snapshot in snap_dirs:
+            exclusion = exclusions.get(snapshot.name)
+            if exclusion is not None:
+                print(
+                    f"[warn] explicitly processing excluded snapshot {snapshot.name}: "
+                    f"{exclusion.reason}",
+                    file=sys.stderr,
+                )
     else:
-        snap_dirs = sorted(_DEFAULT_SNAPSHOTS.iterdir())
+        exclusions = load_snapshot_exclusions(_DEFAULT_SNAPSHOTS)
+        snap_dirs = sorted(
+            path
+            for path in _DEFAULT_SNAPSHOTS.iterdir()
+            if path.is_dir() and path.name not in exclusions
+        )
 
     params = DetectionParams(voxel_size=args.voxel_size, min_score=args.min_score)
 
