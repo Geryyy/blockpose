@@ -7,7 +7,7 @@ blocks:
 - id: manual_1
   review_status: approved
   provenance: manual
-  visibility: unknown
+  visibility: partial
   dimensions:
   - 0.9
   - 0.6
@@ -20,13 +20,13 @@ blocks:
     - 0.7013428227068012
     orientation_xyzw:
     - 0.0023106531793787907
-    - 0.03224685264314708
-    - 0.06451636435597287
+    - 0.032246852643147084
+    - 0.06451636435597288
     - 0.9973928213631693
 - id: manual_0
   review_status: approved
   provenance: manual
-  visibility: unknown
+  visibility: heavy_occlusion
   dimensions:
   - 0.9
   - 0.6
@@ -45,7 +45,7 @@ blocks:
 - id: manual_2
   review_status: approved
   provenance: manual
-  visibility: unknown
+  visibility: heavy_occlusion
   dimensions:
   - 0.9
   - 0.6

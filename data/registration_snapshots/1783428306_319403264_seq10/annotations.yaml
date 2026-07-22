@@ -5,9 +5,9 @@ annotated_roi: null
 notes: Provisional batch initialization; every pending target requires manual review.
 blocks:
 - id: rgb_candidate_1
-  review_status: pending
+  review_status: approved
   provenance: rgb_candidate_fit
-  visibility: unknown
+  visibility: partial
   dimensions:
   - 0.9
   - 0.6
@@ -15,18 +15,18 @@ blocks:
   confidence: 0.7787750526303445
   pose:
     position:
-    - -11.703966438791678
-    - 2.373395843536658
+    - -11.523966438791682
+    - 2.603395843536653
     - 2.5223908439769924
     orientation_xyzw:
-    - 0.026817215970391495
-    - -0.016927615490750718
-    - 0.8838566112845425
+    - 0.02681721597039155
+    - -0.016927615490750808
+    - 0.8838566112845424
     - -0.4666816725027885
 - id: rgb_candidate_2
-  review_status: pending
+  review_status: approved
   provenance: rgb_candidate_fit
-  visibility: unknown
+  visibility: full
   dimensions:
   - 0.9
   - 0.6
@@ -38,8 +38,27 @@ blocks:
     - 2.736360240822921
     - 0.65312781991575
     orientation_xyzw:
-    - 0.0015304201135005779
-    - -0.011896372889163091
-    - 0.7526615616474694
+    - 0.0015304201135005787
+    - -0.01189637288916309
+    - 0.7526615616474697
     - -0.6582983425049395
+- id: manual_0
+  review_status: approved
+  provenance: manual
+  visibility: partial
+  dimensions:
+  - 0.9
+  - 0.6
+  - 0.6
+  confidence: 0.0
+  pose:
+    position:
+    - -13.80224770048878
+    - 2.6992253024555795
+    - 0.6720006848493549
+    orientation_xyzw:
+    - -0.0062110430164430755
+    - -0.013458283626454133
+    - 0.7223503661736306
+    - -0.6913683866328425
 unmatched_detection_reviews: {}

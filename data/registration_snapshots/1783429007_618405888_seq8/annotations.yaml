@@ -5,9 +5,9 @@ annotated_roi: null
 notes: Provisional batch initialization; every pending target requires manual review.
 blocks:
 - id: block_1
-  review_status: pending
+  review_status: approved
   provenance: upstream_registration
-  visibility: unknown
+  visibility: full
   dimensions:
   - 0.9
   - 0.6
@@ -24,9 +24,9 @@ blocks:
     - -0.6788023438350439
     - 0.7342113719014843
 - id: block_3
-  review_status: pending
+  review_status: approved
   provenance: upstream_registration
-  visibility: unknown
+  visibility: full
   dimensions:
   - 0.9
   - 0.6
@@ -38,8 +38,8 @@ blocks:
     - -2.68583
     - 0.657494
     orientation_xyzw:
-    - -0.017524602653235563
-    - -0.02157080326583281
-    - 0.1902090287977633
-    - 0.9813501485770126
+    - -0.01752460265323556
+    - -0.021570803265832807
+    - 0.19020902879776327
+    - 0.9813501485770125
 unmatched_detection_reviews: {}

@@ -7,7 +7,7 @@ blocks:
 - id: rgb_candidate_1
   review_status: approved
   provenance: rgb_candidate_fit
-  visibility: unknown
+  visibility: full
   dimensions:
   - 0.9
   - 0.6
@@ -19,14 +19,14 @@ blocks:
     - 2.582162728098728
     - 0.6291270304702853
     orientation_xyzw:
-    - 0.005392405098093253
+    - 0.0053924050980932526
     - -0.017281291942890284
     - 0.7129817654695371
     - -0.7009488433716006
 - id: manual_0
   review_status: approved
   provenance: manual
-  visibility: unknown
+  visibility: partial
   dimensions:
   - 0.9
   - 0.6
@@ -39,13 +39,13 @@ blocks:
     - 0.6406266408976742
     orientation_xyzw:
     - -0.009619277621709917
-    - -0.020553921476869973
-    - 0.7509825438747455
+    - -0.020553921476869977
+    - 0.7509825438747454
     - -0.6599319848328122
 - id: manual_1
   review_status: approved
   provenance: manual
-  visibility: unknown
+  visibility: partial
   dimensions:
   - 0.9
   - 0.6
@@ -57,8 +57,8 @@ blocks:
     - 2.762276526580112
     - 0.659144193711076
     orientation_xyzw:
-    - -0.0108846663451384
-    - -0.013534730179336204
-    - 0.7319097531874244
-    - -0.6811801878406707
+    - -0.010884666345138398
+    - -0.013534730179336202
+    - 0.7319097531874242
+    - -0.6811801878406706
 unmatched_detection_reviews: {}

@@ -7,7 +7,7 @@ blocks:
 - id: block_0
   review_status: approved
   provenance: upstream_registration
-  visibility: unknown
+  visibility: full
   dimensions:
   - 0.9
   - 0.6
@@ -15,18 +15,18 @@ blocks:
   confidence: 0.501845
   pose:
     position:
-    - -10.9243
-    - -2.62914
+    - -10.9343
+    - -2.6191400000000002
     - 0.400582
     orientation_xyzw:
-    - -0.02138109938765156
-    - 0.005145079852646417
-    - 0.16768699519749344
-    - 0.9855949717728479
+    - -0.02142518398287832
+    - 0.004958301020970418
+    - 0.17628143969873278
+    - 0.984094116820148
 - id: block_1
   review_status: approved
   provenance: upstream_registration
-  visibility: unknown
+  visibility: partial
   dimensions:
   - 0.9
   - 0.6
@@ -38,14 +38,14 @@ blocks:
     - -0.620233
     - 0.428261
     orientation_xyzw:
-    - 0.02152259690330692
-    - 0.03237269534218375
-    - -0.6793749022508497
-    - 0.732760894569619
+    - 0.02837934208887225
+    - 0.014114938216685045
+    - -0.6799665499575248
+    - 0.7325577604534695
 - id: block_2
   review_status: approved
   provenance: upstream_registration
-  visibility: unknown
+  visibility: full
   dimensions:
   - 0.9
   - 0.6
@@ -53,12 +53,12 @@ blocks:
   confidence: 0.82485
   pose:
     position:
-    - -13.7461
-    - 2.77166
+    - -13.7561
+    - 2.7816599999999996
     - 0.651086
     orientation_xyzw:
-    - -0.0036854406709451414
-    - -0.019690503584713175
-    - 0.7197501310325949
-    - -0.6939441263345371
+    - -0.0036854406709454107
+    - -0.01969050358471328
+    - 0.719750131032595
+    - -0.693944126334537
 unmatched_detection_reviews: {}
