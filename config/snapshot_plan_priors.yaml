@@ -1,0 +1,564 @@
+schema_version: 1
+targets:
+  1783427923_718112512_seq5/rgb_candidate_1:
+    stable_slot_id: unassigned_1783427923_718112512_seq5__rgb_candidate_1
+    search_window_m: 0.1
+    source_snapshot_ids: []
+    plan_style: null
+    prior: null
+    covariance_diagonal: null
+    exclusion_reason: no_leakage_safe_prior
+    prior_source: cross_snapshot_loso
+  1783427923_718112512_seq5/manual_0:
+    stable_slot_id: loso_slot_-25_5_1
+    search_window_m: 0.1
+    source_snapshot_ids:
+    - 1783428170_524189696_seq9
+    - 1783428247_623807488_seq1
+    - 1783428275_723442176_seq7
+    - 1783428278_023463424_seq8
+    - 1783428306_319403264_seq10
+    plan_style: null
+    prior:
+      position:
+      - -12.69020969
+      - 2.68794563
+      - 0.64807052
+      orientation_xyzw:
+      - 0.0
+      - 0.0
+      - 0.69510629
+      - 0.71890698
+      dimensions:
+      - 0.9
+      - 0.6
+      - 0.6
+    covariance_diagonal:
+    - 0.0025
+    - 0.0025
+    - 0.0025
+    - 0.03046
+    - 0.03046
+    - 0.03046
+    exclusion_reason: null
+    prior_source: cross_snapshot_loso
+  1783428141_224458752_seq3/manual_1:
+    stable_slot_id: unassigned_1783428141_224458752_seq3__manual_1
+    search_window_m: 0.1
+    source_snapshot_ids: []
+    plan_style: null
+    prior: null
+    covariance_diagonal: null
+    exclusion_reason: no_leakage_safe_prior
+    prior_source: cross_snapshot_loso
+  1783428141_224458752_seq3/manual_0:
+    stable_slot_id: unassigned_1783428141_224458752_seq3__manual_0
+    search_window_m: 0.1
+    source_snapshot_ids: []
+    plan_style: null
+    prior: null
+    covariance_diagonal: null
+    exclusion_reason: unsafe_cross_snapshot_yaw_dispersion
+    prior_source: cross_snapshot_loso
+  1783428170_524189696_seq9/manual_0:
+    stable_slot_id: loso_slot_-28_6_1
+    search_window_m: 0.1
+    source_snapshot_ids:
+    - 1783427923_718112512_seq5
+    - 1783428141_224458752_seq3
+    - 1783428247_623807488_seq1
+    - 1783428275_723442176_seq7
+    - 1783428278_023463424_seq8
+    - 1783428306_319403264_seq10
+    - 1783428498_520086272_seq3
+    - 1783428548_719285504_seq11
+    - 1783428549_619338496_seq1
+    - 1783428995_118905856_seq1
+    - 1783428997_818953216_seq3
+    - 1783429041_018743040_seq2
+    - 1783429044_018652416_seq1
+    - 1783429281_721192192_seq2
+    plan_style: null
+    prior:
+      position:
+      - -13.7529
+      - 2.76700826
+      - 0.6575886
+      orientation_xyzw:
+      - 0.0
+      - 0.0
+      - 0.69082783
+      - 0.7230193
+      dimensions:
+      - 0.9
+      - 0.6
+      - 0.6
+    covariance_diagonal:
+    - 0.0025
+    - 0.0025
+    - 0.0025
+    - 0.03046
+    - 0.03046
+    - 0.03046
+    exclusion_reason: null
+    prior_source: cross_snapshot_loso
+  1783428170_524189696_seq9/manual_2:
+    stable_slot_id: loso_slot_-25_5_1
+    search_window_m: 0.1
+    source_snapshot_ids:
+    - 1783427923_718112512_seq5
+    - 1783428247_623807488_seq1
+    - 1783428275_723442176_seq7
+    - 1783428278_023463424_seq8
+    - 1783428306_319403264_seq10
+    plan_style: null
+    prior:
+      position:
+      - -12.69020969
+      - 2.71538195
+      - 0.64779237
+      orientation_xyzw:
+      - 0.0
+      - 0.0
+      - 0.68190304
+      - 0.73144257
+      dimensions:
+      - 0.9
+      - 0.6
+      - 0.6
+    covariance_diagonal:
+    - 0.0025
+    - 0.0025
+    - 0.0025
+    - 0.03046
+    - 0.03046
+    - 0.03046
+    exclusion_reason: null
+    prior_source: cross_snapshot_loso
+  1783428247_623807488_seq1/manual_1:
+    stable_slot_id: loso_slot_-25_5_1
+    search_window_m: 0.1
+    source_snapshot_ids:
+    - 1783427923_718112512_seq5
+    - 1783428170_524189696_seq9
+    - 1783428275_723442176_seq7
+    - 1783428278_023463424_seq8
+    - 1783428306_319403264_seq10
+    plan_style: null
+    prior:
+      position:
+      - -12.68700082
+      - 2.71538195
+      - 0.64807052
+      orientation_xyzw:
+      - 0.0
+      - 0.0
+      - 0.68569267
+      - 0.72789117
+      dimensions:
+      - 0.9
+      - 0.6
+      - 0.6
+    covariance_diagonal:
+    - 0.0025
+    - 0.0025
+    - 0.0025
+    - 0.03046
+    - 0.03046
+    - 0.03046
+    exclusion_reason: null
+    prior_source: cross_snapshot_loso
+  1783428275_723442176_seq7/manual_0:
+    stable_slot_id: loso_slot_-25_5_1
+    search_window_m: 0.1
+    source_snapshot_ids:
+    - 1783427923_718112512_seq5
+    - 1783428170_524189696_seq9
+    - 1783428247_623807488_seq1
+    - 1783428278_023463424_seq8
+    - 1783428306_319403264_seq10
+    plan_style: null
+    prior:
+      position:
+      - -12.68700082
+      - 2.71538195
+      - 0.64807052
+      orientation_xyzw:
+      - 0.0
+      - 0.0
+      - 0.68569267
+      - 0.72789117
+      dimensions:
+      - 0.9
+      - 0.6
+      - 0.6
+    covariance_diagonal:
+    - 0.0025
+    - 0.0025
+    - 0.0025
+    - 0.03046
+    - 0.03046
+    - 0.03046
+    exclusion_reason: null
+    prior_source: cross_snapshot_loso
+  1783428498_520086272_seq3/rgb_candidate_1:
+    stable_slot_id: loso_slot_-24_-1_1
+    search_window_m: 0.1
+    source_snapshot_ids:
+    - 1783428548_719285504_seq11
+    - 1783428549_619338496_seq1
+    - 1783428995_118905856_seq1
+    - 1783428997_818953216_seq3
+    - 1783429000_318426368_seq7
+    - 1783429004_018360832_seq2
+    - 1783429007_018379776_seq4
+    - 1783429007_618405888_seq8
+    - 1783429041_018743040_seq2
+    - 1783429044_018652416_seq1
+    plan_style: null
+    prior:
+      position:
+      - -11.8744219
+      - -0.6063025
+      - 0.42993687
+      orientation_xyzw:
+      - 0.0
+      - 0.0
+      - -0.68040851
+      - 0.73283303
+      dimensions:
+      - 0.9
+      - 0.6
+      - 0.6
+    covariance_diagonal:
+    - 0.0025
+    - 0.0025
+    - 0.0025
+    - 0.03046
+    - 0.03046
+    - 0.03046
+    exclusion_reason: null
+    prior_source: cross_snapshot_loso
+  1783428498_520086272_seq3/manual_0:
+    stable_slot_id: unassigned_1783428498_520086272_seq3__manual_0
+    search_window_m: 0.1
+    source_snapshot_ids: []
+    plan_style: null
+    prior: null
+    covariance_diagonal: null
+    exclusion_reason: no_leakage_safe_prior
+    prior_source: cross_snapshot_loso
+  1783428548_719285504_seq11/rgb_candidate_1:
+    stable_slot_id: loso_slot_-24_-1_1
+    search_window_m: 0.1
+    source_snapshot_ids:
+    - 1783428498_520086272_seq3
+    - 1783428549_619338496_seq1
+    - 1783428995_118905856_seq1
+    - 1783428997_818953216_seq3
+    - 1783429000_318426368_seq7
+    - 1783429004_018360832_seq2
+    - 1783429007_018379776_seq4
+    - 1783429007_618405888_seq8
+    - 1783429041_018743040_seq2
+    - 1783429044_018652416_seq1
+    plan_style: null
+    prior:
+      position:
+      - -11.8744219
+      - -0.6063025
+      - 0.43034832
+      orientation_xyzw:
+      - 0.0
+      - 0.0
+      - -0.68032681
+      - 0.73290888
+      dimensions:
+      - 0.9
+      - 0.6
+      - 0.6
+    covariance_diagonal:
+    - 0.0025
+    - 0.0025
+    - 0.0025
+    - 0.03046
+    - 0.03046
+    - 0.03046
+    exclusion_reason: null
+    prior_source: cross_snapshot_loso
+  1783428548_719285504_seq11/rgb_candidate_2:
+    stable_slot_id: loso_slot_-24_-2_2
+    search_window_m: 0.1
+    source_snapshot_ids:
+    - 1783428549_619338496_seq1
+    plan_style: null
+    prior:
+      position:
+      - -11.869
+      - -0.865746
+      - 1.08204
+      orientation_xyzw:
+      - 0.0
+      - 0.0
+      - -0.66731773
+      - 0.74477315
+      dimensions:
+      - 0.9
+      - 0.6
+      - 0.6
+    covariance_diagonal:
+    - 0.0025
+    - 0.0025
+    - 0.0025
+    - 0.03046
+    - 0.03046
+    - 0.03046
+    exclusion_reason: null
+    prior_source: cross_snapshot_loso
+  1783428549_619338496_seq1/block_0:
+    stable_slot_id: loso_slot_-24_-1_1
+    search_window_m: 0.1
+    source_snapshot_ids:
+    - 1783428498_520086272_seq3
+    - 1783428548_719285504_seq11
+    - 1783428995_118905856_seq1
+    - 1783428997_818953216_seq3
+    - 1783429000_318426368_seq7
+    - 1783429004_018360832_seq2
+    - 1783429007_018379776_seq4
+    - 1783429007_618405888_seq8
+    - 1783429041_018743040_seq2
+    - 1783429044_018652416_seq1
+    plan_style: null
+    prior:
+      position:
+      - -11.8744219
+      - -0.6114825
+      - 0.43034832
+      orientation_xyzw:
+      - 0.0
+      - 0.0
+      - -0.68025349
+      - 0.73297694
+      dimensions:
+      - 0.9
+      - 0.6
+      - 0.6
+    covariance_diagonal:
+    - 0.0025
+    - 0.0025
+    - 0.0025
+    - 0.03046
+    - 0.03046
+    - 0.03046
+    exclusion_reason: null
+    prior_source: cross_snapshot_loso
+  1783428549_619338496_seq1/block_1:
+    stable_slot_id: loso_slot_-24_-2_2
+    search_window_m: 0.1
+    source_snapshot_ids:
+    - 1783428548_719285504_seq11
+    plan_style: null
+    prior:
+      position:
+      - -11.85927508
+      - -0.84862575
+      - 1.0898916
+      orientation_xyzw:
+      - 0.0
+      - 0.0
+      - -0.66913061
+      - 0.74314483
+      dimensions:
+      - 0.9
+      - 0.6
+      - 0.6
+    covariance_diagonal:
+    - 0.0025
+    - 0.0025
+    - 0.0025
+    - 0.03046
+    - 0.03046
+    - 0.03046
+    exclusion_reason: null
+    prior_source: cross_snapshot_loso
+  1783428995_118905856_seq1/block_0:
+    stable_slot_id: unassigned_1783428995_118905856_seq1__block_0
+    search_window_m: 0.1
+    source_snapshot_ids: []
+    plan_style: null
+    prior: null
+    covariance_diagonal: null
+    exclusion_reason: no_leakage_safe_prior
+    prior_source: cross_snapshot_loso
+  1783428995_118905856_seq1/manual_0:
+    stable_slot_id: loso_slot_-24_-1_1
+    search_window_m: 0.1
+    source_snapshot_ids:
+    - 1783428498_520086272_seq3
+    - 1783428548_719285504_seq11
+    - 1783428549_619338496_seq1
+    - 1783428997_818953216_seq3
+    - 1783429000_318426368_seq7
+    - 1783429004_018360832_seq2
+    - 1783429007_018379776_seq4
+    - 1783429007_618405888_seq8
+    - 1783429041_018743040_seq2
+    - 1783429044_018652416_seq1
+    plan_style: null
+    prior:
+      position:
+      - -11.87825
+      - -0.6063025
+      - 0.42959158
+      orientation_xyzw:
+      - 0.0
+      - 0.0
+      - -0.68029826
+      - 0.73293539
+      dimensions:
+      - 0.9
+      - 0.6
+      - 0.6
+    covariance_diagonal:
+    - 0.0025
+    - 0.0025
+    - 0.0025
+    - 0.03046
+    - 0.03046
+    - 0.03046
+    exclusion_reason: null
+    prior_source: cross_snapshot_loso
+  1783429344_720968448_seq6/rgb_candidate_2:
+    stable_slot_id: loso_slot_-22_-5_1
+    search_window_m: 0.1
+    source_snapshot_ids:
+    - 1783429041_018743040_seq2
+    - 1783429044_018652416_seq1
+    - 1783429057_917983488_seq2
+    - 1783429345_020967424_seq4
+    - 1783431798_015547904_seq9
+    plan_style: null
+    prior:
+      position:
+      - -10.91643146
+      - -2.61761091
+      - 0.39119595
+      orientation_xyzw:
+      - 0.0
+      - 0.0
+      - 0.18641852
+      - 0.98247043
+      dimensions:
+      - 0.9
+      - 0.6
+      - 0.6
+    covariance_diagonal:
+    - 0.0025
+    - 0.0025
+    - 0.0025
+    - 0.03046
+    - 0.03046
+    - 0.03046
+    exclusion_reason: null
+    prior_source: cross_snapshot_loso
+  1783429344_720968448_seq6/manual_0:
+    stable_slot_id: loso_slot_-23_-6_1
+    search_window_m: 0.1
+    source_snapshot_ids:
+    - 1783431798_015547904_seq9
+    plan_style: null
+    prior:
+      position:
+      - -11.748
+      - -2.985
+      - 0.388
+      orientation_xyzw:
+      - 0.0
+      - 0.0
+      - 0.20791169
+      - 0.9781476
+      dimensions:
+      - 0.9
+      - 0.6
+      - 0.6
+    covariance_diagonal:
+    - 0.0025
+    - 0.0025
+    - 0.0025
+    - 0.03046
+    - 0.03046
+    - 0.03046
+    exclusion_reason: null
+    prior_source: cross_snapshot_loso
+  1783431798_015547904_seq9/block_4:
+    stable_slot_id: unassigned_1783431798_015547904_seq9__block_4
+    search_window_m: 0.1
+    source_snapshot_ids: []
+    plan_style: null
+    prior: null
+    covariance_diagonal: null
+    exclusion_reason: no_leakage_safe_prior
+    prior_source: cross_snapshot_loso
+  1783431798_015547904_seq9/manual_0:
+    stable_slot_id: loso_slot_-22_-5_1
+    search_window_m: 0.1
+    source_snapshot_ids:
+    - 1783429041_018743040_seq2
+    - 1783429044_018652416_seq1
+    - 1783429057_917983488_seq2
+    - 1783429344_720968448_seq6
+    - 1783429345_020967424_seq4
+    plan_style: null
+    prior:
+      position:
+      - -10.91643146
+      - -2.61573857
+      - 0.39119595
+      orientation_xyzw:
+      - 0.0
+      - 0.0
+      - 0.18906049
+      - 0.98196544
+      dimensions:
+      - 0.9
+      - 0.6
+      - 0.6
+    covariance_diagonal:
+    - 0.0025
+    - 0.0025
+    - 0.0025
+    - 0.03046
+    - 0.03046
+    - 0.03046
+    exclusion_reason: null
+    prior_source: cross_snapshot_loso
+  1783431798_015547904_seq9/manual_1:
+    stable_slot_id: loso_slot_-23_-6_1
+    search_window_m: 0.1
+    source_snapshot_ids:
+    - 1783429344_720968448_seq6
+    plan_style: null
+    prior:
+      position:
+      - -11.7474
+      - -2.9857
+      - 0.388
+      orientation_xyzw:
+      - 0.0
+      - 0.0
+      - 0.21253242
+      - 0.97715402
+      dimensions:
+      - 0.9
+      - 0.6
+      - 0.6
+    covariance_diagonal:
+    - 0.0025
+    - 0.0025
+    - 0.0025
+    - 0.03046
+    - 0.03046
+    - 0.03046
+    exclusion_reason: null
+    prior_source: cross_snapshot_loso

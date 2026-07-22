@@ -52,7 +52,13 @@ from blockpose.detection import DetectionParams, SensorContext, detect_blocks_de
 from blockpose.evaluate import rotation_error_deg, translation_error  # noqa: E402
 from blockpose.io import load_snapshot, load_tf_snapshot  # noqa: E402
 from blockpose.pose import rotmat_to_quat_xyzw  # noqa: E402
+from blockpose.refine import surface_distance  # noqa: E402
 from blockpose.snapshot_exclusions import load_snapshot_exclusions  # noqa: E402
+from blockpose.snapshot_plan_fixtures import load_snapshot_plan_fixtures  # noqa: E402
+from blockpose.snapshot_scenarios import (  # noqa: E402
+    load_snapshot_scenarios,
+    taxonomy_acceptance_summary,
+)
 from scipy.optimize import linear_sum_assignment  # noqa: E402
 
 _DEFAULT_TRANSFORM = REPO_ROOT / "config" / "transforms_pzs100_initial_pose_1.yaml"
@@ -122,7 +128,9 @@ def _pose_dict(pose) -> dict:
     }
 
 
-def evaluate_snapshot(snap_dir: Path, config_path: Path, params: DetectionParams) -> dict:
+def evaluate_snapshot(
+    snap_dir: Path, config_path: Path, params: DetectionParams, *, collect_trace: bool = False
+) -> dict:
     """Run detection on one real snapshot and return its metrics.
 
     `unmatched_detections` is NOT the same as a confirmed false positive: the
@@ -168,7 +176,9 @@ def evaluate_snapshot(snap_dir: Path, config_path: Path, params: DetectionParams
     context = SensorContext.from_points(sensor_origin, pts_world)
 
     started = time.perf_counter()
-    result = detect_blocks_detailed(pts_world, params, sensor_context=context)
+    result = detect_blocks_detailed(
+        pts_world, params, sensor_context=context, collect_trace=collect_trace
+    )
     runtime_ms = (time.perf_counter() - started) * 1000.0
     detections = result.poses
     diagnostics = result.diagnostics
@@ -291,6 +301,51 @@ def evaluate_snapshot(snap_dir: Path, config_path: Path, params: DetectionParams
                 "matched_at_50cm": any(j == index for _, j in pairs),
             }
         )
+        if collect_trace:
+            trace = result.trace
+            if trace is None:
+                raise RuntimeError("detector did not return a requested inference trace")
+
+            def shell_count(points: np.ndarray, band: float = 0.10, pose=target) -> int:
+                distances = surface_distance(pose, points, pose.dims)
+                return int(np.count_nonzero(np.abs(distances) <= band))
+
+            def nearest(records, pose=target) -> float | None:
+                values = [translation_error(item.pose, pose) for item in records]
+                return min(values) if values else None
+
+            def nearest_record(records, pose=target):
+                return min(
+                    records,
+                    key=lambda item: translation_error(item.pose, pose),
+                    default=None,
+                )
+
+            proposal_shell_counts = [shell_count(points) for points in trace.proposal_points]
+            raw_error = nearest(trace.raw_hypotheses)
+            threshold_error = nearest(trace.threshold_hypotheses)
+            raw_record = nearest_record(trace.raw_hypotheses)
+            if matched_detection_index is not None:
+                terminal = "matched_final"
+            elif shell_count(trace.above_support_points) == 0:
+                terminal = "no_post_ground_shell_points"
+            elif not any(count > 0 for count in proposal_shell_counts):
+                terminal = "no_proposal_coverage"
+            elif raw_error is None or raw_error > 0.50:
+                terminal = "no_compatible_raw_hypothesis"
+            else:
+                terminal = raw_record.fate if raw_record is not None else "no_trace_fate"
+            target_records[-1]["trace"] = {
+                "pre_ground_shell_points": shell_count(trace.downsampled_points),
+                "post_ground_shell_points": shell_count(trace.above_support_points),
+                "proposal_coverage": any(count > 0 for count in proposal_shell_counts),
+                "proposal_shell_counts": proposal_shell_counts,
+                "nearest_raw_error_m": raw_error,
+                "nearest_threshold_error_m": threshold_error,
+                "nearest_refined_error_m": nearest(trace.final_hypotheses),
+                "observability_proxy_shell_points": shell_count(trace.above_support_points, 0.05),
+                "terminal_reason": terminal,
+            }
 
     return {
         "snapshot": snap_dir.name,
@@ -323,7 +378,11 @@ def evaluate_snapshot(snap_dir: Path, config_path: Path, params: DetectionParams
 
 
 def run_suite(
-    snapshots_dir: Path, config_path: Path, params: DetectionParams | None = None
+    snapshots_dir: Path,
+    config_path: Path,
+    params: DetectionParams | None = None,
+    *,
+    collect_trace: bool = False,
 ) -> dict:
     if params is None:
         params = DetectionParams(min_score=0.4)
@@ -339,7 +398,12 @@ def run_suite(
         except (KeyError, OSError, TypeError, ValueError) as error:
             integrity_failures.append({"snapshot": snapshot.name, "reason": str(error)})
             continue
-        per_snapshot.append(evaluate_snapshot(snapshot, config_path, params))
+        if collect_trace:
+            per_snapshot.append(
+                evaluate_snapshot(snapshot, config_path, params, collect_trace=True)
+            )
+        else:
+            per_snapshot.append(evaluate_snapshot(snapshot, config_path, params))
     exclusions = load_snapshot_exclusions(snapshots_dir)
 
     t_errors = [value for metric in per_snapshot for value in metric["translation_errors_m"]]
@@ -365,7 +429,7 @@ def run_suite(
     except (OSError, subprocess.CalledProcessError):
         git_revision = None
 
-    return {
+    metrics = {
         "n_snapshots_scored": len(per_snapshot),
         "n_snapshots_skipped_no_tf": len(without_tf),
         "skipped_snapshots": [s.name for s in without_tf],
@@ -412,6 +476,42 @@ def run_suite(
         "runtime_p95_ms": _percentile([m["runtime_ms"] for m in per_snapshot], 95),
         "per_snapshot": per_snapshot,
     }
+    if collect_trace:
+        taxonomy = load_snapshot_scenarios()
+        fixtures = load_snapshot_plan_fixtures()
+        terminals: dict[str, int] = {}
+        for snapshot in per_snapshot:
+            for target in snapshot["target_diagnostics"]:
+                key = f"{snapshot['snapshot']}/{target['id']}"
+                scenario = taxonomy[key]
+                fixture = fixtures.get(key)
+                target["taxonomy"] = asdict(scenario)
+                target["plan_provenance"] = (
+                    {
+                        "stable_slot_id": fixture.stable_slot_id,
+                        "source_snapshot_ids": fixture.source_snapshot_ids,
+                        "search_window_m": fixture.search_window_m,
+                        "exclusion_reason": fixture.exclusion_reason,
+                        "prior_source": fixture.prior_source,
+                        "plan_style": fixture.plan_style,
+                    }
+                    if fixture is not None
+                    else None
+                )
+                terminal = target["trace"]["terminal_reason"]
+                terminals[terminal] = terminals.get(terminal, 0) + 1
+        metrics["trace"] = {
+            "schema_version": 1,
+            "collector": "post_inference_gt_join",
+            "target_records": sum(len(item["target_diagnostics"]) for item in per_snapshot),
+            "terminal_reason_counts": dict(sorted(terminals.items())),
+            "taxonomy_manifest": "config/snapshot_scenarios.yaml",
+            "plan_fixture_manifest": "config/snapshot_plan_priors.yaml",
+            "taxonomy_acceptance_policy": "reviewed classifications only",
+            "provisional_taxonomy_excluded_from_acceptance_metrics": True,
+            "taxonomy_acceptance": taxonomy_acceptance_summary(taxonomy),
+        }
+    return metrics
 
 
 def parse_args() -> argparse.Namespace:
@@ -423,6 +523,12 @@ def parse_args() -> argparse.Namespace:
         "--config", type=Path, default=_DEFAULT_TRANSFORM, help="Static transforms YAML fallback."
     )
     parser.add_argument("--metrics-out", type=Path, default=None, help="Write metrics JSON here.")
+    parser.add_argument(
+        "--trace-out",
+        type=Path,
+        default=None,
+        help="Enable inference tracing, join GT only after detection, and write JSON here.",
+    )
     parser.add_argument(
         "--min-score",
         type=float,
@@ -436,10 +542,14 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     params = DetectionParams(min_score=args.min_score)
-    metrics = run_suite(args.snapshots_dir, args.config, params)
+    metrics = run_suite(
+        args.snapshots_dir, args.config, params, collect_trace=args.trace_out is not None
+    )
     print(json.dumps(metrics, indent=2))
     if args.metrics_out is not None:
         args.metrics_out.write_text(json.dumps(metrics, indent=2))
+    if args.trace_out is not None:
+        args.trace_out.write_text(json.dumps(metrics, indent=2))
     if metrics["n_snapshots_scored"] == 0:
         print("\nNo tf.yaml-enabled snapshots found -- nothing scored.", file=sys.stderr)
         return 1

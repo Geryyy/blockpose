@@ -192,6 +192,30 @@ class DetectionResult:
     diagnostics: list[DetectionDiagnostics]
     stage_counts: dict[str, int] = field(default_factory=dict)
     stage_timings_ms: dict[str, float] = field(default_factory=dict)
+    trace: InferenceTrace | None = None
+
+
+@dataclass(frozen=True)
+class TraceHypothesis:
+    """Stable inference-stage hypothesis record; contains no ground truth."""
+
+    id: str
+    pose: BlockPose
+    score: float
+    stage: str
+    fate: str
+
+
+@dataclass(frozen=True)
+class InferenceTrace:
+    """Optional inference-only evidence retained for post-hoc GT joining."""
+
+    downsampled_points: np.ndarray
+    above_support_points: np.ndarray
+    proposal_points: tuple[np.ndarray, ...]
+    raw_hypotheses: tuple[TraceHypothesis, ...]
+    threshold_hypotheses: tuple[TraceHypothesis, ...]
+    final_hypotheses: tuple[TraceHypothesis, ...]
 
 
 @dataclass(frozen=True)
@@ -1221,7 +1245,10 @@ def _detect_blocks_impl(
     params: DetectionParams | None = None,
     *,
     sensor_context: SensorContext | None = None,
-) -> tuple[list[BlockPose], list[CuboidHypothesis], dict[str, int], dict[str, float]]:
+    collect_trace: bool = False,
+) -> tuple[
+    list[BlockPose], list[CuboidHypothesis], dict[str, int], dict[str, float], InferenceTrace | None
+]:
     """Detect concrete blocks in a world-frame point cloud.
 
     Args:
@@ -1268,6 +1295,21 @@ def _detect_blocks_impl(
         "selected_hypotheses": 0,
     }
 
+    def empty_trace(
+        downsampled: np.ndarray | None = None, above: np.ndarray | None = None
+    ) -> InferenceTrace | None:
+        if not collect_trace:
+            return None
+        empty = np.empty((0, 3), dtype=np.float64)
+        return InferenceTrace(
+            empty if downsampled is None else downsampled.copy(),
+            empty if above is None else above.copy(),
+            (),
+            (),
+            (),
+            (),
+        )
+
     if sensor_context is not None:
         sensor_context = _validate_sensor_context(sensor_context)
 
@@ -1283,25 +1325,27 @@ def _detect_blocks_impl(
     # but uninformative clouds.  Treat them as containing no detectable block.
     if len(pts) < 3:
         timings["total"] = (perf_counter() - started) * 1000.0
-        return [], [], counts, timings
+        return [], [], counts, timings, empty_trace()
     pts = pts[np.lexsort((pts[:, 2], pts[:, 1], pts[:, 0]))]
 
     # Stage 1: Voxel downsample
     pts = _voxel_downsample(pts, params.voxel_size)
+    trace_downsampled = pts.copy() if collect_trace else np.empty((0, 3))
     timings["voxel_downsample"] = (perf_counter() - started) * 1000.0
     counts["downsampled_points"] = len(pts)
     if len(pts) < 3:
         timings["total"] = (perf_counter() - started) * 1000.0
-        return [], [], counts, timings
+        return [], [], counts, timings, empty_trace(trace_downsampled)
 
     # Stage 2: Ground removal
     stage_started = perf_counter()
     pts, ground = _remove_ground(pts, params)
+    trace_above_support = pts.copy() if collect_trace else np.empty((0, 3))
     timings["ground_model"] = (perf_counter() - stage_started) * 1000.0
     counts["above_support_points"] = len(pts)
     if len(pts) == 0:
         timings["total"] = (perf_counter() - started) * 1000.0
-        return [], [], counts, timings
+        return [], [], counts, timings, empty_trace(trace_downsampled, trace_above_support)
 
     # Stage 3: DBSCAN clustering
     stage_started = perf_counter()
@@ -1392,10 +1436,18 @@ def _detect_blocks_impl(
     timings["plane_hypotheses"] = (perf_counter() - stage_started) * 1000.0
     timings.update(plane_subtimings)
     counts["raw_hypotheses"] = len(hypotheses)
+    raw_values = list(hypotheses)
+    raw_identity_ids = {
+        id(value): f"hypothesis-{index:04d}" for index, value in enumerate(raw_values)
+    }
+    identity_ids = dict(raw_identity_ids)
 
     selection_started = perf_counter()
     hypotheses = [h for h in hypotheses if h.evidence.score >= params.min_score]
+    threshold_ids = {identity_ids[id(value)] for value in hypotheses}
     selected = _select_conflict_alternatives(hypotheses, params.conflict_alternatives)
+    selected_ids = [identity_ids[id(value)] for value in selected]
+    pre_refinement_ids = set(selected_ids)
     counts["refinement_candidates"] = len(selected)
     timings["selection"] = (perf_counter() - selection_started) * 1000.0
 
@@ -1429,6 +1481,9 @@ def _detect_blocks_impl(
             )
             for hypothesis, pose in zip(selected, refined, strict=True)
         ]
+        identity_ids = {
+            id(value): source_id for value, source_id in zip(selected, selected_ids, strict=True)
+        }
         timings["refinement"] = (perf_counter() - refinement_started) * 1000.0
 
     selected = [
@@ -1436,13 +1491,54 @@ def _detect_blocks_impl(
         for hypothesis in selected
         if 0.0 <= float(ground.height(hypothesis.pose.position)) <= params.cluster_max_center_z
     ]
+    post_refinement_bounds_ids = {identity_ids[id(value)] for value in selected}
     # Re-score after refinement, then make the final exclusivity decision.  A
     # pre-refinement greedy winner is often the worse local cuboid fit.
     selected = _select_hypotheses(selected)
     selected.sort(key=lambda hypothesis: hypothesis.pose.position[2], reverse=True)
     counts["selected_hypotheses"] = len(selected)
     timings["total"] = (perf_counter() - started) * 1000.0
-    return [hypothesis.pose for hypothesis in selected], selected, counts, timings
+    trace = None
+    if collect_trace:
+        final_ids = {identity_ids[id(value)] for value in selected}
+
+        def records(
+            values, stage: str, fate_by_id: dict[str, str], id_lookup: dict[int, str]
+        ) -> tuple[TraceHypothesis, ...]:
+            return tuple(
+                TraceHypothesis(
+                    id_lookup[id(value)],
+                    value.pose,
+                    value.evidence.score,
+                    stage,
+                    fate_by_id.get(id_lookup[id(value)], "retained"),
+                )
+                for index, value in enumerate(values)
+            )
+
+        raw_fates = {
+            source_id: (
+                "final"
+                if source_id in final_ids
+                else "post_refinement_nms_rejected"
+                if source_id in post_refinement_bounds_ids
+                else "post_refinement_bounds_rejected"
+                if source_id in pre_refinement_ids
+                else "pre_refinement_selection_rejected"
+                if source_id in threshold_ids
+                else "score_rejected"
+            )
+            for source_id in raw_identity_ids.values()
+        }
+        trace = InferenceTrace(
+            trace_downsampled,
+            trace_above_support,
+            tuple(cluster.copy() for cluster, _ in clusters),
+            records(raw_values, "raw", raw_fates, raw_identity_ids),
+            records(hypotheses, "threshold", raw_fates, raw_identity_ids),
+            records(selected, "final", raw_fates, identity_ids),
+        )
+    return [hypothesis.pose for hypothesis in selected], selected, counts, timings, trace
 
 
 def _diagnostics(hypothesis: CuboidHypothesis) -> DetectionDiagnostics:
@@ -1474,13 +1570,14 @@ def detect_blocks_detailed(
     params: DetectionParams | None = None,
     *,
     sensor_context: SensorContext | None = None,
+    collect_trace: bool = False,
 ) -> DetectionResult:
     """Return poses plus normalized evidence and geometry observability."""
-    poses, hypotheses, counts, timings = _detect_blocks_impl(
-        pts_world, params, sensor_context=sensor_context
+    poses, hypotheses, counts, timings, trace = _detect_blocks_impl(
+        pts_world, params, sensor_context=sensor_context, collect_trace=collect_trace
     )
     diagnostics = [_diagnostics(hypothesis) for hypothesis in hypotheses]
-    return DetectionResult(poses, diagnostics, counts, timings)
+    return DetectionResult(poses, diagnostics, counts, timings, trace)
 
 
 def detect_blocks(

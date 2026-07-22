@@ -1,0 +1,681 @@
+schema_version: 1
+targets:
+  1783427923_718112512_seq5/rgb_candidate_1:
+    scenario: touching
+    query: verify_placed
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors:
+    - manual_0
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783427923_718112512_seq5/manual_0:
+    scenario: touching
+    query: verify_placed
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors:
+    - rgb_candidate_1
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783427923_718112512_seq5/manual_1:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428141_224458752_seq3/manual_2:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428141_224458752_seq3/manual_1:
+    scenario: touching
+    query: verify_placed
+    pose_quality: approximate
+    support: null
+    course: null
+    neighbors:
+    - manual_0
+    occluder: unknown
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428141_224458752_seq3/manual_0:
+    scenario: touching
+    query: verify_placed
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors:
+    - manual_1
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428170_524189696_seq9/manual_1:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428170_524189696_seq9/manual_0:
+    scenario: placed_isolated
+    query: verify_placed
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: unknown
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428170_524189696_seq9/manual_2:
+    scenario: placed_isolated
+    query: verify_placed
+    pose_quality: approximate
+    support: null
+    course: null
+    neighbors: []
+    occluder: unknown
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428247_623807488_seq1/manual_0:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428247_623807488_seq1/manual_1:
+    scenario: placed_isolated
+    query: verify_placed
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: unknown
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428247_623807488_seq1/manual_2:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428275_723442176_seq7/rgb_candidate_1:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428275_723442176_seq7/manual_0:
+    scenario: placed_isolated
+    query: verify_placed
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: unknown
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428275_723442176_seq7/manual_1:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428278_023463424_seq8/manual_0:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428278_023463424_seq8/manual_1:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428278_023463424_seq8/manual_2:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428306_319403264_seq10/rgb_candidate_1:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428306_319403264_seq10/rgb_candidate_2:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428306_319403264_seq10/manual_0:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428498_520086272_seq3/rgb_candidate_1:
+    scenario: placed_isolated
+    query: verify_placed
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: unknown
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428498_520086272_seq3/manual_0:
+    scenario: wall
+    query: verify_placed
+    pose_quality: precise
+    support: rgb_candidate_1
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428498_520086272_seq3/manual_1:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428548_719285504_seq11/rgb_candidate_1:
+    scenario: placed_isolated
+    query: verify_placed
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: unknown
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428548_719285504_seq11/rgb_candidate_2:
+    scenario: wall
+    query: verify_placed
+    pose_quality: precise
+    support: rgb_candidate_1
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428548_719285504_seq11/rgb_candidate_3:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428549_619338496_seq1/block_0:
+    scenario: placed_isolated
+    query: verify_placed
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: unknown
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428549_619338496_seq1/block_1:
+    scenario: wall
+    query: verify_placed
+    pose_quality: precise
+    support: block_0
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428549_619338496_seq1/block_2:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428995_118905856_seq1/block_0:
+    scenario: wall
+    query: verify_placed
+    pose_quality: precise
+    support: manual_0
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428995_118905856_seq1/block_2:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428995_118905856_seq1/manual_0:
+    scenario: placed_isolated
+    query: verify_placed
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: unknown
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428997_818953216_seq3/rgb_candidate_1:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783428997_818953216_seq3/manual_0:
+    scenario: gripped
+    query: estimate_gripped
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: gripper
+    notes: visually confirmed gripped; agent review
+    classification_status: reviewed
+    classification_evidence: rgb_3d_temporal_agent_review
+  1783428997_818953216_seq3/manual_1:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783429000_318426368_seq7/rgb_candidate_1:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783429000_318426368_seq7/rgb_candidate_2:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783429004_018360832_seq2/block_1:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783429004_018360832_seq2/block_3:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783429007_018379776_seq4/block_1:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783429007_018379776_seq4/block_3:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783429007_618405888_seq8/block_1:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783429007_618405888_seq8/block_3:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783429041_018743040_seq2/block_3:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783429041_018743040_seq2/block_4:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783429041_018743040_seq2/block_5:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783429044_018652416_seq1/block_0:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783429044_018652416_seq1/block_1:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783429044_018652416_seq1/block_2:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783429057_917983488_seq2/manual_1:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783429057_917983488_seq2/manual_2:
+    scenario: gripped
+    query: estimate_gripped
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: gripper
+    notes: visually confirmed gripped; agent review
+    classification_status: reviewed
+    classification_evidence: rgb_3d_temporal_agent_review
+  1783429281_721192192_seq2/block_1:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783429344_720968448_seq6/block_2:
+    scenario: gripped
+    query: estimate_gripped
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: gripper
+    notes: visually confirmed gripped; agent review
+    classification_status: reviewed
+    classification_evidence: rgb_3d_temporal_agent_review
+  1783429344_720968448_seq6/rgb_candidate_2:
+    scenario: touching
+    query: verify_placed
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors:
+    - manual_0
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783429344_720968448_seq6/manual_0:
+    scenario: touching
+    query: verify_placed
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors:
+    - rgb_candidate_2
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783429345_020967424_seq4/block_3:
+    scenario: gripped
+    query: estimate_gripped
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: gripper
+    notes: visually confirmed gripped; agent review
+    classification_status: reviewed
+    classification_evidence: rgb_3d_temporal_agent_review
+  1783429345_020967424_seq4/manual_0:
+    scenario: free
+    query: detect_free
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783431798_015547904_seq9/block_4:
+    scenario: wall
+    query: verify_placed
+    pose_quality: precise
+    support: manual_1
+    course: null
+    neighbors: []
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783431798_015547904_seq9/manual_0:
+    scenario: touching
+    query: verify_placed
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors:
+    - manual_1
+    occluder: null
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
+  1783431798_015547904_seq9/manual_1:
+    scenario: touching
+    query: verify_placed
+    pose_quality: precise
+    support: null
+    course: null
+    neighbors:
+    - manual_0
+    occluder: unknown
+    notes: geometry-initialized; human review required
+    classification_status: provisional
+    classification_evidence: geometry_suggestion
