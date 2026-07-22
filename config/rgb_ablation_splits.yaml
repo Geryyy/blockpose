@@ -1,0 +1,48 @@
+# Frozen grouping/split manifest for the RGB proposal *diagnostic* replay.
+#
+# The snapshots do not retain a recording/run UUID. Groups below are therefore
+# explicit capture batches inferred from contiguous capture timestamps; they are
+# not evidence that the samples are independent robot runs. This manifest must
+# be replaced with bag/run IDs before it can enable final-model selection.
+schema_version: 1
+selection_eligible: false
+final_enabled: false
+grouping_evidence: timestamp_contiguous_capture_batches_not_validated_run_ids
+groups:
+  capture_batch_a:
+    split: development
+    fold: 0
+    snapshots:
+    - 1783427923_718112512_seq5
+    - 1783428141_224458752_seq3
+    - 1783428170_524189696_seq9
+    - 1783428247_623807488_seq1
+    - 1783428275_723442176_seq7
+    - 1783428278_023463424_seq8
+    - 1783428306_319403264_seq10
+  capture_batch_b:
+    split: development
+    fold: 1
+    snapshots:
+    - 1783428498_520086272_seq3
+    - 1783428548_719285504_seq11
+    - 1783428549_619338496_seq1
+    - 1783428995_118905856_seq1
+    - 1783428997_818953216_seq3
+    - 1783429000_318426368_seq7
+    - 1783429004_018360832_seq2
+    - 1783429007_018379776_seq4
+    - 1783429007_618405888_seq8
+    - 1783429041_018743040_seq2
+    - 1783429044_018652416_seq1
+    - 1783429057_917983488_seq2
+  capture_batch_c:
+    split: final
+    snapshots:
+    - 1783429281_721192192_seq2
+    - 1783429344_720968448_seq6
+    - 1783429345_020967424_seq4
+  capture_batch_d:
+    split: final
+    snapshots:
+    - 1783431798_015547904_seq9
