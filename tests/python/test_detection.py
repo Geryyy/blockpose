@@ -15,11 +15,15 @@ from blockpose.detection import (
     GroundPlane,
     HypothesisEvidence,
     Observability,
+    PlanePatch,
     SensorContext,
     _make_hypothesis,
+    _proposal_size_first_key,
     _remove_ground,
+    _select_conflict_alternatives,
     _select_hypotheses,
     _split_connected_region,
+    _split_plane_patch_in_plane,
     _synthesize_pose,
     _validate_sensor_context,
     detect_blocks,
@@ -29,6 +33,7 @@ from blockpose.detection import (
 )
 from blockpose.evaluate import evaluate, rotation_error_deg
 from blockpose.io import load_snapshot
+from blockpose.pose import BlockPose
 from blockpose.snapshot_exclusions import load_snapshot_exclusions
 from blockpose.synth import BlockSpec, ClutterParams, SynthParams, generate_scene
 from conftest import snapshot_with_ground_truth
@@ -36,6 +41,50 @@ from conftest import snapshot_with_ground_truth
 REPO_ROOT = Path(__file__).parent.parent.parent
 SNAPSHOTS_DIR = REPO_ROOT / "data" / "registration_snapshots"
 TRANSFORM_CONFIG = REPO_ROOT / "config" / "transforms_pzs100_initial_pose_1.yaml"
+
+
+def test_in_plane_patch_split_is_deterministic_and_retains_unsplit_alternative() -> None:
+    grid = np.array(
+        [[x, y, 0.6] for x in np.linspace(0.0, 0.4, 8) for y in np.linspace(0.0, 0.4, 8)]
+    )
+    points = np.vstack((grid, grid + np.array([0.8, 0.0, 0.0])))
+    patch = PlanePatch(np.array([0.0, 0.0, 1.0]), points.mean(axis=0), points, 0.0)
+    params = DetectionParams(min_inliers=20)
+    first = _split_plane_patch_in_plane(patch, params)
+    second = _split_plane_patch_in_plane(patch, params)
+    assert [len(item.points) for item in first] == [128, 64, 64]
+    assert [item.centroid.tolist() for item in first] == [item.centroid.tolist() for item in second]
+
+
+def test_conflict_alternatives_are_bounded() -> None:
+    evidence = HypothesisEvidence(100, 0.0, 0.8)
+    hypotheses = [
+        CuboidHypothesis(BlockPose(np.array([offset, 0.0, 0.3]), np.eye(3)), evidence)
+        for offset in (0.0, 0.05, 0.10)
+    ]
+    selected = _select_conflict_alternatives(hypotheses, 2)
+    assert len(selected) == 2
+    with pytest.raises(ValueError, match="at least one"):
+        _select_conflict_alternatives(hypotheses, 0)
+
+
+def test_proposal_order_is_deterministic_size_first_then_compatibility() -> None:
+    params = DetectionParams()
+    compatible = np.array([[0.0, 0.0, 0.0], [0.9, 0.0, 0.0], [0.0, 0.6, 0.0], [0.9, 0.6, 0.6]])
+    incompatible = np.array([[0.0, 0.0, 0.0], [0.2, 0.0, 0.0], [0.0, 0.2, 0.0], [0.2, 0.2, 0.2]])
+    larger_but_incompatible = np.vstack((incompatible, [[0.1, 0.1, 0.1]]))
+    proposals = [compatible, larger_but_incompatible, incompatible]
+    first = sorted(proposals, key=lambda points: _proposal_size_first_key(points, params))
+    second = sorted(
+        reversed(proposals), key=lambda points: _proposal_size_first_key(points, params)
+    )
+    assert first[0] is larger_but_incompatible
+    assert first[1] is compatible
+    assert first[2] is incompatible
+    assert second[0] is larger_but_incompatible
+    assert second[1] is compatible
+    assert second[2] is incompatible
+
 
 _EXCLUDED_SNAPSHOTS = load_snapshot_exclusions(SNAPSHOTS_DIR)
 SNAPSHOT_DIRS = sorted(
@@ -322,9 +371,7 @@ def test_visibility_score_prefers_true_cuboid_and_wrong_height_loses() -> None:
     shifted = _make_hypothesis(
         shifted_pose, np.array([0.0, 0.25, 0.9]), 100, ground, params, context
     )
-    wrong = _make_hypothesis(
-        wrong_height, np.array([0.0, 0.0, 1.15]), 100, ground, params, context
-    )
+    wrong = _make_hypothesis(wrong_height, np.array([0.0, 0.0, 1.15]), 100, ground, params, context)
     assert true.evidence.score > shifted.evidence.score
     assert true.evidence.score > wrong.evidence.score
 
@@ -351,9 +398,7 @@ def test_hidden_faces_are_neutral_and_free_space_is_penalized() -> None:
 def test_rich_sample_entry_point_recovers_far_case() -> None:
     from blockpose.scenario_matrix import generate_scenario_matrix
 
-    _, sample = next(
-        item for item in generate_scenario_matrix(0) if item[0].name == "isolated_far"
-    )
+    _, sample = next(item for item in generate_scenario_matrix(0) if item[0].name == "isolated_far")
     detections = detect_scene_sample(sample, DetectionParams(multiscale_proposals=True))
     result = evaluate(detections, sample.ground_truth)
     assert result.recall == 1.0
@@ -495,6 +540,7 @@ def test_detailed_api_reports_stable_plane_work_diagnostics_for_empty_input() ->
         "plane_trials_evaluated": 0,
         "plane_valid_trials": 0,
         "raw_hypotheses": 0,
+        "refinement_candidates": 0,
         "selected_hypotheses": 0,
     }
     expected_timings = {

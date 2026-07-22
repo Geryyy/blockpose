@@ -90,6 +90,10 @@ class DetectionParams:
     proposal_max_components: int = 8
     proposal_max_points: int = 30000
     multiscale_proposals: bool = False
+    # Keep a small, diverse set of mutually-exclusive initializations through
+    # refinement.  Refinement can reverse the ordering of two close proposals,
+    # so suppressing all but one before it runs loses otherwise valid blocks.
+    conflict_alternatives: int = 1
 
 
 @dataclass(frozen=True)
@@ -121,9 +125,9 @@ class LocalGroundModel:
             return -(query[:, :2] @ self.normal[:2] + self.offset) / self.normal[2]
         _, indices = cKDTree(self.cell_xy).query(query[:, :2], k=1)
         fallback = -(query[:, :2] @ self.normal[:2] + self.offset) / self.normal[2]
-        cell_fallback = -(
-            self.cell_xy[np.asarray(indices)] @ self.normal[:2] + self.offset
-        ) / self.normal[2]
+        cell_fallback = (
+            -(self.cell_xy[np.asarray(indices)] @ self.normal[:2] + self.offset) / self.normal[2]
+        )
         local = fallback + self.cell_z[np.asarray(indices)] - cell_fallback
         # A remote cell is not local evidence; use the stable planar fallback.
         distance = np.linalg.norm(query[:, :2] - self.cell_xy[np.asarray(indices)], axis=1)
@@ -326,9 +330,7 @@ def visibility_evidence(
             if not np.any(valid):
                 continue
             incident_rays += int(np.count_nonzero(valid))
-            supported = int(
-                np.count_nonzero(np.abs(ranges[valid] - distance[valid]) <= tolerance)
-            )
+            supported = int(np.count_nonzero(np.abs(ranges[valid] - distance[valid]) <= tolerance))
             supported_rays += supported
             if supported:
                 covered_faces += 1
@@ -369,9 +371,7 @@ def _voxel_downsample(pts: np.ndarray, voxel_size: float) -> np.ndarray:
     """Downsample (N, 3) float64 points using Open3D tensor API. Returns (M, 3) float64."""
     import open3d.core as o3c
 
-    pcd = o3d.t.geometry.PointCloud(
-        o3c.Tensor(pts.astype(np.float32), dtype=o3c.float32)
-    )
+    pcd = o3d.t.geometry.PointCloud(o3c.Tensor(pts.astype(np.float32), dtype=o3c.float32))
     down = pcd.voxel_down_sample(voxel_size)
     result = down.point.positions.numpy().astype(np.float64)
     return result[np.lexsort((result[:, 2], result[:, 1], result[:, 0]))]
@@ -389,9 +389,7 @@ def _remove_ground(
     # Coarse downsample for fast RANSAC
     import open3d.core as o3c
 
-    pcd_coarse = o3d.t.geometry.PointCloud(
-        o3c.Tensor(pts.astype(np.float32), dtype=o3c.float32)
-    )
+    pcd_coarse = o3d.t.geometry.PointCloud(o3c.Tensor(pts.astype(np.float32), dtype=o3c.float32))
     pcd_coarse = pcd_coarse.voxel_down_sample(0.1)
     coarse_pts = pcd_coarse.point.positions.numpy().astype(np.float64)
     # Open3D's voxel downsample does not guarantee output ordering, and seeded
@@ -569,7 +567,7 @@ def _cluster_points_multiscale(
             if len(expanded) <= params.cluster_max_size:
                 cluster = expanded
         clusters.append((cluster, scale))
-    clusters.sort(key=lambda item: (-len(item[0]), item[1], *item[0].mean(axis=0)))
+    clusters.sort(key=lambda item: (*_proposal_size_first_key(item[0], params), item[1]))
     return clusters[: params.proposal_max_components]
 
 
@@ -619,8 +617,31 @@ def _cluster_points(
             ):
                 continue
             clusters.append((cluster, scale))
-    clusters.sort(key=lambda item: (-len(item[0]), *item[0].mean(axis=0)))
+    clusters.sort(key=lambda item: _proposal_size_first_key(item[0], params))
     return clusters[: params.proposal_max_components]
+
+
+def _proposal_size_first_key(
+    cluster: np.ndarray, params: DetectionParams
+) -> tuple[int, float, float, float, float]:
+    """Size-first deterministic ordering before the plane-fit work cap.
+
+    Point count remains primary because a real-data ablation of compatibility-
+    first ordering regressed recovery. For equal-sized components, prefer
+    footprints/heights compatible with one or a short row of canonical blocks.
+    """
+    extent = np.ptp(cluster, axis=0)
+    dims = np.asarray(params.block_dims)
+    xy_errors = []
+    for axis in range(2):
+        width = dims[axis]
+        count = np.clip(np.rint(extent[axis] / width), 1, 8)
+        xy_errors.append(abs(extent[axis] - count * width) / width)
+    height_count = np.clip(np.rint(extent[2] / dims[2]), 1, 6)
+    height_error = abs(extent[2] - height_count * dims[2]) / dims[2]
+    compatibility = float(sum(xy_errors) + 0.5 * height_error)
+    center = cluster.mean(axis=0)
+    return (-len(cluster), compatibility, *center.tolist())
 
 
 def _fit_planes(
@@ -673,11 +694,64 @@ def _fit_planes(
         centroid = inliers.mean(axis=0)
         residuals = (inliers - centroid) @ normal
         residual_mad = float(np.median(np.abs(residuals - np.median(residuals))))
-        planes.append(PlanePatch(normal, centroid, inliers, residual_mad))
+        patch = PlanePatch(normal, centroid, inliers, residual_mad)
+        planes.extend(_split_plane_patch_in_plane(patch, params))
         mask = np.ones(len(remaining), dtype=np.bool_)
         mask[inlier_idx] = False
         remaining = remaining[mask]
     return planes, counts, timings
+
+
+def _split_plane_patch_in_plane(patch: PlanePatch, params: DetectionParams) -> list[PlanePatch]:
+    """Split disconnected islands of a RANSAC plane deterministically.
+
+    RANSAC groups every coplanar top in a connected proposal into one consensus.
+    Connectivity in the plane (rather than XYZ bins tied to world axes) restores
+    separate observable tops.  The unsplit patch is retained as an alternative
+    so sparse sampling cannot destroy a valid top-only initialization.
+    """
+    if len(patch.points) < 2 * params.min_inliers:
+        return [patch]
+    normal = patch.normal / np.linalg.norm(patch.normal)
+    seed = np.array([1.0, 0.0, 0.0])
+    if abs(float(seed @ normal)) > 0.9:
+        seed = np.array([0.0, 1.0, 0.0])
+    first = seed - float(seed @ normal) * normal
+    first /= np.linalg.norm(first)
+    second = np.cross(normal, first)
+    coordinates = np.column_stack((patch.points @ first, patch.points @ second))
+    tree = cKDTree(coordinates)
+    parent = np.arange(len(coordinates))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = int(parent[index])
+        return index
+
+    radius = max(params.voxel_size * 2.5, params.dbscan_eps * 1.25)
+    for left, right in sorted(tree.query_pairs(radius)):
+        root_left, root_right = find(left), find(right)
+        if root_left != root_right:
+            parent[max(root_left, root_right)] = min(root_left, root_right)
+    groups: dict[int, list[int]] = {}
+    for index in range(len(coordinates)):
+        groups.setdefault(find(index), []).append(index)
+    components = [
+        np.asarray(indices, dtype=int)
+        for _, indices in sorted(groups.items())
+        if len(indices) >= params.min_inliers
+    ]
+    if len(components) < 2:
+        return [patch]
+    result = [patch]
+    for indices in components:
+        points = patch.points[indices]
+        centroid = points.mean(axis=0)
+        residuals = (points - centroid) @ normal
+        mad = float(np.median(np.abs(residuals - np.median(residuals))))
+        result.append(PlanePatch(normal.copy(), centroid, points, mad))
+    return result
 
 
 def _classify_planes(
@@ -864,9 +938,7 @@ def _evidence_features(evidence: HypothesisEvidence) -> dict[str, float]:
         "support": min(evidence.support_points / 400.0, 1.0),
         "height_consistency": max(0.0, 1.0 - evidence.top_height_error_m / 0.2),
         "visible_face_coverage": evidence.covered_visible_faces / expected if expected else 0.0,
-        "free_space_consistency": (
-            evidence.supported_rays / total_rays if total_rays else 0.0
-        ),
+        "free_space_consistency": (evidence.supported_rays / total_rays if total_rays else 0.0),
         # What fraction of the beams aimed at this cuboid actually terminate on
         # it. Distinguishes a well-placed hypothesis from a shifted one even when
         # both have full face coverage and no free-space violations.
@@ -1002,12 +1074,59 @@ def _select_hypotheses(
     selected: list[CuboidHypothesis] = []
     for candidate in ordered:
         conflict = any(
-            _boxes_overlap(candidate.pose, accepted.pose, overlap_shrink)
-            for accepted in selected
+            _boxes_overlap(candidate.pose, accepted.pose, overlap_shrink) for accepted in selected
         )
         if not conflict:
             selected.append(candidate)
     return selected
+
+
+def _select_conflict_alternatives(
+    hypotheses: list[CuboidHypothesis], limit: int, overlap_shrink: float = 0.08
+) -> list[CuboidHypothesis]:
+    """Keep bounded diverse alternatives from each overlap conflict group."""
+    if limit < 1:
+        raise ValueError("conflict_alternatives must be at least one")
+    ordered = sorted(
+        hypotheses,
+        key=lambda h: (-h.evidence.score, *np.round(h.pose.position, 9).tolist()),
+    )
+    groups: list[list[CuboidHypothesis]] = []
+    for candidate in ordered:
+        overlapping = [
+            index
+            for index, group in enumerate(groups)
+            if any(_boxes_overlap(candidate.pose, member.pose, overlap_shrink) for member in group)
+        ]
+        if not overlapping:
+            groups.append([candidate])
+            continue
+        destination = overlapping[0]
+        groups[destination].append(candidate)
+        for index in reversed(overlapping[1:]):
+            groups[destination].extend(groups.pop(index))
+    selected: list[CuboidHypothesis] = []
+    for group in groups:
+        # Avoid spending the alternative budget on numerically identical poses.
+        diverse: list[CuboidHypothesis] = []
+        for candidate in group:
+            if any(
+                np.linalg.norm(candidate.pose.position - prior.pose.position) < 0.02
+                and rotation_error_between(candidate.pose.rotation, prior.pose.rotation) < 2.0
+                for prior in diverse
+            ):
+                continue
+            diverse.append(candidate)
+            if len(diverse) == limit:
+                break
+        selected.extend(diverse)
+    return selected
+
+
+def rotation_error_between(first: np.ndarray, second: np.ndarray) -> float:
+    """Unsigned SO(3) angle in degrees for internal proposal de-duplication."""
+    cosine = np.clip((np.trace(first.T @ second) - 1.0) / 2.0, -1.0, 1.0)
+    return float(np.degrees(np.arccos(cosine)))
 
 
 def _synthesize_pose(
@@ -1094,9 +1213,7 @@ def _synthesize_pose_top_only(
     half_height = block_dims[2] / 2.0
     position = top_centroid - z_world * half_height
 
-    return BlockPose(
-        position=position, rotation=R, confidence=0.5, source="top_plane_only"
-    )
+    return BlockPose(position=position, rotation=R, confidence=0.5, source="top_plane_only")
 
 
 def _detect_blocks_impl(
@@ -1147,6 +1264,7 @@ def _detect_blocks_impl(
         "plane_trials_evaluated": 0,
         "plane_valid_trials": 0,
         "raw_hypotheses": 0,
+        "refinement_candidates": 0,
         "selected_hypotheses": 0,
     }
 
@@ -1214,9 +1332,7 @@ def _detect_blocks_impl(
         split_started = perf_counter()
         regions = _split_connected_region(cluster, cluster_params)
         timings["region_split"] += (perf_counter() - split_started) * 1000.0
-        if len(regions) == 1 and np.any(
-            np.ptp(cluster, axis=0)[:2] > params.cluster_max_extent_xy
-        ):
+        if len(regions) == 1 and np.any(np.ptp(cluster, axis=0)[:2] > params.cluster_max_extent_xy):
             # A large connected footprint without internal boundary evidence is
             # an elongated object, not a license to tile it with known boxes.
             continue
@@ -1279,7 +1395,8 @@ def _detect_blocks_impl(
 
     selection_started = perf_counter()
     hypotheses = [h for h in hypotheses if h.evidence.score >= params.min_score]
-    selected = _select_hypotheses(hypotheses)
+    selected = _select_conflict_alternatives(hypotheses, params.conflict_alternatives)
+    counts["refinement_candidates"] = len(selected)
     timings["selection"] = (perf_counter() - selection_started) * 1000.0
 
     if params.refine_enabled and selected:
@@ -1317,10 +1434,11 @@ def _detect_blocks_impl(
     selected = [
         hypothesis
         for hypothesis in selected
-        if 0.0
-        <= float(ground.height(hypothesis.pose.position))
-        <= params.cluster_max_center_z
+        if 0.0 <= float(ground.height(hypothesis.pose.position)) <= params.cluster_max_center_z
     ]
+    # Re-score after refinement, then make the final exclusivity decision.  A
+    # pre-refinement greedy winner is often the worse local cuboid fit.
+    selected = _select_hypotheses(selected)
     selected.sort(key=lambda hypothesis: hypothesis.pose.position[2], reverse=True)
     counts["selected_hypotheses"] = len(selected)
     timings["total"] = (perf_counter() - started) * 1000.0
@@ -1372,9 +1490,7 @@ def detect_blocks(
     sensor_context: SensorContext | None = None,
 ) -> list[BlockPose]:
     """Compatibility API returning only poses, sorted by descending world Z."""
-    return detect_blocks_detailed(
-        pts_world, params, sensor_context=sensor_context
-    ).poses
+    return detect_blocks_detailed(pts_world, params, sensor_context=sensor_context).poses
 
 
 def detect_scene_sample(sample, params: DetectionParams | None = None) -> list[BlockPose]:

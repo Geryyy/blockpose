@@ -138,10 +138,16 @@ def evaluate_snapshot(snap_dir: Path, config_path: Path, params: DetectionParams
     )
     annotation_path = snap_dir / "annotations.yaml"
     annotations = load_annotations(annotation_path) if annotation_path.is_file() else None
-    targets = (
-        [target.pose for target in annotations.targets if target.is_evaluation_target]
+    evaluation_targets = (
+        [target for target in annotations.targets if target.is_evaluation_target]
         if annotations
-        else registrations
+        else []
+    )
+    targets = [target.pose for target in evaluation_targets] if annotations else registrations
+    target_ids = (
+        [target.id for target in evaluation_targets]
+        if annotations
+        else [f"registration_{index}" for index in range(len(registrations))]
     )
     ignored_targets = (
         [
@@ -178,11 +184,16 @@ def evaluate_snapshot(snap_dir: Path, config_path: Path, params: DetectionParams
         ]
         detections = [pose for pose, keep in zip(detections, inside, strict=True) if keep]
         diagnostics = [diag for diag, keep in zip(diagnostics, inside, strict=True) if keep]
-        targets = [
-            pose
+        target_inside = [
+            bool(
+                np.all(pose.position >= annotations.roi_min)
+                and np.all(pose.position <= annotations.roi_max)
+            )
             for pose in targets
-            if np.all(pose.position >= annotations.roi_min)
-            and np.all(pose.position <= annotations.roi_max)
+        ]
+        targets = [pose for pose, keep in zip(targets, target_inside, strict=True) if keep]
+        target_ids = [
+            target_id for target_id, keep in zip(target_ids, target_inside, strict=True) if keep
         ]
         ignored_targets = [
             pose
@@ -201,9 +212,7 @@ def evaluate_snapshot(snap_dir: Path, config_path: Path, params: DetectionParams
                 for index, pose in enumerate(detections)
                 if index not in active_detection_indices
             ]
-            ignored_pairs = _compatible_match(
-                [pose for _, pose in eligible], ignored_targets, 0.5
-            )
+            ignored_pairs = _compatible_match([pose for _, pose in eligible], ignored_targets, 0.5)
             ignored_detection_indices = {eligible[index][0] for index, _ in ignored_pairs}
             suppressed_ignored = len(ignored_detection_indices)
             detections = [
@@ -230,16 +239,58 @@ def evaluate_snapshot(snap_dir: Path, config_path: Path, params: DetectionParams
 
     detection_records = []
     for index, (pose, diag) in enumerate(zip(detections, diagnostics, strict=True)):
-        detection_records.append({
-            "index": index,
-            "pose": _pose_dict(pose),
-            "score": diag.evidence.score,
-            "observability": diag.observability.value,
-            "features": diag.features,
-            "proposal_scale_m": diag.proposal_scale_m,
-            "support_height_m": diag.support_height_m,
-            "matched_target_index": next((j for i, j in pairs if i == index), None),
-        })
+        detection_records.append(
+            {
+                "index": index,
+                "pose": _pose_dict(pose),
+                "score": diag.evidence.score,
+                "observability": diag.observability.value,
+                "features": diag.features,
+                "proposal_scale_m": diag.proposal_scale_m,
+                "support_height_m": diag.support_height_m,
+                "matched_target_index": next((j for i, j in pairs if i == index), None),
+            }
+        )
+
+    # Evaluation-only target tracing: distinguish a localization miss from a
+    # target for which inference returned no nearby final hypothesis. This does
+    # not expose or condition inference on ground truth.
+    target_records = []
+    for index, (target_id, target) in enumerate(zip(target_ids, targets, strict=True)):
+        distances = [translation_error(detection, target) for detection in detections]
+        nearest_index = int(np.argmin(distances)) if distances else None
+        nearest_distance = distances[nearest_index] if nearest_index is not None else None
+        matched_detection_index = next((i for i, j in pairs if j == index), None)
+        target_records.append(
+            {
+                "index": index,
+                "id": target_id,
+                "pose": _pose_dict(target),
+                "nearest_final_detection_index": nearest_index,
+                "nearest_final_distance_m": nearest_distance,
+                "matched_final_detection_index": matched_detection_index,
+                "matched_translation_error_m": (
+                    translation_error(detections[matched_detection_index], target)
+                    if matched_detection_index is not None
+                    else None
+                ),
+                "matched_rotation_error_deg": (
+                    rotation_error_deg(detections[matched_detection_index], target)
+                    if matched_detection_index is not None
+                    else None
+                ),
+                "matched_at_5cm": any(
+                    j == index for _, j in _compatible_match(detections, targets, 0.05)
+                ),
+                "matched_at_10cm": any(
+                    j == index for _, j in _compatible_match(detections, targets, 0.10)
+                ),
+                "matched_at_25cm": any(
+                    j == index for _, j in _compatible_match(detections, targets, 0.25)
+                ),
+                "matched_at_50cm": any(j == index for _, j in pairs),
+            }
+        )
 
     return {
         "snapshot": snap_dir.name,
@@ -267,6 +318,7 @@ def evaluate_snapshot(snap_dir: Path, config_path: Path, params: DetectionParams
         "detector_stage_counts": result.stage_counts,
         "detector_stage_timings_ms": result.stage_timings_ms,
         "detections": detection_records,
+        "target_diagnostics": target_records,
     }
 
 
@@ -304,7 +356,7 @@ def run_suite(
         matched = sum(metric["match_curves"][label]["matched"] for metric in per_snapshot)
         match_curves[label] = {
             "matched": matched,
-        "known_target_recovery": matched / total_targets if total_targets else None,
+            "known_target_recovery": matched / total_targets if total_targets else None,
         }
     try:
         git_revision = subprocess.run(
@@ -347,9 +399,7 @@ def run_suite(
         "recall": complete_matches / complete_targets if complete_targets else None,
         "false_positives": sum(m["false_positives"] or 0 for m in complete) if complete else None,
         "unknown_detections": sum(
-            m["unknown_detections"] or 0
-            for m in per_snapshot
-            if not m["annotation_complete"]
+            m["unknown_detections"] or 0 for m in per_snapshot if not m["annotation_complete"]
         ),
         "n_matched_pose_errors": len(t_errors),
         "translation_p50_m": _percentile(t_errors, 50),

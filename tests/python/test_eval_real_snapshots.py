@@ -53,8 +53,7 @@ def test_run_suite_reports_exclusions_and_survives_bad_snapshot(
     for name in ("good", "bad", "excluded"):
         (tmp_path / name / "tf.yaml").touch()
     (tmp_path / "snapshot_exclusions.yaml").write_text(
-        "schema_version: 1\nexcluded_snapshots:\n"
-        "  - {snapshot: excluded, reason: unusable}\n"
+        "schema_version: 1\nexcluded_snapshots:\n  - {snapshot: excluded, reason: unusable}\n"
     )
 
     def evaluate(path, *_args):
@@ -114,8 +113,10 @@ def test_run_suite_produces_well_formed_metrics() -> None:
     assert metrics["n_snapshots_scored"] == len(metrics["per_snapshot"])
     assert metrics["total_reference_targets"] >= 0
     assert metrics["total_detected"] >= 0
-    assert 0 <= metrics["total_matched"] <= min(
-        metrics["total_reference_targets"], metrics["total_detected"]
+    assert (
+        0
+        <= metrics["total_matched"]
+        <= min(metrics["total_reference_targets"], metrics["total_detected"])
     )
     if metrics["n_complete_annotations"]:
         assert metrics["precision"] is not None
@@ -157,9 +158,7 @@ def test_complete_roi_suppresses_ignored_detection_before_fp_metrics(
             AnnotationTarget("ignored", ignored, "manual", ignore_reason="occluded"),
         ),
     )
-    diagnostic = DetectionDiagnostics(
-        HypothesisEvidence(100, 0.0, 0.9), Observability.FULL, {}
-    )
+    diagnostic = DetectionDiagnostics(HypothesisEvidence(100, 0.0, 0.9), Observability.FULL, {})
     monkeypatch.setattr(eval_real_snapshots, "load_annotations", lambda _path: annotations)
     monkeypatch.setattr(
         eval_real_snapshots,
@@ -187,3 +186,19 @@ def test_complete_roi_suppresses_ignored_detection_before_fp_metrics(
     assert result["suppressed_ignored_detections"] == 1
     assert result["false_positives"] == 0
     assert result["exact_count"] is True
+    assert result["target_diagnostics"] == [
+        {
+            "index": 0,
+            "id": "active",
+            "pose": eval_real_snapshots._pose_dict(active),
+            "nearest_final_detection_index": 0,
+            "nearest_final_distance_m": 0.0,
+            "matched_final_detection_index": 0,
+            "matched_translation_error_m": 0.0,
+            "matched_rotation_error_deg": 0.0,
+            "matched_at_5cm": True,
+            "matched_at_10cm": True,
+            "matched_at_25cm": True,
+            "matched_at_50cm": True,
+        }
+    ]
