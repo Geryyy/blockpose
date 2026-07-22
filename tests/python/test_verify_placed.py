@@ -301,6 +301,100 @@ def test_single_face_cannot_be_reported_as_measurement() -> None:
     assert result.covariance is None
 
 
+def test_two_dense_faces_admit_small_partial_correction() -> None:
+    """Two reliable faces can measure five DoF despite one translation null."""
+    prior = BlockPose(np.array([0.0, 0.0, 0.3]), np.eye(3))
+    points = _face_cloud(0.015)
+    # Real scans have face-normal noise. It makes the global 30% objective
+    # gate intentionally fail, while both physical faces still agree on a
+    # small X correction.
+    rng = np.random.default_rng(7)
+    points[:225, 0] += rng.normal(0.0, 0.01, 225)
+    points[225:, 2] += rng.normal(0.0, 0.01, 225)
+
+    started = time.perf_counter()
+    result = verify_placed_blocks(points, [prior])[0]
+    runtime_ms = (time.perf_counter() - started) * 1000.0
+    permutation = np.random.default_rng(8).permutation(len(points))
+    permuted = verify_placed_blocks(points[permutation], [prior])[0]
+
+    assert result.status == PlacedStatus.CONFIRMED
+    assert result.observability == PlacedObservability.PARTIALLY_CONSTRAINED
+    assert "y" in result.unconstrained_directions
+    assert abs(result.pose.position[0] - 0.015) <= 0.003
+    assert result.diagnostics["correction_acceptance"] == "two_face_partial_geometry"
+    assert result.diagnostics["reliable_partial_face_count"] == 2
+    assert result.diagnostics["face_support_points"]["x-"] >= 100
+    assert result.diagnostics["face_support_points"]["z+"] >= 100
+    assert runtime_ms <= 250.0
+    np.testing.assert_allclose(permuted.pose.position, result.pose.position, atol=1e-12)
+    np.testing.assert_allclose(permuted.pose.rotation, result.pose.rotation, atol=1e-12)
+    assert permuted.status == result.status
+    assert permuted.observability == result.observability
+    assert permuted.unconstrained_directions == result.unconstrained_directions
+
+
+def test_two_face_partial_correction_rejects_weak_or_imbalanced_evidence() -> None:
+    prior = BlockPose(np.array([0.0, 0.0, 0.3]), np.eye(3))
+
+    def noisy_two_face_cloud(shift_x: float) -> np.ndarray:
+        points = _face_cloud(shift_x)
+        rng = np.random.default_rng(7)
+        points[:225, 0] += rng.normal(0.0, 0.01, 225)
+        points[225:, 2] += rng.normal(0.0, 0.01, 225)
+        return points
+
+    weak = verify_placed_blocks(noisy_two_face_cloud(0.010), [prior])[0]
+    assert weak.pose is prior
+    assert weak.diagnostics["correction_acceptance"] == "insufficient_residual_gain"
+
+    # One very dense return patch plus one barely sufficient face is not two
+    # independent measurements. It must not use the relaxed partial gate.
+    noisy = noisy_two_face_cloud(0.010)
+    imbalanced_points = np.vstack((np.repeat(noisy[:225], 5, axis=0), noisy[225:325]))
+    imbalanced = verify_placed_blocks(imbalanced_points, [prior])[0]
+    assert imbalanced.pose is prior
+    assert imbalanced.observability == PlacedObservability.PARTIALLY_CONSTRAINED
+    assert imbalanced.unconstrained_directions == ("y",)
+    assert imbalanced.diagnostics["reliable_partial_face_count"] == 2
+    assert imbalanced.diagnostics["reliable_partial_face_imbalance"] > 5.0
+    assert imbalanced.diagnostics["correction_acceptance"] == "insufficient_residual_gain"
+    # All other partial-correction predicates hold. Relaxing only the
+    # imbalance limit admits the candidate, proving the safety rejection above
+    # is caused by the independent-face balance check rather than weak gain.
+    without_balance_guard = verify_placed_blocks(
+        imbalanced_points,
+        [prior],
+        params=VerifyPlacedParams(partial_correction_max_face_imbalance=20.0),
+    )[0]
+    assert without_balance_guard.diagnostics["correction_acceptance"] == (
+        "two_face_partial_geometry"
+    )
+    assert without_balance_guard.pose is not prior
+
+
+def test_partial_correction_parameters_are_validated() -> None:
+    prior = BlockPose(np.array([0.0, 0.0, 0.3]), np.eye(3))
+    with pytest.raises(ValueError, match="partial correction thresholds"):
+        verify_placed_blocks(
+            _face_cloud(),
+            [prior],
+            params=VerifyPlacedParams(partial_correction_min_relative_improvement=0.0),
+        )
+    with pytest.raises(ValueError, match="partial correction thresholds"):
+        verify_placed_blocks(
+            _face_cloud(),
+            [prior],
+            params=VerifyPlacedParams(partial_correction_max_face_imbalance=0.5),
+        )
+    with pytest.raises(ValueError, match="verification count parameters"):
+        verify_placed_blocks(
+            _face_cloud(),
+            [prior],
+            params=VerifyPlacedParams(partial_correction_min_face_points=2),
+        )
+
+
 def test_beyond_window_geometry_is_not_clamped_to_deviated() -> None:
     prior = BlockPose(np.array([0.0, 0.0, 0.3]), np.eye(3))
     result = verify_placed_blocks(_face_cloud(0.15), [prior])[0]

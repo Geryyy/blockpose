@@ -1,0 +1,44 @@
+schema_version: 1
+identity: verify_placed_v1_baseline
+git_revision: c9f069d
+source_kind: recorded_legacy_evidence
+original_runner: tools/eval_verify_placed_snapshots.py
+original_command: uv run python tools/eval_verify_placed_snapshots.py --output /tmp/verify_before.json
+dataset_identity: data/registration_snapshots with config/snapshot_plan_priors.yaml (15 LOSO targets)
+parameters: VerifyPlacedParams defaults; independent direct verifier; no course constraints accepted
+target_level_errors_versioned: false
+reproducible_with_current_code: false
+notes: >-
+  Aggregate evidence recorded from a clean c9f069d worktree. The original
+  target-level JSON was not versioned, so these are legacy aggregate comparison
+  values, not independently reproducible target-level ground truth. Do not
+  regenerate with the current candidate implementation and call it a baseline.
+target_keys:
+  - 1783427923_718112512_seq5/manual_0
+  - 1783428170_524189696_seq9/manual_0
+  - 1783428170_524189696_seq9/manual_2
+  - 1783428247_623807488_seq1/manual_1
+  - 1783428275_723442176_seq7/manual_0
+  - 1783428498_520086272_seq3/rgb_candidate_1
+  - 1783428548_719285504_seq11/rgb_candidate_1
+  - 1783428548_719285504_seq11/rgb_candidate_2
+  - 1783428549_619338496_seq1/block_0
+  - 1783428549_619338496_seq1/block_1
+  - 1783428995_118905856_seq1/manual_0
+  - 1783429344_720968448_seq6/rgb_candidate_2
+  - 1783429344_720968448_seq6/manual_0
+  - 1783431798_015547904_seq9/manual_0
+  - 1783431798_015547904_seq9/manual_1
+metrics:
+  all_targets:
+    target_count: 15
+    mean_translation_m: 0.021807558718617216
+    mean_rotation_deg: 2.451967669575235
+    p95_translation_m: 0.04637385803423495
+    p95_rotation_deg: 4.545344906106746
+  precise_targets:
+    target_count: 14
+    mean_translation_m: 0.019859263524008114
+    mean_rotation_deg: 2.1260415273740243
+    p95_translation_m: 0.04446061915287534
+    p95_rotation_deg: 3.4432942385595

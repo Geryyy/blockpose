@@ -53,6 +53,15 @@ class VerifyPlacedParams:
     missing_min_rays: int = 3
     neighbor_margin_m: float = 0.015
     max_nfev: int = 80
+    # A two-face observation has one translation null direction, but can still
+    # measure the other five pose components.  The global residual-improvement
+    # gate below is intentionally strict for a full 6-DoF correction.  This
+    # narrower path permits a small, data-supported partial correction only
+    # when both independently observed faces have substantial support.
+    partial_correction_min_face_points: int = 100
+    partial_correction_min_improvement_m: float = 0.002
+    partial_correction_min_relative_improvement: float = 0.15
+    partial_correction_max_face_imbalance: float = 5.0
     # Shared-course yaw is deliberately opt-in while its real-data acceptance
     # gates are being collected.  It never changes the default verifier path.
     enable_course_yaw_refinement: bool = False
@@ -198,8 +207,18 @@ def _validate_params(params: VerifyPlacedParams) -> None:
         or params.missing_min_rays < 1
         or params.max_nfev < 1
         or params.course_yaw_max_input_points < 1
+        or params.partial_correction_min_face_points < 3
     ):
         raise ValueError("verification count parameters are invalid")
+    if (
+        not np.isfinite(params.partial_correction_min_improvement_m)
+        or params.partial_correction_min_improvement_m <= 0.0
+        or not np.isfinite(params.partial_correction_min_relative_improvement)
+        or not 0.0 < params.partial_correction_min_relative_improvement <= 1.0
+        or not np.isfinite(params.partial_correction_max_face_imbalance)
+        or params.partial_correction_max_face_imbalance < 1.0
+    ):
+        raise ValueError("partial correction thresholds are invalid")
 
 
 def _ray_entry(
@@ -414,11 +433,15 @@ def _bounded_fit(
     rotation_norm = float(np.linalg.norm(fit.x[:3]))
     outside_translation = translation_norm > params.max_translation_m + 1e-9
     outside_rotation = rotation_norm > rotation_bound + 1e-9
-    supported_faces = {
-        (int(axis), int(sign))
-        for axis, sign in zip(face_axes, face_signs, strict=True)
+    face_labels = sorted(
+        {(int(axis), int(sign)) for axis, sign in zip(face_axes, face_signs, strict=True)}
+    )
+    face_support = {
+        (axis, sign): int(np.count_nonzero((face_axes == axis) & (face_signs == sign)))
+        for axis, sign in face_labels
         if sign != 0
     }
+    supported_faces = set(face_support)
     geometry_sufficient = (
         rank >= 5
         and len(supported_faces) >= 2
@@ -430,6 +453,39 @@ def _bounded_fit(
     # Small objective gains are easily caused by clutter or mixed pixels and
     # have moved strong real priors by centimetres. Require a material gain.
     correction_supported = improvement >= max(0.002, prior_rms * 0.30)
+    # Do not relax the gate merely because two planes happen to be present:
+    # both must carry enough independent return support and the candidate must
+    # improve the raw geometric residual by an absolute and relative margin.
+    # The Jacobian rank remains five, so the result stays PartiallyConstrained
+    # and its null direction is explicitly retained in the covariance/result.
+    reliable_partial_faces = sum(
+        count >= params.partial_correction_min_face_points for count in face_support.values()
+    )
+    reliable_face_support = sorted(
+        count
+        for count in face_support.values()
+        if count >= params.partial_correction_min_face_points
+    )
+    reliable_face_imbalance = (
+        reliable_face_support[-1] / reliable_face_support[0]
+        if len(reliable_face_support) >= 2
+        else np.inf
+    )
+    partial_correction_supported = (
+        rank == 5
+        and reliable_partial_faces >= 2
+        and reliable_face_imbalance <= params.partial_correction_max_face_imbalance
+        and improvement >= params.partial_correction_min_improvement_m
+        and improvement >= prior_rms * params.partial_correction_min_relative_improvement
+    )
+    correction_reason = (
+        "strong_residual_gain"
+        if correction_supported
+        else "two_face_partial_geometry"
+        if partial_correction_supported
+        else "insufficient_residual_gain"
+    )
+    correction_supported |= partial_correction_supported
     retained_pose = pose if geometry_sufficient and correction_supported else prior
     boundaries = (
         ()
@@ -460,9 +516,16 @@ def _bounded_fit(
             "translation_correction_norm_m": translation_norm,
             "rotation_correction_norm_deg": float(np.degrees(rotation_norm)),
             "supported_face_count": len(supported_faces),
+            "face_support_points": {
+                f"{'xyz'[axis]}{'+' if sign > 0 else '-'}": count
+                for (axis, sign), count in sorted(face_support.items())
+            },
+            "reliable_partial_face_count": reliable_partial_faces,
+            "reliable_partial_face_imbalance": reliable_face_imbalance,
             "prior_residual_rms_m": prior_rms,
             "residual_improvement_m": improvement,
             "correction_supported": correction_supported,
+            "correction_acceptance": correction_reason,
             "observed_boundaries": [
                 {
                     "face_axis": item.face_axis,

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Build the checked-in detector showcase notebook deterministically."""
+"""Build the checked-in detector-mode showcase notebook deterministically.
+
+The notebook deliberately recomputes its compact frozen-snapshot diagnostic
+from a clean kernel.  Results are embedded in the notebook for review, while
+the corresponding CLI can write a machine-readable JSON artifact.
+"""
 
 from __future__ import annotations
 
@@ -30,16 +35,17 @@ def build_notebook():
     notebook.cells = [
         markdown(
             """
-# Blockpose detector — current synthetic milestone
+# Blockpose detector — frozen Python development diagnostic
 
-This is the reproducible **seed 0** status of the geometry-only detector. Green boxes are
-detections. Dashed orange boxes and all matching/error numbers are **evaluation-only labels**;
-the detector never receives synthetic instance IDs, poses, or locations.
+This notebook is the rerunnable showcase for the three production-facing
+detector modes described in `docs/PERCEPTION_PIPELINE.md`.  It runs the
+reviewed real snapshots from a clean kernel and retains its outputs.  The
+results are **development diagnostics**, not a production acceptance claim:
+all snapshots and plan fixtures are development material.
 
-Current milestone: cutoff-aware evaluation, richer raycast degradations, local ground-plane
-height, known-dimension top+side center recovery, and stratified diagnostics. Real-data
-validation (Phase D) has landed now that snapshots ship a per-capture `tf.yaml`; see the
-dedicated section below.
+The colours in real overlays are: grey LiDAR returns, dashed orange
+evaluation-only annotation, blue plan prior, and green query result.  Labels
+and annotation ROI are opened only **after** each query finishes.
 """
         ),
         code(
@@ -61,289 +67,418 @@ def find_repo_root():
 
 
 REPO_ROOT = find_repo_root()
-for path in (REPO_ROOT / "python", REPO_ROOT / "tools"):
-    if str(path) not in sys.path:
-        sys.path.insert(0, str(path))
+if str(REPO_ROOT / "python") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "python"))
 
-from blockpose.detection import DetectionParams, detect_scene_sample
-from blockpose.evaluate import evaluate
-from blockpose.pose import BLOCK_DIMS
-from blockpose.scenario_matrix import generate_scenario_matrix
-import eval_detector
+from blockpose.mode_benchmark import run_mode_benchmark
 
-SEED = 0
-CASES = {case.name: sample for case, sample in generate_scenario_matrix(SEED)}
+# These are the CLI defaults.  Changing either value makes the notebook a new
+# diagnostic run rather than the frozen default comparison.
+REPORT = run_mode_benchmark(timeout_ms=500.0, min_score=0.4)
+DISCOVERY = REPORT["modes"]["SCENE_DISCOVERY"]
+REFINE = REPORT["modes"]["REFINE_BLOCK"]
+GRIPPED = REPORT["modes"]["REFINE_GRASPED"]
+print({
+    "git_revision": REPORT["git_revision"],
+    "created_utc": REPORT["created_utc"],
+    "source_worktree_dirty": REPORT["source_worktree_dirty"],
+    "source_worktree_status": REPORT["source_worktree_status"],
+    "taxonomy_audit": REPORT["taxonomy_audit"],
+})
 """
         ),
         code(
             """
-def box_edges(pose, dims=BLOCK_DIMS):
-    half = np.asarray(dims) / 2
-    corners = np.array([[x, y, z] for x in (-half[0], half[0])
-                        for y in (-half[1], half[1]) for z in (-half[2], half[2])])
-    corners = (pose.rotation @ corners.T).T + pose.position
-    edges = [(i, j) for i in range(8) for j in range(i + 1, 8)
-             if np.count_nonzero(np.array([(i >> k) & 1 for k in range(3)]) !=
-                                 np.array([(j >> k) & 1 for k in range(3)])) == 1]
-    return [(corners[i], corners[j]) for i, j in edges]
+def box_edges(pose_record):
+    # Return world-frame cuboid edges from a serialized benchmark pose.
+    from blockpose.pose import quat_xyzw_to_rotmat
+
+    half = np.asarray(pose_record["dimensions_m"], dtype=float) / 2.0
+    corners = np.array(
+        [
+            [x, y, z]
+            for x in (-half[0], half[0])
+            for y in (-half[1], half[1])
+            for z in (-half[2], half[2])
+        ]
+    )
+    rotation = quat_xyzw_to_rotmat(np.asarray(pose_record["orientation_xyzw"], dtype=float))
+    corners = (rotation @ corners.T).T + np.asarray(pose_record["position_m"], dtype=float)
+    edges = []
+    for i in range(8):
+        for j in range(i + 1, 8):
+            if bin(i ^ j).count("1") == 1:
+                edges.append((corners[i], corners[j]))
+    return edges
 
 
 def set_equal_3d(ax, arrays, padding=0.06, min_span=0.5):
-    finite = [np.asarray(a, float).reshape(-1, 3) for a in arrays if np.asarray(a).size]
+    finite = [np.asarray(item, float).reshape(-1, 3) for item in arrays if np.asarray(item).size]
     points = np.vstack(finite) if finite else np.zeros((1, 3))
     points = points[np.all(np.isfinite(points), axis=1)]
     if not len(points):
         points = np.zeros((1, 3))
     low, high = points.min(axis=0), points.max(axis=0)
-    spans = np.maximum(high - low, min_span)
-    spans *= 1.0 + 2.0 * padding
+    span = max(float(np.max(high - low)), min_span) * (1.0 + 2.0 * padding)
     center = (low + high) / 2.0
-    ax.set_xlim(center[0] - spans[0] / 2, center[0] + spans[0] / 2)
-    ax.set_ylim(center[1] - spans[1] / 2, center[1] + spans[1] / 2)
-    ax.set_zlim(center[2] - spans[2] / 2, center[2] + spans[2] / 2)
+    ax.set_xlim(center[0] - span / 2, center[0] + span / 2)
+    ax.set_ylim(center[1] - span / 2, center[1] + span / 2)
+    ax.set_zlim(center[2] - span / 2, center[2] + span / 2)
+    spans = np.full(3, span)
     ax.set_box_aspect(spans)
 
 
-def overlay(name, title):
-    sample = CASES[name]
+def draw_pose(ax, pose, colour, style="-", label=None, plotted=None):
+    for edge_index, (start, end) in enumerate(box_edges(pose)):
+        ax.plot(*zip(start, end), color=colour, linestyle=style, linewidth=1.5,
+                label=label if edge_index == 0 else None)
+        if plotted is not None:
+            plotted.append(np.vstack([start, end]))
+"""
+        ),
+        markdown(
+            """
+## What this benchmark can and cannot establish
+
+| Mode | Inputs actually available in the frozen snapshots | What is measured |
+| --- | --- | --- |
+| `SCENE_DISCOVERY` | LiDAR XYZ + TF | ROI-scored discovery and runtime |
+| `REFINE_BLOCK` | LiDAR XYZ + LOSO priors | status, observability, pose error, runtime |
+| `REFINE_GRASPED` | no independent FK/grasp | withheld; no oracle pose |
+
+`SCENE_DISCOVERY` always sees the **full cloud**.  The complete annotation ROI
+is a scoring boundary only; it never crops or conditions inference.  Its
+500 ms budget is visible below as measured end-to-end runtime and timeout
+count, not silently hidden by aggregate accuracy.  Current repeated runs vary
+around that deadline, so the operational latency/stability gate is **failed**.
+Precision and recall describe completed-query outputs only; they are not a
+deadline-compliant operating result.
+"""
+        ),
+        code(
+            """
+def pct(value):
+    return "n/a" if value is None else f"{100.0 * value:.1f}%"
+
+
+print("SCENE_DISCOVERY (full-cloud inference; ROI used after inference for scoring)")
+print({
+    "snapshots": DISCOVERY["n_snapshots_scored"],
+    "targets": DISCOVERY["total_targets"],
+    "predictions_in_scoring_roi": DISCOVERY["total_predictions_scored_roi"],
+    "precision": pct(DISCOVERY["precision"]),
+    "recall": pct(DISCOVERY["recall"]),
+    "timeouts": f'{DISCOVERY["timeout_count"]}/{DISCOVERY["query_invocation_count"]}',
+    "end_to_end_p95_ms": round(DISCOVERY["end_to_end_runtime_p95_ms"], 1),
+    "end_to_end_max_ms": round(DISCOVERY["end_to_end_runtime_max_ms"], 1),
+})
+print("timeout/query-failure details:")
+for invocation in DISCOVERY["invocations"]:
+    if invocation["timeout"] or invocation["failures"]:
+        print({
+            "snapshot": invocation["snapshot"],
+            "timeout": invocation["timeout"],
+            "failures": invocation["failures"],
+        })
+
+fig, axes = plt.subplots(1, 2, figsize=(10, 3.6))
+times = [item["end_to_end_runtime_ms"] for item in DISCOVERY["invocations"]]
+axes[0].hist(times, bins=min(10, len(times)), color="tab:purple")
+axes[0].axvline(500.0, color="tab:red", linestyle="--", label="500 ms budget")
+axes[0].set(
+    xlabel="end-to-end query time [ms]",
+    ylabel="snapshots",
+    title="SCENE_DISCOVERY latency",
+)
+axes[0].legend()
+
+rows = DISCOVERY["records"]
+axes[1].bar(
+    range(len(rows)), [item["matched"] for item in rows], label="matched", color="tab:green"
+)
+axes[1].bar(
+    range(len(rows)),
+    [item["missed_targets"] for item in rows],
+    bottom=[item["matched"] for item in rows],
+    label="missed",
+    color="tab:orange",
+)
+axes[1].set(
+    xlabel="snapshot (sorted)", ylabel="annotated targets", title="Discovery recovery by snapshot"
+)
+axes[1].legend()
+plt.tight_layout()
+plt.show()
+"""
+        ),
+        markdown(
+            """
+### Full-cloud discovery overlay
+
+This representative successful scene is intentionally shown alongside the
+aggregate recall above: a good overlay does not erase the missed targets,
+timeouts, or false positives in the remaining snapshots.
+"""
+        ),
+        code(
+            """
+from blockpose.io import apply_transform, load_pcd, load_tf_snapshot
+
+
+def world_points(snapshot):
+    snapshot_dir = REPO_ROOT / "data" / "registration_snapshots" / snapshot
+    tf = load_tf_snapshot(snapshot_dir / "tf.yaml")
+    return apply_transform(load_pcd(snapshot_dir / "cloud.pcd"), tf.T_world_cloud)
+
+
+def discovery_overlay(snapshot):
+    record = next(item for item in DISCOVERY["records"] if item["snapshot"] == snapshot)
+    points = world_points(snapshot)
+    shown = points[::max(1, len(points) // 14000)]
+    fig = plt.figure(figsize=(8, 5.5))
+    ax = fig.add_subplot(111, projection="3d")
+    ax.scatter(shown[:, 0], shown[:, 1], shown[:, 2], s=0.25, c="0.55", alpha=0.30)
+    plotted = [shown]
+    for target in record["targets"]:
+        draw_pose(ax, target["pose"], "tab:orange", "--", "annotation", plotted)
+    for detection in record["detections"]:
+        draw_pose(ax, detection["pose"], "tab:green", "-", "discovery result", plotted)
+    set_equal_3d(ax, plotted)
+    ax.set(
+        title=f"SCENE_DISCOVERY: {snapshot}",
+        xlabel="world X [m]",
+        ylabel="world Y [m]",
+        zlabel="world Z [m]",
+    )
+    ax.view_init(elev=24, azim=-58)
+    ax.legend(loc="upper right")
+    print({key: record[key] for key in ("matched", "missed_targets", "false_positives", "status")})
+    plt.show()
+
+
+discovery_overlay("1783428498_520086272_seq3")
+"""
+        ),
+        markdown(
+            """
+## `REFINE_BLOCK`: plan-conditioned verification
+
+The current improvement is a verification facade that consumes a plan prior
+and reports a status and observability rather than pretending all blocks are
+blind-discovery cases.  The fixture prior is leave-one-snapshot-out; it is
+useful for development but not independent test data.  Every evaluated target
+is present, so the table below deliberately makes **no Missing-status accuracy
+claim**.
+"""
+        ),
+        code(
+            """
+print("REFINE_BLOCK (LOSO plan priors; present targets only)")
+print({
+    "planned_targets": REFINE["n_planned_targets"],
+    "status_counts": REFINE["observed_status_counts_on_present_targets"],
+    "observability": {
+        key: sum(row["observability"] == key for row in REFINE["records"])
+        for key in sorted({row["observability"] for row in REFINE["records"]})
+    },
+    "precise_pose_samples": REFINE["precise_pose_error_sample_count"],
+    "translation_p50_mm": round(1000 * REFINE["translation_error_p50_m"], 2),
+    "translation_p95_mm": round(1000 * REFINE["translation_error_p95_m"], 2),
+    "rotation_p50_deg": round(REFINE["rotation_error_p50_deg"], 3),
+    "rotation_p95_deg": round(REFINE["rotation_error_p95_deg"], 3),
+    "end_to_end_p95_ms": round(REFINE["end_to_end_runtime_p95_ms"], 1),
+    "timeouts": f'{REFINE["timeout_count"]}/{REFINE["query_invocation_count"]}',
+})
+
+fig, axes = plt.subplots(1, 2, figsize=(10, 3.6))
+precise = [
+    row for row in REFINE["records"]
+    if row["annotation"] and row["annotation"]["pose_quality"] == "precise"
+]
+approximate = [
+    row for row in REFINE["records"]
+    if row["annotation"] and row["annotation"]["pose_quality"] != "precise"
+]
+axes[0].scatter([1000 * row["translation_error_m"] for row in precise],
+                [row["rotation_error_deg"] for row in precise], color="tab:blue",
+                label="precise label")
+if approximate:
+    axes[0].scatter([1000 * row["translation_error_m"] for row in approximate],
+                    [row["rotation_error_deg"] for row in approximate], color="tab:orange",
+                    marker="x",
+                    label="approximate label")
+axes[0].set(
+    xlabel="translation error [mm]", ylabel="rotation error [deg]", title="Per-target pose error"
+)
+axes[0].legend()
+statuses = sorted(REFINE["observed_status_counts_on_present_targets"])
+axes[1].bar(
+    statuses,
+    [REFINE["observed_status_counts_on_present_targets"][name] for name in statuses],
+    color="tab:green",
+)
+axes[1].set(ylabel="present planned targets", title="Returned verification status")
+plt.tight_layout()
+plt.show()
+"""
+        ),
+        markdown(
+            """
+### Honest development-only before/after provenance
+
+The benchmark carries a versioned recorded legacy aggregate alongside the
+current candidate and asserts the target keys are identical.  The legacy
+aggregate predates a versioned legacy toggle, so it is not replayable with
+current code.  The comparison is a **development provenance marker**, not a
+causal claim about one algorithmic change and not an acceptance gate.  The
+current snapshot topology contains no eligible same-snapshot courses, so no
+wall-layout inference improvement is claimed here.
+"""
+        ),
+        code(
+            """
+comparison = REFINE["baseline_comparison"]
+print({
+    "same_target_keys": comparison["same_target_keys"],
+    "baseline": comparison["baseline"],
+    "candidate": comparison["candidate"],
+    "candidate_minus_baseline": comparison["candidate_minus_baseline"],
+    "interpretation": "development-only provenance; not a replayed ablation or production claim",
+})
+"""
+        ),
+        code(
+            """
+def refine_overlay(snapshot, target_id):
+    record = next(
+        item for item in REFINE["records"]
+        if item["snapshot"] == snapshot and item["target_id"] == target_id
+    )
+    points = world_points(snapshot)
+    shown = points[::max(1, len(points) // 14000)]
+    fig = plt.figure(figsize=(8, 5.5))
+    ax = fig.add_subplot(111, projection="3d")
+    ax.scatter(shown[:, 0], shown[:, 1], shown[:, 2], s=0.25, c="0.55", alpha=0.30)
+    plotted = [shown]
+    draw_pose(ax, record["prior"], "tab:blue", ":", "LOSO plan prior", plotted)
+    draw_pose(ax, record["annotation"]["pose"], "tab:orange", "--", "annotation", plotted)
+    draw_pose(ax, record["result"], "tab:green", "-", "REFINE_BLOCK result", plotted)
+    set_equal_3d(ax, plotted)
+    ax.set(
+        title=f"REFINE_BLOCK: {snapshot} / {target_id}",
+        xlabel="world X [m]",
+        ylabel="world Y [m]",
+        zlabel="world Z [m]",
+    )
+    ax.view_init(elev=24, azim=-58)
+    ax.legend(loc="upper right")
+    print({
+        key: record[key]
+        for key in (
+            "status", "observability", "translation_error_m", "rotation_error_deg",
+            "prior_deviation_m",
+        )
+    })
+    plt.show()
+
+
+refine_overlay("1783427923_718112512_seq5", "manual_0")
+refine_overlay("1783428549_619338496_seq1", "block_0")
+"""
+        ),
+        markdown(
+            """
+## `REFINE_GRASPED` is deliberately withheld
+
+The reviewed snapshot taxonomy has gripped targets, but these legacy XYZ
+captures lack an independent FK/grasp pose, its covariance, and a gripper
+trajectory.  Inferring those inputs from the annotation would turn the prior
+into ground truth.  Therefore this mode returns no synthetic-looking pose and
+remains unavailable until the recorded ROS fields are supplied.
+"""
+        ),
+        code(
+            """
+print({
+    "mode": GRIPPED["mode"],
+    "status": GRIPPED["status"],
+    "reviewed_targets": GRIPPED["n_reviewed_gripped_targets"],
+    "reasons": GRIPPED["limitations"],
+})
+for record in GRIPPED["records"]:
+    print({
+        "snapshot": record["snapshot"],
+        "target_id": record["target_id"],
+        "status": record["status"],
+        "reason": record["reason"],
+    })
+"""
+        ),
+        markdown(
+            """
+## Retained synthetic failures
+
+Synthetic scenes remain useful for preserving known geometric limits.  A
+seamless touching row has no measured internal interface, and the buried lower
+block in a stack has no visible surface.  Blind discovery should not invent
+separate measurements for either; planned verification may report a
+layout-inferred result only when a real plan and observability rules justify it.
+"""
+        ),
+        code(
+            """
+from blockpose.detection import DetectionParams, detect_scene_sample
+from blockpose.scenario_matrix import generate_scenario_matrix
+
+SYNTHETIC = {case.name: sample for case, sample in generate_scenario_matrix(0)}
+
+
+def synthetic_overlay(name, title):
+    sample = SYNTHETIC[name]
     detections = detect_scene_sample(sample, DetectionParams())
-    result = evaluate(detections, sample.ground_truth)
-    fig = plt.figure(figsize=(8, 5))
+    shown = sample.points[::max(1, len(sample.points) // 12000)]
+    fig = plt.figure(figsize=(8, 5.5))
     ax = fig.add_subplot(111, projection="3d")
-    stride = max(len(sample.points) // 10000, 1)
-    shown = sample.points[::stride]
+    ax.scatter(shown[:, 0], shown[:, 1], shown[:, 2], s=0.25, c="0.55", alpha=0.30)
     plotted = [shown]
-    ax.scatter(shown[:, 0], shown[:, 1], shown[:, 2], s=0.35, c="0.55", alpha=0.35)
+    def as_record(pose):
+        from blockpose.pose import rotmat_to_quat_xyzw
+        return {
+            "position_m": pose.position,
+            "orientation_xyzw": rotmat_to_quat_xyzw(pose.rotation),
+            "dimensions_m": pose.dims,
+        }
     for pose in sample.ground_truth:
-        for a, b in box_edges(pose, pose.dims):
-            ax.plot(*zip(a, b), color="tab:orange", linestyle="--", linewidth=1.2)
-            plotted.append(np.vstack([a, b]))
+        draw_pose(ax, as_record(pose), "tab:orange", "--", "evaluation-only label", plotted)
     for pose in detections:
-        for a, b in box_edges(pose, pose.dims):
-            ax.plot(*zip(a, b), color="tab:green", linewidth=1.8)
-            plotted.append(np.vstack([a, b]))
+        draw_pose(ax, as_record(pose), "tab:green", "-", "discovery result", plotted)
     set_equal_3d(ax, plotted)
     ax.set(title=title, xlabel="world X [m]", ylabel="world Y [m]", zlabel="world Z [m]")
     ax.view_init(elev=24, azim=-58)
-    print({"matched": result.matched, "FP": result.unmatched_det, "FN": result.unmatched_gt,
-           "translation_p95_m": result.translation_p95_m,
-           "rotation_p95_deg": result.rotation_p95_deg})
+    ax.legend(loc="upper right")
+    print({"ground_truth_blocks": len(sample.ground_truth), "detections": len(detections)})
     plt.show()
-    return detections, result
+
+
+synthetic_overlay("touching_row", "Known limit: seamless touching row")
+synthetic_overlay("two_stack", "Known limit: buried lower stack block")
 """
         ),
         markdown(
             """
-## Success case
+## Reproduce and next evidence needed
 
-The dashed orange cuboid below is an **evaluation-only label**. At seed 0 the isolated tilted
-case is recovered with centimeter-scale center error; it is representative of the current
-well-observed top-plus-side operating regime.
-"""
-        ),
-        code(
-            "success_det, success_eval = overlay("
-            "'isolated_tilt_7deg', 'Success: tilted isolated block')"
-        ),
-        markdown(
-            """
-## Compact gate and stratified baseline
+For a machine-readable artifact, run:
 
-Only the original isolated suite is gated. The scenario matrix is deliberately diagnostic:
-weak families remain visible instead of being averaged into the success number.
-"""
-        ),
-        code(
-            """
-metrics = eval_detector.run_suite(seed=SEED)
-print("GATE", {key: metrics[key] for key in
-      ("recall", "precision", "translation_p95_m", "rotation_p95_deg",
-       "false_positives_empty")})
-print("\\nSTRATIFIED DIAGNOSTICS")
-
-
-def fmt(value):
-    return f"{value:.2f}" if value is not None else "n/a"
-
-
-for family, values in metrics["diagnostics_stratified"].items():
-    print(f"{family:16s} recall={fmt(values['recall'])} precision={fmt(values['precision'])} "
-          f"FP={values['false_positives']} t_p95={values['translation_p95_m']}")
-"""
-        ),
-        markdown(
-            """
-## Validity calibration deferred
-
-Confidence estimates whether a returned detection is valid; it is separate from pose
-observability and must not filter detections until calibrated. The current selected-output
-synthetic corpus contains too few organic false positives to fit or evaluate a validity
-calibrator honestly. `calibrated_confidence` therefore remains `None`, and calibration is deferred
-until harder organic synthetic errors and real TF-aligned data are available.
-"""
-        ),
-        code(
-            """
-print("Calibration status: BLOCKED — insufficient selected-output organic negatives")
-"""
-        ),
-        markdown(
-            """
-## Hard-negative improvement and honest named failures
-
-**Touching row:** blocks in contact (a seamless row) have no measured internal interface and are
-geometrically equivalent to one elongated cuboid. The detector conservatively emits no blocks
-instead of inventing three from outer extent alone. This is the same missing-interface gap that
-blocks wall-course separation on real assembly geometry — still open.
-
-**Hard-negative-only:** ground-relative known-height evidence rejects these shorter boxes.
-
-**Two-block stack:** only the observable top block is recovered. The buried interface supplies no
-surface evidence, so the lower pose must not be invented from the synthetic layout.
-
-**Far range:** optional sensor context now scales geometric support thresholds by expected
-range-dependent angular density, recovering this sparse case without location-specific tuning.
-The `standoff` family in the stratified diagnostics above tracks the same range-dependent recall
-cliff (~15-20 m) at finer granularity.
-"""
-        ),
-        code(
-            """
-touching_det, touching_eval = overlay("touching_row", "Failure: seamless touching row")
-negative_det, negative_eval = overlay("hard_negative_only", "Improved: hard negatives rejected")
-stack_det, stack_eval = overlay("two_stack", "Failure: buried lower stack block")
-far_det, far_eval = overlay("isolated_far", "Improved: sparse far-range block")
-"""
-        ),
-        markdown(
-            """
-## Real-data validation (Phase D)
-
-Snapshots now ship a per-capture `tf.yaml` (the crane's actual joint state at the moment the
-frame was taken). The static reference-pose config used before this misplaced the cloud by
-several metres relative to recorded ground truth on at least one snapshot — enough that 0 of 3
-blocks matched until the detector switched to using it.
-
-Two caveats apply to everything below, unlike the synthetic sections above:
-
-- **Ground truth is not exact.** `registrations.yaml` is itself the output of the upstream
-  RGB-based registration pipeline, which can fail to register a real block it detected
-  (`registration_ok: false`). An unmatched detection in a low/zero-GT snapshot may be a real,
-  un-registered block, not a false positive — see `tools/eval_real_snapshots.py`'s docstring.
-- **This is four snapshots, not a statistically meaningful sample.** Treat the numbers below as
-  directional, and re-run `tools/eval_real_snapshots.py` as more real data lands.
-
-Two concrete fixes came out of this validation pass:
-
-1. Real callers weren't providing `SensorContext`, so the detector's free-space/visibility
-   evidence (needed to tell a laid block's long face from its short face) was silently inactive.
-   `SensorContext.from_points(origin, points)` derives ray directions/ranges from the returns
-   themselves — no true sensor misses available from a plain cloud, but enough to drop mean
-   rotation error on 2 of 3 blocks in one snapshot from ~87° to ~1.5°. It also changed *which*
-   block got recovered — one, sitting close to the crane/gripper arm, now drops out — a real,
-   unresolved recall/orientation-accuracy trade-off.
-2. Hypothesis selection had no minimum quality bar, so a plausible-shaped cluster on the
-   crane/gripper hardware was reported as a detection. `DetectionParams.min_score` (default 0.0,
-   so every synthetic scenario above is unaffected) rejects it: real spurious hypotheses scored
-   under ~0.2 on the available snapshots, every confirmed real block scored over ~0.4.
-"""
-        ),
-        code(
-            """
-import eval_real_snapshots
-from blockpose.detection import SensorContext, detect_blocks_detailed
-from blockpose.io import load_snapshot, load_tf_snapshot
-
-REAL_DETECTION_PARAMS = DetectionParams(min_score=0.4)
-
-
-def real_overlay(snapshot_name, title, params=REAL_DETECTION_PARAMS):
-    snap_dir = REPO_ROOT / "data" / "registration_snapshots" / snapshot_name
-    tf_snapshot = load_tf_snapshot(snap_dir / "tf.yaml")
-    pts_world, gt = load_snapshot(snap_dir, T_world_cloud=tf_snapshot.T_world_cloud)
-    sensor_origin = tf_snapshot.T_world_cloud[:3, 3]
-    context = SensorContext.from_points(sensor_origin, pts_world)
-    detections = detect_blocks_detailed(pts_world, params, sensor_context=context).poses
-
-    fig = plt.figure(figsize=(8, 5))
-    ax = fig.add_subplot(111, projection="3d")
-    stride = max(len(pts_world) // 10000, 1)
-    shown = pts_world[::stride]
-    plotted = [shown]
-    ax.scatter(shown[:, 0], shown[:, 1], shown[:, 2], s=0.35, c="0.55", alpha=0.35)
-    for pose in gt:
-        for a, b in box_edges(pose, pose.dims):
-            ax.plot(*zip(a, b), color="tab:orange", linestyle="--", linewidth=1.2)
-            plotted.append(np.vstack([a, b]))
-    for pose in detections:
-        for a, b in box_edges(pose, pose.dims):
-            ax.plot(*zip(a, b), color="tab:green", linewidth=1.8)
-            plotted.append(np.vstack([a, b]))
-    set_equal_3d(ax, plotted)
-    ax.set(title=title, xlabel="world X [m]", ylabel="world Y [m]", zlabel="world Z [m]")
-    ax.view_init(elev=24, azim=-58)
-    if gt:
-        result = evaluate(detections, gt)
-        print({"matched": result.matched, "unmatched_det": result.unmatched_det,
-               "unmatched_gt": result.unmatched_gt,
-               "translation_p95_m": result.translation_p95_m,
-               "rotation_p95_deg": result.rotation_p95_deg})
-    else:
-        result = None
-        print(f"{len(detections)} detection(s); snapshot has no registered ground truth "
-              "(see caveat above)")
-    plt.show()
-    return detections, result
-
-
-real_det, real_eval = real_overlay(
-    "1783429044_018652416_seq1", "Real snapshot: 2 of 3 blocks matched, well-oriented"
-)
-"""
-        ),
-        markdown(
-            """
-### Aggregate real-snapshot metrics
-
-Same harness as `tools/eval_real_snapshots.py`, run here for the checked-in snapshots.
-"""
-        ),
-        code(
-            """
-real_metrics = eval_real_snapshots.run_suite(
-    REPO_ROOT / "data" / "registration_snapshots",
-    REPO_ROOT / "config" / "transforms_pzs100_initial_pose_1.yaml",
-    REAL_DETECTION_PARAMS,
-)
-print({key: real_metrics[key] for key in (
-    "n_snapshots_scored", "n_snapshots_with_zero_gt", "recall",
-    "precision_grounded_snapshots_only", "translation_p95_m", "rotation_p95_deg",
-)})
-for entry in real_metrics["per_snapshot"]:
-    print(f"  {entry['snapshot']}: gt={entry['gt_blocks']} detected={entry['detected']} "
-          f"matched={entry['matched']}")
-"""
-        ),
-        markdown(
-            """
-## Next detector architecture
-
-```text
-validated cloud + sensor origin
-  → local ground frame + permissive connected regions
-  → PlanePatch extraction (normal, equation, residual, hull, coverage)
-  → multiple known-size CuboidHypothesis proposals per region
-  → deterministic HypothesisEvidence
-       surface support + face coverage + dimension consistency
-       expected-visible missing faces + free-space violations + overlap
-  → robust box refinement
-  → score-ordered selection / explained-point discounting
-  → pose + observability + calibrated confidence + diagnostics
+```bash
+mkdir -p out
+uv run python tools/eval_detector_modes.py --output out/frozen-mode-benchmark.json
 ```
 
-The next acceptance targets are richer face coverage and calibrated evidence. Stacked blocks
-with buried interfaces must be reported as unobservable unless visible geometry supplies enough
-evidence; layout priors must not masquerade as measurements.
+The next dataset must preserve per-point time, intensity, beam/scan IDs,
+no-return rays, TF trajectory, and gripper/FK state.  That enables deskew and
+ray-consistent evidence, a fair `REFINE_GRASPED` benchmark, and a held-out
+recording-session split before any production claim or C++ runtime switch.
 """
         ),
     ]
