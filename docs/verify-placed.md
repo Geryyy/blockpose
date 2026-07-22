@@ -33,3 +33,29 @@ The 15 real priors are development diagnostics only. Their ground truth is
 loaded after inference, and the command asserts that no evaluated snapshot is
 listed as a prior source. It must not be used to tune thresholds or claim
 held-out acceptance.
+
+## Experimental course constraints
+
+The prototype also accepts `PlacedBlockPrior` and `CourseConstraint`. Legacy
+`BlockPose` lists remain supported and receive deterministic independent IDs.
+Course layout may fill only translation directions classified as null by the
+data-only fit, and then reports `LayoutInferred` with conservative propagated
+reference-plus-offset uncertainty. It never changes the independent presence
+status or its measured deviation fields. An out-of-window layout candidate is
+discarded while the original independent result is retained with an explicit
+`layout_rejected` diagnostic.
+
+Snapshot topology is loaded from `config/snapshot_plan_topology.yaml` before
+annotations. Its poses come from leakage-safe LOSO fixtures; malformed windows,
+unknown blocks, duplicate courses, and inconsistent reciprocal offsets are
+explicit errors. The current snapshot topology deliberately declares no
+courses because the available fixtures do not establish same-snapshot course
+membership without consulting ground truth.
+
+Face-boundary diagnostics come only from measured occupancy falloff with a
+populated face interior. They are disabled for every multi-block or
+course-owned fit until unsplit raw-surface extraction exists, so an ownership
+partition at a seamless planned joint cannot become boundary evidence. Planned
+joints are never synthesized as observations.
+Course-aware mode remains experimental and the legacy verifier remains default
+until the full touching-row yaw, pose, status, identity, and latency gates pass.

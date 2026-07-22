@@ -9,7 +9,7 @@ fitted inside a small, explicit trust region.  An absent block is only called
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 
 import numpy as np
@@ -36,6 +36,7 @@ class PlacedObservability(str, Enum):
     WELL_CONSTRAINED = "WellConstrained"
     PARTIALLY_CONSTRAINED = "PartiallyConstrained"
     SYMMETRY_AMBIGUOUS = "SymmetryAmbiguous"
+    LAYOUT_INFERRED = "LayoutInferred"
     UNOBSERVABLE = "Unobservable"
 
 
@@ -52,6 +53,106 @@ class VerifyPlacedParams:
     missing_min_rays: int = 3
     neighbor_margin_m: float = 0.015
     max_nfev: int = 80
+
+
+@dataclass(frozen=True)
+class PlacedBlockPrior:
+    block_id: str
+    pose: BlockPose
+    covariance: np.ndarray | None = None
+    course_id: str | None = None
+    neighbor_ids: tuple[str, ...] = ()
+    source_snapshot_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CourseConstraint:
+    course_id: str
+    block_ids: tuple[str, ...]
+    nominal_offsets: dict[tuple[str, str], np.ndarray]
+    shared_yaw_sigma_deg: float = 1.0
+    joint_gap_m: float | None = None
+    translation_sigma_m: float = 0.05
+    relative_offset_covariance: dict[tuple[str, str], np.ndarray] = field(default_factory=dict)
+    plan_name: str | None = None
+    source_snapshot_ids: tuple[str, ...] = ()
+    evaluated_snapshot_id: str | None = None
+
+
+@dataclass(frozen=True)
+class FaceBoundaryObservation:
+    face_axis: int
+    face_sign: int
+    boundary_axis: int
+    coordinate_m: float
+    span_m: tuple[float, float]
+    support_points: int
+    source: str
+    quality: float
+
+
+def _observed_face_boundaries(
+    prior: BlockPose,
+    points: np.ndarray,
+    face_axes: np.ndarray,
+    face_signs: np.ndarray,
+) -> tuple[FaceBoundaryObservation, ...]:
+    """Extract occupancy falloffs only; planned joints are never observations."""
+    if not len(points):
+        return ()
+    local = (points - prior.position) @ prior.rotation
+    observations = []
+    for face_axis, face_sign in sorted(
+        {(int(axis), int(sign)) for axis, sign in zip(face_axes, face_signs, strict=True)}
+    ):
+        selected = (face_axes == face_axis) & (face_signs == face_sign)
+        if np.count_nonzero(selected) < 20:
+            continue
+        face_points = local[selected]
+        for boundary_axis in range(3):
+            if boundary_axis == face_axis:
+                continue
+            values = face_points[:, boundary_axis]
+            low, high = np.percentile(values, [2.0, 98.0])
+            if high - low < 0.08:
+                continue
+            half_extent = float(np.asarray(prior.dims)[boundary_axis] / 2.0)
+            counts, _edges = np.histogram(
+                values, bins=20, range=(-half_extent - 0.05, half_extent + 0.05)
+            )
+            interior = counts[3:-3]
+            if len(interior) == 0 or np.median(interior) < 2:
+                continue
+            interior_level = float(np.median(interior))
+            for side, edge_count, coordinate in (
+                ("low", float(np.mean(counts[:2])), low),
+                ("high", float(np.mean(counts[-2:])), high),
+            ):
+                quality = float(np.clip(1.0 - edge_count / max(interior_level, 1.0), 0.0, 1.0))
+                # Ownership partitions can end at a planned joint and create a
+                # false falloff. Only physical exterior silhouette coordinates
+                # near the canonical face rectangle are boundary evidence.
+                if quality < 0.35 or abs(abs(coordinate) - half_extent) > 0.08:
+                    continue
+                other_axis = next(
+                    axis for axis in range(3) if axis not in {face_axis, boundary_axis}
+                )
+                span = tuple(
+                    float(value) for value in np.percentile(face_points[:, other_axis], [5, 95])
+                )
+                observations.append(
+                    FaceBoundaryObservation(
+                        face_axis,
+                        face_sign,
+                        boundary_axis,
+                        float(coordinate),
+                        span,
+                        int(np.count_nonzero(selected)),
+                        f"occupancy_falloff_{side}",
+                        quality,
+                    )
+                )
+    return tuple(observations)
 
 
 @dataclass(frozen=True)
@@ -218,6 +319,8 @@ def _bounded_fit(
     face_axes: np.ndarray,
     face_signs: np.ndarray,
     params: VerifyPlacedParams,
+    *,
+    suppress_ownership_boundaries: bool = False,
 ) -> tuple[BlockPose, bool, np.ndarray | None, tuple[str, ...], float | None, dict[str, object]]:
     if len(points) < params.min_support_points:
         return prior, False, None, _DIRECTION_NAMES, None, {"fit_reason": "insufficient_points"}
@@ -315,6 +418,11 @@ def _bounded_fit(
     # have moved strong real priors by centimetres. Require a material gain.
     correction_supported = improvement >= max(0.002, prior_rms * 0.30)
     retained_pose = pose if geometry_sufficient and correction_supported else prior
+    boundaries = (
+        ()
+        if suppress_ownership_boundaries
+        else _observed_face_boundaries(prior, points, face_axes, face_signs)
+    )
     return (
         retained_pose,
         geometry_sufficient,
@@ -342,6 +450,19 @@ def _bounded_fit(
             "prior_residual_rms_m": prior_rms,
             "residual_improvement_m": improvement,
             "correction_supported": correction_supported,
+            "observed_boundaries": [
+                {
+                    "face_axis": item.face_axis,
+                    "face_sign": item.face_sign,
+                    "boundary_axis": item.boundary_axis,
+                    "coordinate_m": item.coordinate_m,
+                    "span_m": item.span_m,
+                    "support_points": item.support_points,
+                    "source": item.source,
+                    "quality": item.quality,
+                }
+                for item in boundaries
+            ],
         },
     )
 
@@ -371,6 +492,255 @@ def _validate_priors(expected: list[BlockPose]) -> None:
             raise ValueError("VerifyPlaced priors require finite centers and SO(3) rotations")
 
 
+def _normalize_priors(
+    expected: list[BlockPose] | list[PlacedBlockPrior],
+) -> tuple[list[PlacedBlockPrior], list[BlockPose]]:
+    normalized = [
+        item if isinstance(item, PlacedBlockPrior) else PlacedBlockPrior(f"block_{index}", item)
+        for index, item in enumerate(expected)
+        if isinstance(item, (BlockPose, PlacedBlockPrior))
+    ]
+    if len(normalized) != len(expected):
+        raise ValueError("expected entries must be BlockPose or PlacedBlockPrior")
+    identifiers = [item.block_id for item in normalized]
+    if any(not value for value in identifiers) or len(set(identifiers)) != len(identifiers):
+        raise ValueError("placed block IDs must be non-empty and unique")
+    known = set(identifiers)
+    by_id = {item.block_id: item for item in normalized}
+    for item in normalized:
+        if set(item.neighbor_ids) - known or item.block_id in item.neighbor_ids:
+            raise ValueError(f"invalid neighbors for placed block {item.block_id!r}")
+        if item.covariance is not None:
+            covariance = np.asarray(item.covariance, dtype=np.float64)
+            if covariance.shape != (6, 6) or not np.all(np.isfinite(covariance)):
+                raise ValueError(f"covariance for {item.block_id!r} must be finite 6x6")
+            if np.min(np.linalg.eigvalsh(covariance)) < -1e-10:
+                raise ValueError(f"covariance for {item.block_id!r} must be positive semidefinite")
+        for neighbor in item.neighbor_ids:
+            if item.block_id not in by_id[neighbor].neighbor_ids:
+                raise ValueError(f"non-reciprocal neighbors {item.block_id!r}, {neighbor!r}")
+    return normalized, [item.pose for item in normalized]
+
+
+def _validate_courses(priors: list[PlacedBlockPrior], constraints: list[CourseConstraint]) -> None:
+    identifiers = {item.block_id for item in priors}
+    prior_by_id = {item.block_id: item for item in priors}
+    from blockpose.wall_plans import load_wall_plans
+
+    wall_plans = load_wall_plans()
+    allowed_plans = set(wall_plans)
+    course_ids = [item.course_id for item in constraints]
+    if len(set(course_ids)) != len(course_ids):
+        raise ValueError("course IDs must be unique")
+    for constraint in constraints:
+        if not constraint.course_id or not constraint.block_ids:
+            raise ValueError("course constraints require an ID and blocks")
+        if len(set(constraint.block_ids)) != len(constraint.block_ids):
+            raise ValueError(f"duplicate block in course {constraint.course_id!r}")
+        if set(constraint.block_ids) - identifiers:
+            raise ValueError(f"unknown block in course {constraint.course_id!r}")
+        prior_courses = {
+            item.block_id: item.course_id
+            for item in priors
+            if item.block_id in constraint.block_ids
+        }
+        if any(value not in (None, constraint.course_id) for value in prior_courses.values()):
+            raise ValueError(f"inconsistent prior course for {constraint.course_id!r}")
+        if not np.isfinite(constraint.shared_yaw_sigma_deg) or constraint.shared_yaw_sigma_deg <= 0:
+            raise ValueError("shared_yaw_sigma_deg must be positive and finite")
+        if not np.isfinite(constraint.translation_sigma_m) or constraint.translation_sigma_m <= 0:
+            raise ValueError("translation_sigma_m must be positive and finite")
+        has_plan = constraint.plan_name is not None
+        has_sources = bool(constraint.source_snapshot_ids)
+        if has_plan == has_sources:
+            raise ValueError("course requires exactly one plan name or source snapshot provenance")
+        if has_plan and constraint.plan_name not in allowed_plans:
+            raise ValueError(f"unknown course plan {constraint.plan_name!r}")
+        if has_plan:
+            plan = wall_plans[constraint.plan_name]  # type: ignore[index]
+            plan_positions = {
+                identifier: np.array([spec.x, spec.y, spec.z], dtype=np.float64)
+                for identifier, spec in zip(plan.ids, plan.specs, strict=True)
+            }
+            if set(constraint.block_ids) - set(plan_positions):
+                raise ValueError("course block IDs do not map to the named wall plan")
+        if (
+            has_sources
+            and constraint.evaluated_snapshot_id is not None
+            and constraint.evaluated_snapshot_id in constraint.source_snapshot_ids
+        ):
+            raise ValueError("course topology leaks the evaluated snapshot")
+        if has_sources:
+            from blockpose.snapshot_plan_fixtures import load_snapshot_plan_fixtures
+
+            fixtures = load_snapshot_plan_fixtures()
+            known_snapshots = {target_id.split("/", 1)[0] for target_id in fixtures} | {
+                source for fixture in fixtures.values() for source in fixture.source_snapshot_ids
+            }
+            contributing = {source for prior in priors for source in prior.source_snapshot_ids}
+            unknown = set(constraint.source_snapshot_ids) - known_snapshots
+            noncontributing = set(constraint.source_snapshot_ids) - contributing
+            if unknown:
+                raise ValueError(f"unknown source snapshots: {sorted(unknown)}")
+            if noncontributing:
+                raise ValueError(f"noncontributing source snapshots: {sorted(noncontributing)}")
+        for (first, second), raw_offset in constraint.nominal_offsets.items():
+            if first not in constraint.block_ids or second not in constraint.block_ids:
+                raise ValueError(f"offset references unknown course block {(first, second)!r}")
+            offset = np.asarray(raw_offset, dtype=np.float64)
+            if offset.shape != (3,) or not np.all(np.isfinite(offset)):
+                raise ValueError("nominal course offsets must be finite 3-vectors")
+            if np.linalg.norm(offset) > 2.0:
+                raise ValueError("nominal course offset is implausibly large")
+            if has_plan:
+                plan_offset = plan_positions[second] - plan_positions[first]
+                if not np.allclose(offset, plan_offset, atol=1e-6):
+                    raise ValueError("nominal offset does not match named wall plan geometry")
+            prior_delta = prior_by_id[second].pose.position - prior_by_id[first].pose.position
+            if has_sources:
+                common_sources = (
+                    set(constraint.source_snapshot_ids)
+                    & set(prior_by_id[first].source_snapshot_ids)
+                    & set(prior_by_id[second].source_snapshot_ids)
+                )
+                if not common_sources:
+                    raise ValueError("course offset has no common contributing source snapshot")
+                if not np.allclose(offset, prior_delta, atol=1e-6, rtol=0.0):
+                    raise ValueError("nominal offset differs from leakage-safe derived geometry")
+            if np.linalg.norm(prior_delta - offset) > 0.20 + 1e-9:
+                raise ValueError("nominal course offset is inconsistent with leakage-safe priors")
+            reciprocal = constraint.nominal_offsets.get((second, first))
+            if reciprocal is not None and not np.allclose(
+                offset, -np.asarray(reciprocal), atol=1e-9
+            ):
+                raise ValueError(f"inconsistent reciprocal offset for {(first, second)!r}")
+        for pair, raw_covariance in constraint.relative_offset_covariance.items():
+            if pair not in constraint.nominal_offsets:
+                raise ValueError(f"offset covariance has no nominal offset for {pair!r}")
+            offset_covariance = np.asarray(raw_covariance, dtype=np.float64)
+            if (
+                offset_covariance.shape != (3, 3)
+                or not np.all(np.isfinite(offset_covariance))
+                or np.min(np.linalg.eigvalsh(offset_covariance)) < -1e-10
+            ):
+                raise ValueError("relative offset covariance must be finite PSD 3x3")
+
+
+def _apply_course_constraints(
+    results: list[PlacedVerification],
+    priors: list[PlacedBlockPrior],
+    constraints: list[CourseConstraint],
+    *,
+    max_translation_m: float = 0.10,
+    max_rotation_deg: float = 10.0,
+) -> list[PlacedVerification]:
+    """Fill translation null directions only; never decide block presence/status."""
+    if not constraints:
+        return results
+    by_id = {prior.block_id: index for index, prior in enumerate(priors)}
+    updated = list(results)
+    supported = {PlacedStatus.CONFIRMED, PlacedStatus.DEVIATED}
+    axis_names = ("x", "y", "z")
+    for constraint in constraints:
+        for block_id in constraint.block_ids:
+            index = by_id[block_id]
+            result = updated[index]
+            if result.status not in supported:
+                continue
+            translation_nulls = [
+                axis
+                for axis, name in enumerate(axis_names)
+                if name in result.unconstrained_directions
+            ]
+            if not translation_nulls:
+                continue
+            for reference_id in constraint.block_ids:
+                if reference_id == block_id:
+                    continue
+                reference = updated[by_id[reference_id]]
+                if reference.status not in supported:
+                    continue
+                offset = constraint.nominal_offsets.get((reference_id, block_id))
+                offset_pair = (reference_id, block_id)
+                if offset is None:
+                    reverse = constraint.nominal_offsets.get((block_id, reference_id))
+                    offset = -np.asarray(reverse) if reverse is not None else None
+                    offset_pair = (block_id, reference_id)
+                if offset is None:
+                    continue
+                position = result.pose.position.copy()
+                inferred = reference.pose.position + np.asarray(offset, dtype=np.float64)
+                for axis in translation_nulls:
+                    position[axis] = inferred[axis]
+                pose = BlockPose(
+                    position,
+                    result.pose.rotation,
+                    confidence=result.pose.confidence,
+                    source=f"{result.pose.source}+course_layout",
+                    dims=result.pose.dims,
+                )
+                final_translation = float(np.linalg.norm(pose.position - result.expected.position))
+                final_rotation = _rotation_deviation_deg(result.expected, pose)
+                if (
+                    final_translation > max_translation_m + 1e-9
+                    or final_rotation > max_rotation_deg + 1e-9
+                ):
+                    updated[index] = replace(
+                        result,
+                        diagnostics={
+                            **result.diagnostics,
+                            "layout_rejected": "reacquisition_needed",
+                            "layout_candidate_translation_m": final_translation,
+                            "layout_candidate_rotation_deg": final_rotation,
+                            "layout_course_id": constraint.course_id,
+                        },
+                    )
+                    break
+                covariance = (
+                    result.covariance.copy() if result.covariance is not None else np.eye(6) * 1e3
+                )
+                offset_covariance = np.asarray(
+                    constraint.relative_offset_covariance.get(
+                        offset_pair, np.eye(3) * constraint.translation_sigma_m**2
+                    ),
+                    dtype=np.float64,
+                )
+                for axis in translation_nulls:
+                    reference_variance = (
+                        float(reference.covariance[axis + 3, axis + 3])
+                        if reference.covariance is not None
+                        else 1e3
+                    )
+                    # Cross-correlation is not represented by BlockResult's
+                    # marginal 6x6 covariance; conservatively inflate it.
+                    propagated = 2.0 * (reference_variance + float(offset_covariance[axis, axis]))
+                    covariance[axis + 3, axis + 3] = max(covariance[axis + 3, axis + 3], propagated)
+                remaining = tuple(
+                    name for name in result.unconstrained_directions if name not in axis_names
+                )
+                updated[index] = replace(
+                    result,
+                    pose=pose,
+                    covariance=covariance,
+                    observability=PlacedObservability.LAYOUT_INFERRED,
+                    unconstrained_directions=remaining,
+                    diagnostics={
+                        **result.diagnostics,
+                        "layout_inferred_from": reference_id,
+                        "layout_course_id": constraint.course_id,
+                        "layout_filled_directions": tuple(
+                            axis_names[axis] for axis in translation_nulls
+                        ),
+                        "layout_covariance_source": "reference_plus_relative_offset",
+                        "layout_cross_correlation": "unrepresented_conservative_marginal",
+                        "layout_translation_from_plan_m": final_translation,
+                        "layout_rotation_from_plan_deg": final_rotation,
+                    },
+                )
+                break
+    return updated
+
+
 def _returned_free_space_rays(pose: BlockPose, context: SensorContext, tolerance: float) -> int:
     origin_local = pose.rotation.T @ (context.origin - pose.position)
     directions_local = context.ray_directions @ pose.rotation
@@ -381,10 +751,11 @@ def _returned_free_space_rays(pose: BlockPose, context: SensorContext, tolerance
 
 def verify_placed_blocks(
     points_world: np.ndarray,
-    expected: list[BlockPose],
+    expected: list[BlockPose] | list[PlacedBlockPrior],
     *,
     sensor_context: SensorContext | None = None,
     params: VerifyPlacedParams | None = None,
+    course_constraints: list[CourseConstraint] | None = None,
 ) -> list[PlacedVerification]:
     """Verify expected blocks without converting an unsupported prior into a measurement."""
     settings = params or VerifyPlacedParams()
@@ -394,22 +765,31 @@ def verify_placed_blocks(
         raise ValueError("points_world must have shape (N, 3) and be finite")
     if not expected:
         return []
-    _validate_priors(expected)
+    structured, expected_poses = _normalize_priors(expected)
+    _validate_priors(expected_poses)
+    _validate_courses(structured, course_constraints or [])
     context = _validate_sensor_context(sensor_context) if sensor_context is not None else None
     # Deterministic ordering makes ownership stable under input permutation.
     if len(points):
         points = points[np.lexsort((points[:, 2], points[:, 1], points[:, 0]))]
     visibility = expected_visibility(
-        expected,
+        expected_poses,
         context.origin if context is not None else None,
         margin_m=settings.neighbor_margin_m,
     )
-    assigned = _assign_expected_faces(points, expected, settings.assign_band_m, visibility)
+    assigned = _assign_expected_faces(points, expected_poses, settings.assign_band_m, visibility)
     results = []
-    for prior, owned_data, (visible, occluded) in zip(expected, assigned, visibility, strict=True):
+    for prior, owned_data, (visible, occluded) in zip(
+        expected_poses, assigned, visibility, strict=True
+    ):
         owned, face_axes, face_signs = owned_data
         pose, fitted, covariance, unconstrained, rms, diagnostics = _bounded_fit(
-            prior, owned, face_axes, face_signs, settings
+            prior,
+            owned,
+            face_axes,
+            face_signs,
+            settings,
+            suppress_ownership_boundaries=(len(expected_poses) > 1 or bool(course_constraints)),
         )
         translation = float(np.linalg.norm(pose.position - prior.position))
         rotation = _rotation_deviation_deg(prior, pose)
@@ -484,4 +864,10 @@ def verify_placed_blocks(
                 },
             )
         )
-    return results
+    return _apply_course_constraints(
+        results,
+        structured,
+        course_constraints or [],
+        max_translation_m=settings.max_translation_m,
+        max_rotation_deg=settings.max_rotation_deg,
+    )

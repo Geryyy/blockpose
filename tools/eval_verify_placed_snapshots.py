@@ -11,7 +11,6 @@ import argparse
 import json
 import sys
 import time
-from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +23,7 @@ from blockpose.detection import SensorContext  # noqa: E402
 from blockpose.evaluate import rotation_error_deg  # noqa: E402
 from blockpose.io import load_snapshot, load_tf_snapshot  # noqa: E402
 from blockpose.snapshot_plan_fixtures import load_snapshot_plan_fixtures  # noqa: E402
+from blockpose.snapshot_plan_topology import load_snapshot_plan_topology  # noqa: E402
 from blockpose.verify_placed import verify_placed_blocks  # noqa: E402
 
 
@@ -33,33 +33,40 @@ def main() -> None:
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
+    # Topology and priors are loaded before annotations by construction.
+    topology = load_snapshot_plan_topology()
     fixtures = load_snapshot_plan_fixtures()
-    grouped = defaultdict(list)
-    for target_id, fixture in fixtures.items():
-        if fixture.prior is None:
-            continue
-        snapshot_id, local_id = target_id.split("/", 1)
-        assert snapshot_id not in fixture.source_snapshot_ids
-        assert fixture.search_window_m == 0.10
-        grouped[snapshot_id].append((local_id, fixture))
 
     rows = []
-    for snapshot_id, entries in sorted(grouped.items()):
+    for snapshot_id, priors in sorted(topology.priors_by_snapshot.items()):
+        entries = [
+            (prior.block_id, fixtures[f"{snapshot_id}/{prior.block_id}"]) for prior in priors
+        ]
         directory = args.snapshots / snapshot_id
         tf = load_tf_snapshot(directory / "tf.yaml")
         points, _ = load_snapshot(directory, T_world_cloud=tf.T_world_cloud)
-        priors = [entry.prior for _, entry in entries]
-        assert all(prior is not None for prior in priors)
         context = SensorContext.from_points(tf.T_world_cloud[:3, 3], points)
         started = time.perf_counter()
-        inferred = verify_placed_blocks(points, priors, sensor_context=context)  # type: ignore[arg-type]
-        runtime_ms = (time.perf_counter() - started) * 1000.0
+        independent = verify_placed_blocks(
+            points, [prior.pose for prior in priors], sensor_context=context
+        )
+        independent_runtime_ms = (time.perf_counter() - started) * 1000.0
+        started = time.perf_counter()
+        inferred = verify_placed_blocks(
+            points,
+            list(priors),
+            sensor_context=context,
+            course_constraints=list(topology.constraints_by_snapshot.get(snapshot_id, ())),
+        )
+        course_runtime_ms = (time.perf_counter() - started) * 1000.0
 
         # Deliberately load annotations after inference: GT cannot affect points,
         # priors, assignment, thresholds, or fitted results.
         annotations = load_annotations(directory / "annotations.yaml")
         targets = {target.id: target.pose for target in annotations.targets}
-        for (local_id, fixture), result in zip(entries, inferred, strict=True):
+        for (local_id, fixture), independent_result, result in zip(
+            entries, independent, inferred, strict=True
+        ):
             target = targets[local_id]
             prior_translation_error = float(
                 np.linalg.norm(fixture.prior.position - target.position)  # type: ignore[union-attr]
@@ -77,14 +84,22 @@ def main() -> None:
                     "prior_rotation_error_deg": prior_rotation_error,
                     "translation_error_m": final_translation_error,
                     "rotation_error_deg": final_rotation_error,
+                    "independent_translation_error_m": float(
+                        np.linalg.norm(independent_result.pose.position - target.position)
+                    ),
+                    "independent_rotation_error_deg": rotation_error_deg(
+                        independent_result.pose, target
+                    ),
                     "translation_improvement_m": (
                         prior_translation_error - final_translation_error
                     ),
                     "rotation_improvement_deg": prior_rotation_error - final_rotation_error,
                     "support_points": result.support_points,
                     "fit_diagnostics": result.diagnostics,
-                    "runtime_ms_per_snapshot_query": runtime_ms,
+                    "independent_runtime_ms_per_snapshot_query": independent_runtime_ms,
+                    "runtime_ms_per_snapshot_query": course_runtime_ms,
                     "prior_source_snapshots": list(fixture.source_snapshot_ids),
+                    "topology_provenance": topology.provenance,
                     "acceptance_eligible": False,
                 }
             )

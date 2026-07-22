@@ -250,6 +250,7 @@ class HybridBlockDetector:
                     ResultObservability.PARTIALLY_CONSTRAINED
                 ),
                 PlacedObservability.SYMMETRY_AMBIGUOUS: (ResultObservability.SYMMETRY_AMBIGUOUS),
+                PlacedObservability.LAYOUT_INFERRED: ResultObservability.LAYOUT_INFERRED,
                 PlacedObservability.UNOBSERVABLE: ResultObservability.UNOBSERVABLE,
             }
             blocks = [

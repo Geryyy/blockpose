@@ -3,14 +3,21 @@ from __future__ import annotations
 import time
 
 import numpy as np
+import pytest
 from blockpose.detection import SensorContext
 from blockpose.engine import HybridBlockDetector
 from blockpose.evaluate import rotation_error_deg
 from blockpose.pose import BlockPose
 from blockpose.synth import BlockSpec, SynthParams, generate_scene
 from blockpose.verify_placed import (
+    CourseConstraint,
+    PlacedBlockPrior,
+    PlacedObservability,
     PlacedStatus,
+    PlacedVerification,
     VerifyPlacedParams,
+    _apply_course_constraints,
+    _observed_face_boundaries,
     _rotation_deviation_deg,
     expected_visibility,
     verify_placed_blocks,
@@ -303,3 +310,244 @@ def test_known_touching_row_yaw_limitation_keeps_v1_disabled() -> None:
         > 1.0
     )
     assert HybridBlockDetector().verify_placed_v1 is False
+
+
+def test_course_layout_fills_only_supported_null_direction() -> None:
+    first_pose = BlockPose(np.array([0.0, 0.0, 0.3]), np.eye(3))
+    second_pose = BlockPose(np.array([0.92, 0.05, 0.3]), np.eye(3))
+    priors = [
+        PlacedBlockPrior("c0_b0", first_pose, course_id="c", neighbor_ids=("c0_b1",)),
+        PlacedBlockPrior("c0_b1", second_pose, course_id="c", neighbor_ids=("c0_b0",)),
+    ]
+    results = [
+        PlacedVerification(
+            pose,
+            pose,
+            PlacedStatus.CONFIRMED,
+            (
+                PlacedObservability.WELL_CONSTRAINED
+                if index == 0
+                else PlacedObservability.PARTIALLY_CONSTRAINED
+            ),
+            np.eye(6),
+            () if index == 0 else ("y",),
+            100,
+            0.003,
+            0.0,
+            0.0,
+            ("x-", "z+"),
+            (),
+            0,
+        )
+        for index, pose in enumerate((first_pose, second_pose))
+    ]
+    constraint = CourseConstraint(
+        "c",
+        ("c0_b0", "c0_b1"),
+        {("c0_b0", "c0_b1"): np.array([0.92, 0.0, 0.0])},
+        plan_name="example_wall",
+    )
+    updated = _apply_course_constraints(results, priors, [constraint])
+    assert updated[1].status == PlacedStatus.CONFIRMED
+    assert updated[1].observability == PlacedObservability.LAYOUT_INFERRED
+    assert updated[1].pose.position[1] == 0.0
+    assert updated[1].diagnostics["layout_filled_directions"] == ("y",)
+    assert updated[1].translation_from_plan_m == results[1].translation_from_plan_m
+    assert updated[1].diagnostics["layout_translation_from_plan_m"] == 0.05
+    assert updated[1].covariance[4, 4] > results[0].covariance[4, 4]
+    assert updated[1].diagnostics["layout_cross_correlation"].startswith("unrepresented")
+
+
+def test_course_layout_never_promotes_missing_or_hidden() -> None:
+    poses = [
+        BlockPose(np.array([0.0, 0.0, 0.3]), np.eye(3)),
+        BlockPose(np.array([0.92, 0.0, 0.3]), np.eye(3)),
+    ]
+    priors = [
+        PlacedBlockPrior(name, pose) for name, pose in zip(("c0_b0", "c0_b1"), poses, strict=True)
+    ]
+    results = [
+        PlacedVerification(
+            poses[0],
+            poses[0],
+            PlacedStatus.CONFIRMED,
+            PlacedObservability.WELL_CONSTRAINED,
+            np.eye(6),
+            (),
+            100,
+            0.003,
+            0.0,
+            0.0,
+            ("x-",),
+            (),
+            0,
+        ),
+        PlacedVerification(
+            poses[1],
+            poses[1],
+            PlacedStatus.NOT_OBSERVABLE,
+            PlacedObservability.UNOBSERVABLE,
+            None,
+            ("x", "y", "z"),
+            0,
+            None,
+            0.0,
+            0.0,
+            (),
+            ("x-",),
+            0,
+        ),
+    ]
+    constraint = CourseConstraint(
+        "c",
+        ("c0_b0", "c0_b1"),
+        {("c0_b0", "c0_b1"): np.array([0.92, 0.0, 0.0])},
+        plan_name="example_wall",
+    )
+    updated = _apply_course_constraints(results, priors, [constraint])
+    assert updated[1].status == PlacedStatus.NOT_OBSERVABLE
+    assert updated[1].observability == PlacedObservability.UNOBSERVABLE
+
+
+def test_course_layout_rejects_unbounded_candidate_and_reacquires() -> None:
+    priors = [
+        PlacedBlockPrior("c0_b0", BlockPose(np.array([0.0, 0.0, 0.3]), np.eye(3))),
+        PlacedBlockPrior("c0_b1", BlockPose(np.array([0.92, 0.0, 0.3]), np.eye(3))),
+    ]
+    measured = BlockPose(np.array([0.0, 100.0, 0.3]), np.eye(3))
+    results = [
+        PlacedVerification(
+            priors[0].pose,
+            measured,
+            PlacedStatus.CONFIRMED,
+            PlacedObservability.WELL_CONSTRAINED,
+            np.eye(6),
+            (),
+            100,
+            0.003,
+            0.0,
+            0.0,
+            ("x-",),
+            (),
+            0,
+        ),
+        PlacedVerification(
+            priors[1].pose,
+            priors[1].pose,
+            PlacedStatus.CONFIRMED,
+            PlacedObservability.PARTIALLY_CONSTRAINED,
+            np.eye(6),
+            ("y",),
+            100,
+            0.003,
+            0.0,
+            0.0,
+            ("x-",),
+            (),
+            0,
+        ),
+    ]
+    constraint = CourseConstraint(
+        "c",
+        ("c0_b0", "c0_b1"),
+        {("c0_b0", "c0_b1"): np.array([0.92, 0.0, 0.0])},
+        plan_name="example_wall",
+    )
+    updated = _apply_course_constraints(results, priors, [constraint])
+    assert updated[1].status == results[1].status == PlacedStatus.CONFIRMED
+    assert updated[1].pose is results[1].pose
+    np.testing.assert_array_equal(updated[1].covariance, results[1].covariance)
+    assert updated[1].diagnostics["layout_rejected"] == "reacquisition_needed"
+
+
+def test_course_validation_rejects_implausible_offset() -> None:
+    priors = [
+        PlacedBlockPrior("c0_b0", BlockPose(np.array([0.0, 0.0, 0.3]), np.eye(3))),
+        PlacedBlockPrior("c0_b1", BlockPose(np.array([0.92, 0.0, 0.3]), np.eye(3))),
+    ]
+    constraint = CourseConstraint(
+        "c",
+        ("c0_b0", "c0_b1"),
+        {("c0_b0", "c0_b1"): np.array([123.0, 0.0, 0.0])},
+        plan_name="example_wall",
+    )
+    with pytest.raises(ValueError, match="implausibly large"):
+        verify_placed_blocks(np.empty((0, 3)), priors, course_constraints=[constraint])
+
+
+def test_course_validation_rejects_evaluated_snapshot_provenance() -> None:
+    priors = [
+        PlacedBlockPrior("c0_b0", BlockPose(np.array([0.0, 0.0, 0.3]), np.eye(3))),
+        PlacedBlockPrior("c0_b1", BlockPose(np.array([0.92, 0.0, 0.3]), np.eye(3))),
+    ]
+    constraint = CourseConstraint(
+        "c",
+        ("c0_b0", "c0_b1"),
+        {("c0_b0", "c0_b1"): np.array([0.92, 0.0, 0.0])},
+        source_snapshot_ids=("evaluated",),
+        evaluated_snapshot_id="evaluated",
+    )
+    with pytest.raises(ValueError, match="leaks the evaluated"):
+        verify_placed_blocks(np.empty((0, 3)), priors, course_constraints=[constraint])
+
+
+def test_course_validation_rejects_noncontributing_source() -> None:
+    priors = [
+        PlacedBlockPrior("x", BlockPose(np.array([0.0, 0.0, 0.3]), np.eye(3))),
+        PlacedBlockPrior("y", BlockPose(np.array([0.92, 0.0, 0.3]), np.eye(3))),
+    ]
+    constraint = CourseConstraint(
+        "c",
+        ("x", "y"),
+        {("x", "y"): np.array([0.92, 0.0, 0.0])},
+        source_snapshot_ids=("1783427923_718112512_seq5",),
+    )
+    with pytest.raises(ValueError, match="noncontributing"):
+        verify_placed_blocks(np.empty((0, 3)), priors, course_constraints=[constraint])
+
+
+def test_source_topology_rejects_literal_offset_changed_by_ten_cm() -> None:
+    source = "1783427923_718112512_seq5"
+    priors = [
+        PlacedBlockPrior(
+            "x",
+            BlockPose(np.array([0.0, 0.0, 0.3]), np.eye(3)),
+            source_snapshot_ids=(source,),
+        ),
+        PlacedBlockPrior(
+            "y",
+            BlockPose(np.array([0.92, 0.0, 0.3]), np.eye(3)),
+            source_snapshot_ids=(source,),
+        ),
+    ]
+    constraint = CourseConstraint(
+        "c",
+        ("x", "y"),
+        {("x", "y"): np.array([1.02, 0.0, 0.0])},
+        source_snapshot_ids=(source,),
+    )
+    with pytest.raises(ValueError, match="differs from leakage-safe derived geometry"):
+        verify_placed_blocks(np.empty((0, 3)), priors, course_constraints=[constraint])
+
+
+def test_face_boundaries_are_observed_not_planned_joints() -> None:
+    prior = BlockPose(np.array([0.0, 0.0, 0.3]), np.eye(3))
+    points = _face_cloud(single_face=True)
+    observations = _observed_face_boundaries(
+        prior, points, np.zeros(len(points), dtype=int), -np.ones(len(points))
+    )
+    assert observations
+    assert all(item.source.startswith("occupancy_falloff_") for item in observations)
+    assert all("joint" not in item.source for item in observations)
+
+
+def test_seamless_owned_face_partition_has_no_boundary_observation() -> None:
+    x_values = np.linspace(-0.9, 0.9, 80)
+    y_values = np.linspace(-0.27, 0.27, 20)
+    continuous_top = np.array([[x, y, 0.6] for x in x_values for y in y_values])
+    priors = [
+        BlockPose(np.array([-0.45, 0.0, 0.3]), np.eye(3)),
+        BlockPose(np.array([0.45, 0.0, 0.3]), np.eye(3)),
+    ]
+    results = verify_placed_blocks(continuous_top, priors)
+    assert all(result.diagnostics["observed_boundaries"] == [] for result in results)
