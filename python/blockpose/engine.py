@@ -12,6 +12,12 @@ from blockpose.detection import DetectionParams, SensorContext, detect_blocks_de
 from blockpose.frames import FrameBurst, PointFrame
 from blockpose.plan_prior import detect_with_plan
 from blockpose.pose import BlockPose
+from blockpose.verify_placed import (
+    PlacedObservability,
+    PlacedStatus,
+    VerifyPlacedParams,
+    verify_placed_blocks,
+)
 
 
 class QueryStatus(str, Enum):
@@ -73,12 +79,19 @@ FrameInput = PointFrame | FrameBurst | np.ndarray
 class HybridBlockDetector:
     """Stable facade over the current blind and plan-prior Python prototypes."""
 
-    def __init__(self, params: DetectionParams | None = None, *, timeout_ms: float = 500.0):
+    def __init__(
+        self,
+        params: DetectionParams | None = None,
+        *,
+        timeout_ms: float = 500.0,
+        verify_placed_v1: bool = False,
+    ):
         self.params = params or DetectionParams(min_score=0.4)
         self.timeout_ms = float(timeout_ms)
         if not np.isfinite(self.timeout_ms) or self.timeout_ms <= 0:
             raise ValueError("timeout_ms must be positive and finite")
         self._world_state: tuple[BlockPose, ...] = ()
+        self.verify_placed_v1 = bool(verify_placed_v1)
 
     def set_world_state(self, blocks: list[BlockPose]) -> None:
         self._validate_poses(blocks)
@@ -123,7 +136,11 @@ class HybridBlockDetector:
         if points.ndim != 2 or points.shape[1] != 3 or not np.all(np.isfinite(points)):
             raise ValueError("point input must have shape (N, 3) and be finite")
         unavailable = (
-            "intensity", "relative_time", "beam_id", "no_return_rays", "gripper_trajectory"
+            "intensity",
+            "relative_time",
+            "beam_id",
+            "no_return_rays",
+            "gripper_trajectory",
         )
         return points, unavailable, None, None
 
@@ -210,9 +227,62 @@ class HybridBlockDetector:
         except ValueError as exc:
             return self._failure(started, QueryErrorCode.INVALID_INPUT, str(exc))
         context = self._sensor_context(points, origin, misses)
-        results = detect_with_plan(
-            points, expected_blocks, self.params, sensor_context=context
-        )
+        if self.verify_placed_v1:
+            verified = verify_placed_blocks(
+                points,
+                expected_blocks,
+                sensor_context=context,
+                params=VerifyPlacedParams(
+                    max_translation_m=0.10,
+                    max_rotation_deg=10.0,
+                    min_support_points=self.params.refine_min_points,
+                ),
+            )
+            status_map = {
+                PlacedStatus.CONFIRMED: QueryStatus.CONFIRMED,
+                PlacedStatus.DEVIATED: QueryStatus.DEVIATED,
+                PlacedStatus.MISSING: QueryStatus.MISSING,
+                PlacedStatus.NOT_OBSERVABLE: QueryStatus.NOT_OBSERVABLE,
+            }
+            observability_map = {
+                PlacedObservability.WELL_CONSTRAINED: ResultObservability.WELL_CONSTRAINED,
+                PlacedObservability.PARTIALLY_CONSTRAINED: (
+                    ResultObservability.PARTIALLY_CONSTRAINED
+                ),
+                PlacedObservability.SYMMETRY_AMBIGUOUS: (ResultObservability.SYMMETRY_AMBIGUOUS),
+                PlacedObservability.UNOBSERVABLE: ResultObservability.UNOBSERVABLE,
+            }
+            blocks = [
+                BlockResult(
+                    result.pose,
+                    result.pose.dims,
+                    result.covariance,
+                    None,
+                    observability_map[result.observability],
+                    result.unconstrained_directions,
+                    "verify_placed_v1",
+                    {
+                        "support_points": float(result.support_points),
+                        "free_space_rays": float(result.free_space_rays),
+                        **(
+                            {"residual_rms_m": float(result.residual_rms_m)}
+                            if result.residual_rms_m is not None
+                            else {}
+                        ),
+                    },
+                    status_map[result.status],
+                    result.translation_from_plan_m,
+                    {
+                        **result.diagnostics,
+                        "rotation_from_plan_deg": result.rotation_from_plan_deg,
+                        "visible_faces": result.visible_faces,
+                        "occluded_faces": result.occluded_faces,
+                    },
+                )
+                for result in verified
+            ]
+            return self._finish(started, blocks, unavailable)
+        results = detect_with_plan(points, expected_blocks, self.params, sensor_context=context)
         blocks = []
         for result in results:
             observable = (
