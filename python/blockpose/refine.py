@@ -120,9 +120,53 @@ def refine_pose(
     straddling two blocks), and in that case the closed-form guess is safer than
     a confidently wrong fit.
     """
+    refined, success, _ = refine_pose_with_diagnostics(
+        pose,
+        points,
+        dims,
+        huber_scale=huber_scale,
+        max_translation=max_translation,
+        max_rotation_deg=max_rotation_deg,
+        min_points=min_points,
+    )
+    return refined, success
+
+
+def refine_pose_with_diagnostics(
+    pose: BlockPose,
+    points: np.ndarray,
+    dims,
+    *,
+    huber_scale: float = 0.05,
+    max_translation: float = 0.15,
+    max_rotation_deg: float = 20.0,
+    min_points: int = 20,
+) -> tuple[BlockPose, bool, dict[str, object]]:
+    """Run :func:`refine_pose` and expose solver facts for parity fixtures.
+
+    This deliberately shares the production solver path.  The returned facts
+    describe the unconstrained SciPy result *before* the safety guard decides
+    whether it is safe to publish, so an optimizer mismatch cannot be confused
+    with a guard rejection.
+    """
     points = np.asarray(points, dtype=np.float64)
+    diagnostic: dict[str, object] = {
+        "attempted": False,
+        "point_count": int(len(points)),
+        "success": False,
+        "status": None,
+        "nfev": 0,
+        "njev": 0,
+        "cost": None,
+        "optimality": None,
+        "solution_x": None,
+        "translation_norm": None,
+        "rotation_deg": None,
+        "guard_accepted": False,
+    }
     if len(points) < min_points:
-        return pose, False
+        return pose, False, diagnostic
+    diagnostic["attempted"] = True
     half = np.asarray(dims, dtype=np.float64) / 2.0
     rotation0, position0 = pose.rotation, pose.position
 
@@ -140,17 +184,32 @@ def refine_pose(
             max_nfev=200,
         )
     except (ValueError, np.linalg.LinAlgError):
-        return pose, False
+        return pose, False, diagnostic
+    diagnostic.update(
+        {
+            "success": bool(solution.success),
+            "status": int(solution.status),
+            "nfev": int(solution.nfev),
+            "njev": int(solution.njev) if solution.njev is not None else None,
+            "cost": float(solution.cost),
+            "optimality": float(solution.optimality),
+            "solution_x": solution.x.tolist(),
+        }
+    )
     if not solution.success:
-        return pose, False
+        return pose, False, diagnostic
 
     delta_rotation = _exp_so3(solution.x[:3])
     angle = np.degrees(
         np.arccos(np.clip((np.trace(delta_rotation) - 1.0) / 2.0, -1.0, 1.0))
     )
-    if float(np.linalg.norm(solution.x[3:])) > max_translation or angle > max_rotation_deg:
-        return pose, False
+    translation_norm = float(np.linalg.norm(solution.x[3:]))
+    diagnostic["translation_norm"] = translation_norm
+    diagnostic["rotation_deg"] = float(angle)
+    if translation_norm > max_translation or angle > max_rotation_deg:
+        return pose, False, diagnostic
 
+    diagnostic["guard_accepted"] = True
     return (
         BlockPose(
             position=position0 + solution.x[3:],
@@ -160,6 +219,7 @@ def refine_pose(
             dims=pose.dims,
         ),
         True,
+        diagnostic,
     )
 
 

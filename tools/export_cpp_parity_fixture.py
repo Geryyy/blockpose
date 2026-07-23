@@ -18,7 +18,7 @@ import numpy as np
 
 from blockpose.detection import DetectionParams, detect_blocks_detailed
 from blockpose.io import load_snapshot
-from blockpose.refine import assign_points, refine_pose
+from blockpose.refine import assign_points, refine_pose_with_diagnostics
 from blockpose.synth import BlockSpec, ClutterParams, SynthParams, generate_scene
 
 
@@ -98,8 +98,9 @@ def _write_refinement_fixture(output: Path, case_id: str, result, params: Detect
         assigned = assign_points(current, trace.above_support_points, None, params.refine_band)
         next_poses = []
         refined_flags = []
+        solver_facts = []
         for pose, owned in zip(current, assigned, strict=True):
-            refined, success = refine_pose(
+            refined, success, solver = refine_pose_with_diagnostics(
                 pose,
                 owned,
                 pose.dims,
@@ -109,10 +110,12 @@ def _write_refinement_fixture(output: Path, case_id: str, result, params: Detect
             )
             next_poses.append(refined)
             refined_flags.append(success)
+            solver_facts.append(solver)
         passes.append(
             {
                 "assigned_counts": [len(owned) for owned in assigned],
                 "refined": refined_flags,
+                "solver": solver_facts,
                 "poses": [
                     {
                         "position": pose.position.tolist(),
