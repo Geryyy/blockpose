@@ -53,6 +53,10 @@ def main() -> int:
                         "n_snapshots_scored",
                         "precision",
                         "recall",
+                        "exact_count_rate",
+                        "translation_error_p95_m",
+                        "rotation_error_p95_deg",
+                        "timeout_count",
                         "end_to_end_runtime_p95_ms",
                     )
                 },

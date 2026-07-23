@@ -3,12 +3,14 @@
 The frozen reviewed snapshots are a development diagnostic, not a production
 acceptance set.  The checked-in notebook contains the most recent rendered
 values.  Rerun
-`uv run python tools/eval_detector_modes.py --output out/frozen-mode-benchmark.json`
+`uv run python tools/eval_detector_modes.py --timeout-ms 5000 --output out/frozen-mode-benchmark.json`
 for exact revision- and machine-specific values.  In particular,
 `SCENE_DISCOVERY` deadline outcomes can vary around the soft 500 ms budget, so
-one run's p95 must never be treated as a stable timing claim.  Its operational
-latency/stability gate is currently **failed**: accuracy applies only to
-completed queries and must be reported separately from deadline compliance.
+one run's p95 must never be treated as a stable timing claim. The 5 s offline
+run is for accuracy only; report it separately from the 500 ms operational
+deadline experiment. Its operational latency/stability gate is currently
+**failed**: accuracy applies only to completed queries and must be reported
+separately from deadline compliance.
 The report records worktree provenance; a dirty-tree result is not
 revision-identical to its Git SHA.
 

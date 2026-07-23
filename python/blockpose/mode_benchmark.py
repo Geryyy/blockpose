@@ -12,7 +12,7 @@ from __future__ import annotations
 import subprocess
 import time
 from collections import Counter
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +23,7 @@ from scipy.optimize import linear_sum_assignment
 from blockpose.annotations import load_annotations
 from blockpose.detection import DetectionParams
 from blockpose.engine import HybridBlockDetector, QueryStatus
-from blockpose.evaluate import rotation_error_deg
+from blockpose.evaluate import rotation_error_deg, translation_error
 from blockpose.frames import PointFrame, PoseTrajectory, TimedPose
 from blockpose.io import load_pcd, load_tf_snapshot
 from blockpose.pose import rotmat_to_quat_xyzw
@@ -108,6 +108,42 @@ def _pose_record(pose) -> dict[str, Any]:
         "dimensions_m": [float(value) for value in pose.dims],
         "source": pose.source,
     }
+
+
+def _scene_discovery_target_cohorts(
+    records: list[dict[str, Any]], field: str
+) -> dict[str, dict[str, float | int | None]]:
+    """Summarize target recall/pose by reviewed taxonomy without re-querying.
+
+    Prediction always happens on the full cloud.  This only groups the already
+    joined, post-inference target records so hard occlusion and non-free scenes
+    cannot be mistaken for a free-staging recall regression.
+    """
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        for target in record["targets"]:
+            buckets.setdefault(str(target[field]), []).append(target)
+    result = {}
+    for label, targets in sorted(buckets.items()):
+        matched = [target for target in targets if target["matched_detection_index"] is not None]
+        translation = [
+            float(target["matched_translation_error_m"])
+            for target in matched
+            if target["matched_translation_error_m"] is not None
+        ]
+        rotation = [
+            float(target["matched_rotation_error_deg"])
+            for target in matched
+            if target["matched_rotation_error_deg"] is not None
+        ]
+        result[label] = {
+            "targets": len(targets),
+            "matched": len(matched),
+            "recall": len(matched) / len(targets) if targets else None,
+            "translation_error_p95_m": _percentile(translation, 95),
+            "rotation_error_p95_deg": _percentile(rotation, 95),
+        }
+    return result
 
 
 def _status_counts(records: list[dict[str, Any]]) -> dict[str, int]:
@@ -220,6 +256,16 @@ def run_scene_discovery(
                 if np.all(target.pose.position >= low) and np.all(target.pose.position <= high)
             ]
         pairs = _compatible_match(detections, [target.pose for target in targets], 0.50)
+        match_by_detection = {detection_index: target_index for detection_index, target_index in pairs}
+        match_by_target = {target_index: detection_index for detection_index, target_index in pairs}
+        translation_errors = [
+            translation_error(detections[detection_index], targets[target_index].pose)
+            for detection_index, target_index in pairs
+        ]
+        rotation_errors = [
+            rotation_error_deg(detections[detection_index], targets[target_index].pose)
+            for detection_index, target_index in pairs
+        ]
         records.append(
             {
                 "snapshot": snapshot.name,
@@ -234,6 +280,11 @@ def run_scene_discovery(
                 "prediction_count_scored_roi": len(detections),
                 "target_count_scored_roi": len(targets),
                 "matched": len(pairs),
+                "exact_count": len(detections) == len(targets)
+                if annotations.has_complete_roi
+                else None,
+                "translation_errors_m": translation_errors,
+                "rotation_errors_deg": rotation_errors,
                 "false_positives": len(detections) - len(pairs)
                 if annotations.has_complete_roi
                 else None,
@@ -242,13 +293,16 @@ def run_scene_discovery(
                     {
                         "index": index,
                         "pose": _pose_record(pose),
-                        "matched_target_index": next(
-                            (
-                                target_index
-                                for detection_index, target_index in pairs
-                                if detection_index == index
-                            ),
-                            None,
+                        "matched_target_index": match_by_detection.get(index),
+                        "matched_translation_error_m": (
+                            translation_error(pose, targets[match_by_detection[index]].pose)
+                            if index in match_by_detection
+                            else None
+                        ),
+                        "matched_rotation_error_deg": (
+                            rotation_error_deg(pose, targets[match_by_detection[index]].pose)
+                            if index in match_by_detection
+                            else None
                         ),
                     }
                     for index, pose in enumerate(detections)
@@ -258,14 +312,23 @@ def run_scene_discovery(
                         "index": index,
                         "id": target.id,
                         "pose": _pose_record(target.pose),
+                        "visibility": target.visibility,
+                        "scenario": scenarios[f"{snapshot.name}/{target.id}"].scenario,
+                        "query": scenarios[f"{snapshot.name}/{target.id}"].query,
+                        "classification_status": scenarios[
+                            f"{snapshot.name}/{target.id}"
+                        ].classification_status,
                         "pose_quality": scenarios[f"{snapshot.name}/{target.id}"].pose_quality,
-                        "matched_detection_index": next(
-                            (
-                                detection_index
-                                for detection_index, target_index in pairs
-                                if target_index == index
-                            ),
-                            None,
+                        "matched_detection_index": match_by_target.get(index),
+                        "matched_translation_error_m": (
+                            translation_error(detections[match_by_target[index]], target.pose)
+                            if index in match_by_target
+                            else None
+                        ),
+                        "matched_rotation_error_deg": (
+                            rotation_error_deg(detections[match_by_target[index]], target.pose)
+                            if index in match_by_target
+                            else None
                         ),
                     }
                     for index, target in enumerate(targets)
@@ -276,6 +339,12 @@ def run_scene_discovery(
     total_detections = sum(record["prediction_count_scored_roi"] for record in complete)
     total_targets = sum(record["target_count_scored_roi"] for record in complete)
     total_matches = sum(record["matched"] for record in complete)
+    translation_errors = [
+        error for record in complete for error in record["translation_errors_m"]
+    ]
+    rotation_errors = [
+        error for record in complete for error in record["rotation_errors_deg"]
+    ]
     core = [item["core_runtime_ms"] for item in invocations]
     end_to_end = [item["end_to_end_runtime_ms"] for item in invocations]
     return {
@@ -290,6 +359,19 @@ def run_scene_discovery(
         "total_matched": total_matches,
         "precision": total_matches / total_detections if total_detections else None,
         "recall": total_matches / total_targets if total_targets else None,
+        "exact_count_snapshots": sum(record["exact_count"] is True for record in complete),
+        "exact_count_rate": (
+            sum(record["exact_count"] is True for record in complete) / len(complete)
+            if complete
+            else None
+        ),
+        "matched_pose_error_count": len(translation_errors),
+        "translation_error_p50_m": _percentile(translation_errors, 50),
+        "translation_error_p95_m": _percentile(translation_errors, 95),
+        "translation_error_max_m": max(translation_errors, default=None),
+        "rotation_error_p50_deg": _percentile(rotation_errors, 50),
+        "rotation_error_p95_deg": _percentile(rotation_errors, 95),
+        "rotation_error_max_deg": max(rotation_errors, default=None),
         "empty_scene_count": sum(record["target_count_scored_roi"] == 0 for record in complete),
         "matching_policy": {
             "max_translation_m": 0.50,
@@ -306,6 +388,11 @@ def run_scene_discovery(
         "end_to_end_runtime_max_ms": max(end_to_end, default=None),
         "invocations": invocations,
         "snapshot_failures": failures,
+        "target_cohorts": {
+            "scenario": _scene_discovery_target_cohorts(records, "scenario"),
+            "visibility": _scene_discovery_target_cohorts(records, "visibility"),
+            "pose_quality": _scene_discovery_target_cohorts(records, "pose_quality"),
+        },
         "records": records,
     }
 
@@ -610,7 +697,7 @@ def run_mode_benchmark(
     )
     return {
         "schema_version": 1,
-        "created_utc": datetime.now(UTC).isoformat(),
+        "created_utc": datetime.now(timezone.utc).isoformat(),
         "git_revision": _git_revision(),
         "snapshot_root": str(snapshots_dir),
         "config": {

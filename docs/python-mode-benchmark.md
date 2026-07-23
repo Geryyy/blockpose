@@ -4,13 +4,22 @@ Run the rerunnable Python diagnostic:
 
 ```bash
 mkdir -p out
-uv run python tools/eval_detector_modes.py --output out/frozen-mode-benchmark.json
+uv run python tools/eval_detector_modes.py --timeout-ms 5000 \
+  --output out/frozen-mode-benchmark.json
 ```
 
 The JSON is the notebook input: it has aggregate performance, per-target
 prediction/ground-truth poses for overlays, observability, statuses, runtime,
 and provenance.  It is deliberately a development diagnostic, not a
 production gate.
+
+Use the 5 s budget when measuring detector accuracy on the 23 full snapshots:
+the historical 500 ms budget is a runtime deadline experiment and can return
+an empty result for every full-cloud query. The artifact records both the
+budget and timeout count, so this accuracy run must never be quoted as a
+latency result. `SCENE_DISCOVERY` reports exact-count rate, matched-centre and
+symmetry-aware orientation p50/p95/max, plus target cohorts by scenario,
+visibility, and annotation pose quality.
 
 `SCENE_DISCOVERY` first runs `detect_free` on the full LiDAR frame. Only after
 the query finishes does it open the annotation manifest and use the complete

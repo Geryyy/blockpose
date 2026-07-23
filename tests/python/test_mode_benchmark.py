@@ -85,7 +85,18 @@ def test_verify_placed_loads_labels_after_query_and_records_overlay(
     )
     monkeypatch.setattr(
         "blockpose.mode_benchmark.load_snapshot_scenarios",
-        lambda: {"scene/block": type("S", (), {"pose_quality": "precise"})()},
+        lambda: {
+            "scene/block": type(
+                "S",
+                (),
+                {
+                    "scenario": "free",
+                    "query": "detect_free",
+                    "classification_status": "reviewed",
+                    "pose_quality": "precise",
+                },
+            )()
+        },
     )
     monkeypatch.setattr(
         "blockpose.mode_benchmark.load_annotations",
@@ -149,7 +160,18 @@ def test_scene_discovery_reads_annotation_and_roi_only_after_query(
     monkeypatch.setattr("blockpose.mode_benchmark._load_frame", lambda *_args: object())
     monkeypatch.setattr(
         "blockpose.mode_benchmark.load_snapshot_scenarios",
-        lambda: {"scene/block": type("S", (), {"pose_quality": "precise"})()},
+        lambda: {
+            "scene/block": type(
+                "S",
+                (),
+                {
+                    "scenario": "free",
+                    "query": "detect_free",
+                    "classification_status": "reviewed",
+                    "pose_quality": "precise",
+                },
+            )()
+        },
     )
     monkeypatch.setattr(
         "blockpose.mode_benchmark.load_annotations",
@@ -192,3 +214,5 @@ def test_scene_discovery_reads_annotation_and_roi_only_after_query(
     assert events == ["query", "annotations"]
     assert report["precision"] == report["recall"] == 1.0
     assert report["records"][0]["prediction_count_scored_roi"] == 1
+    assert report["exact_count_rate"] == 1.0
+    assert report["target_cohorts"]["scenario"]["free"]["recall"] == 1.0
