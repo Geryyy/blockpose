@@ -1,10 +1,12 @@
-# Python-first block detector plan
+# Python reference detector plan
 
-This is the working plan for the **Python prototype track**: develop a simple,
-robust point-cloud block detector against synthetic data now, validate on real
-frames once they are re-exported with per-snapshot TF, then port the frozen
-algorithm to the C++ core. `docs/implementation-plan.md` (v4) remains the
-long-term architectural target.
+This documents the **Python reference track** and its accumulated evidence.
+The active takeover sequence is now in `docs/next-steps.md`: start the C++20
+core and ROS 2 evaluation/replay node immediately, port `SCENE_DISCOVERY`
+first against complete rosbags, and require parity with this Python reference
+before adding the prior-conditioned modes. The node is not yet a production
+replacement. `docs/implementation-plan.md` (v4) remains the long-term
+architectural target.
 
 ## Problem shape
 

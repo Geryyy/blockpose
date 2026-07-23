@@ -1,24 +1,25 @@
 # Blockpose
 
 Blockpose is a standalone workspace for reliable 6-DoF pose estimation of
-concrete blocks from point clouds. Development is **Python-first**: the
-current phase is a Python/Open3D prototype track (detection, registration,
-evaluation against real snapshot data) used to de-risk the algorithmic
-approach. Once the approach is validated, the core moves to C++20 with
-pybind11 bindings and a thin, optional ROS 2 integration layer, per the
-implementation plan — the C++/CMake/ROS 2 scaffolding has been removed for
-now and returns at that point, not before. The current repository contains
-the implementation roadmap, development environment, tests, and a curated
-export of models and configuration from the source ROS workspace.
+concrete blocks from point clouds. The current implementation is a
+Python/Open3D detector used as the behavioral reference. The next development
+step is to add a C++20 core and thin ROS 2 evaluation node so complete rosbags
+can drive the port, beginning with `SCENE_DISCOVERY`; this scaffolding is
+planned but is **not implemented in this repository yet**. It is an evaluation
+path, not a production replacement. The current repository contains the
+implementation roadmap, development environment, tests, and a curated export
+of models and configuration from the source ROS workspace.
 
 ## Start here
 
 - [`docs/current-detector-pipeline.md`](docs/current-detector-pipeline.md) is
   the canonical description of current, as-built detector behavior, including
   its default and opt-in paths, limits, and reproducible diagnostics.
+- [`docs/next-steps.md`](docs/next-steps.md) is the active C++20/ROS 2 takeover
+  sequence and defines its replay, parity, and promotion gates.
 - [`docs/implementation-plan.md`](docs/implementation-plan.md) is the future
-  architecture and migration plan, including the later C++/ROS 2 phases; it is
-  not a description of the current implementation.
+  target architecture; it is not a description of the current implementation
+  or the active ordering.
 - [`docs/ENVIRONMENT.md`](docs/ENVIRONMENT.md) explains the Docker and local
   development workflow.
 - [`config/`](config/) contains calibration, perception, initialization, block
@@ -92,8 +93,8 @@ The devcontainer uses the same core image and automatically mounts the repo-loca
 `data/` directory at `/data` with `BLOCKPOSE_DATASET=/data`.
 
 `make check` currently runs the Python test suite and lint only. C++ build,
-ctest, and clang-format targets will return once the core migrates back to
-C++/ROS 2.
+ctest, and clang-format targets do not exist yet; adding their minimal
+scaffolding is the first task in [`docs/next-steps.md`](docs/next-steps.md).
 
 ## Reference bag workflow
 

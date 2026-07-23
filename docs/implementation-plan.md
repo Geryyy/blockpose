@@ -237,6 +237,13 @@ exists.)
 
 ## 4. Phase P — throwaway Python spike (new, before any API freeze)
 
+> **2026-07 execution note:** the repository now has a Python reference and
+> measured snapshots, so Phase P is historical rather than the next task. The
+> active sequence is `docs/next-steps.md`: build the C++20 + ROS 2 evaluation
+> replay skeleton now, port `SCENE_DISCOVERY` first using complete rosbags, and
+> preserve Python/C++ parity. Later phases below describe the target capability,
+> not permission to claim production readiness.
+
 **Duration: 2–3 days. Explicitly throwaway code.**
 
 Export 10–20 real Seyond frames (any quick path). In a Python notebook with
