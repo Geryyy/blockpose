@@ -216,6 +216,10 @@ class InferenceTrace:
     raw_hypotheses: tuple[TraceHypothesis, ...]
     threshold_hypotheses: tuple[TraceHypothesis, ...]
     final_hypotheses: tuple[TraceHypothesis, ...]
+    # Initializations passed directly into the SDF refinement stage.  Keeping
+    # this distinct from final hypotheses lets ports test solver parity without
+    # conflating it with proposal or post-refinement NMS differences.
+    pre_refinement_hypotheses: tuple[TraceHypothesis, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1511,6 +1515,7 @@ def _detect_blocks_impl(
     threshold_ids = {identity_ids[id(value)] for value in hypotheses}
     selected = _select_conflict_alternatives(hypotheses, params.conflict_alternatives)
     selected_ids = [identity_ids[id(value)] for value in selected]
+    pre_refinement_values = tuple(selected)
     pre_refinement_ids = set(selected_ids)
     counts["refinement_candidates"] = len(selected)
     timings["selection"] = (perf_counter() - selection_started) * 1000.0
@@ -1601,6 +1606,16 @@ def _detect_blocks_impl(
             records(raw_values, "raw", raw_fates, raw_identity_ids),
             records(hypotheses, "threshold", raw_fates, raw_identity_ids),
             records(selected, "final", raw_fates, identity_ids),
+            tuple(
+                TraceHypothesis(
+                    source_id,
+                    hypothesis.pose,
+                    hypothesis.evidence.score,
+                    "pre_refinement",
+                    raw_fates.get(source_id, "retained"),
+                )
+                for hypothesis, source_id in zip(pre_refinement_values, selected_ids, strict=True)
+            ),
         )
     return [hypothesis.pose for hypothesis in selected], selected, counts, timings, trace
 
