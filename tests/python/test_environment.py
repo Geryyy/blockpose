@@ -1,7 +1,8 @@
-"""Python-side environment smoke test — mirror of apps/env_check.cpp.
+"""Python-side environment smoke tests for the future C++ core dependencies.
 
-Verifies the uv venv provides working versions of every Phase P–1 dependency
-and that the Open3D wheel matches the pinned C++ SDK version.
+Verifies the uv venv provides working versions of the planned core dependencies
+and that the Open3D wheel matches the C++ SDK version pinned for the upcoming
+scaffolding. No C++ executable or binding is implemented yet.
 """
 
 import numpy as np
@@ -48,9 +49,9 @@ def test_numpy_float32_row_major_convention() -> None:
     assert pts.flags["C_CONTIGUOUS"]
 
 
-@pytest.mark.skip(reason="enable once the pybind11 module builds (Phase 0 gate)")
+@pytest.mark.skip(reason="enable after the planned pybind11 scaffolding is implemented")
 def test_bindings_zero_copy() -> None:
     import blockpose  # noqa: F401
 
-    # Phase 0 gate: assert the C++ PointCloud maps to NumPy without copy
+    # Future binding gate: assert the C++ PointCloud maps to NumPy without copy
     # (compare data pointers via __array_interface__).

@@ -20,40 +20,106 @@ results from LOSO plan priors; and `REFINE_GRASPED` remains withheld because
 legacy snapshots lack an independent FK/grasp pose, covariance, and gripper
 trajectory.
 
-## Ordered work
+## Current decision
 
-1. Improve blind discovery before adding complexity. Profile all timeout and
-   deadline failures, enforce cooperative timeout behavior, and raise recovery
-   on the existing full-cloud benchmark. Define a non-ground-truth workspace ROI from the
-   construction/world model (or a caller-supplied physical workspace), then
-   test it separately from the annotation scoring ROI. Do not tune against
-   annotation ROI or use it in inference.
+Start the C++20 core and a thin ROS 2 **evaluation node now**. Its immediate
+purpose is to replay complete rosbags, expose data/TF assumptions, and compare
+results with the Python detector. It is not a production replacement and must
+not be connected to safety- or autonomy-critical behavior until the gates below
+are met. Python remains the behavioral reference during the port.
 
-2. Record rich, synchronized ROS inputs for each new query: per-point time,
-   intensity, `scan_id`/`scan_idx`, return flags, sensor/TF trajectory,
-   no-return rays when available, and gripper/FK pose plus covariance. This
-   unlocks deskew, ray-consistent free-space evidence, gripper line filtering,
-   and an honest `REFINE_GRASPED` evaluation. RGB/SAM remains a proposal aid;
-   geometry owns the final pose, covariance, and Missing/NotObservable result.
+## Ordered takeover work
 
-3. Freeze a new real dataset by recording session, not adjacent frames. Keep a
-   development split for design choices and an untouched held-out session split
-   for the final report. Add independently labelled absent planned blocks for
-   `Missing`, placement deviations up to 10 cm, seamless walls, gripper
-   occlusion, empty/machinery scenes, and both laid and upright blocks.
+1. **Create the replayable skeleton.** Add the C++20 library target and ROS 2
+   evaluation-node package, starting with one-shot `SCENE_DISCOVERY` request
+   validation and diagnostic reporting. For this mode the required recorded
+   inputs are a timestamped point cloud and the `/tf` plus `/tf_static` chain
+   needed to reach the configured
+   query frame; workspace/query configuration comes from the caller. Joint/FK
+   and gripper metadata may be recorded and diagnosed but are optional for
+   `SCENE_DISCOVERY`. Keep ROS types outside the core. Do not implement the
+   other modes yet.
 
-4. Freeze portable Python artifacts once the development behavior is selected:
-   versioned mode JSON reports, golden frame inputs and expected structured
-   results, overlays, parameters, calibration data, and a clean-Git revision.
-   Keep the notebook as the human-readable report; keep the JSON as the exact
-   machine-readable evidence.
+2. **Make bag ingestion explicit and testable.** Resolve every cloud into the
+   configured world/query frame at its acquisition time. Preserve per-point
+   time, intensity, `scan_id`/`scan_idx`, beam/return flags, and sensor
+   trajectory when present; interpolate available transforms over the scan
+   interval rather than using the bag-start or latest transform. Record which
+   optional fields were available in diagnostics. Time-aligned joint/FK,
+   gripper trajectory, and grasp covariance become required only for the later
+   `REFINE_GRASPED` mode. A caller-supplied physical workspace or the
+   construction/world model defines the inference ROI; annotation ROIs are for
+   scoring only.
 
-5. Port only the frozen core to C++20/ROS 2: frame/ray preprocessing,
-   workspace crop, proposals, plan-conditioned refinement, scoring,
-   observability, covariance, and structured failures. Make the current
-   orchestrator's three one-shot modes adapters to that core; retain the
-   SegmentImage/mask-cutout path as an optional proposal source. Require
-   Python/C++ parity on golden inputs before switching runtime.
+3. **Port `SCENE_DISCOVERY` first.** Port preprocessing, workspace crop,
+   proposal generation, cuboid refinement, scoring, covariance, observability,
+   and cooperative deadline handling in small comparable slices. Run Python and
+   C++ on the same extracted bag queries after each slice. Profile deadline
+   failures and recovery on full clouds rather than tuning only on the legacy
+   snapshots.
+
+4. **Establish parity artifacts while porting.** Freeze representative queries
+   from full bags as canonical inputs, together with Python parameters,
+   structured outputs, overlays, and revision provenance. Require exact parity
+   for statuses and toleranced parity for pose, covariance, score, and selected
+   candidates. Every intentional behavioral difference needs a documented
+   fixture and rationale; do not silently change the Python reference to make a
+   mismatch pass.
+
+5. **Add modes in evidence order.** After `SCENE_DISCOVERY` meets its replay and
+   parity gate, port `REFINE_BLOCK` using plan/placement priors. Then port
+   `REFINE_GRASPED` using time-aligned gripper FK, grasp covariance, gripper
+   trajectory, and occlusion/filtering inputs. Geometry owns final pose,
+   covariance, and absence/observability status; RGB/SAM may remain an optional
+   proposal source only.
+
+6. **Build the real evaluation set.** Record by session, not adjacent frames.
+   Keep a development split and an untouched held-out session split. Include
+   independently labelled absent planned blocks, deviations up to 10 cm,
+   seamless walls, gripper occlusion, empty/machinery scenes, and laid and
+   upright blocks. Promotion beyond an evaluation node requires this set and
+   the production acceptance conditions below.
+
+## Input and failure contract
+
+- Missing a required cloud, timestamp, frame ID, or transform chain is a
+  structured input error. Do not substitute identity, latest TF, or a static
+  transform silently.
+- Per-point timing is required when motion compensation is requested. If it is
+  absent, either reject the query or run an explicitly configured
+  `UNDESKEWED` evaluation path and mark the result degraded.
+- Missing optional intensity/beam/return metadata disables only the dependent
+  evidence and is reported in diagnostics; it must not change array alignment.
+- A valid query with no supported block returns success with an empty detection
+  list, not an input error. A deadline returns a typed timeout with partial-work
+  diagnostics, never a fabricated `Missing` result.
+- `Missing` means sufficient expected-visible evidence supports absence;
+  `NotObservable` means the data cannot distinguish absence from occlusion or
+  inadequate coverage. `REFINE_GRASPED` must not run without time-aligned FK
+  and its declared grasp uncertainty.
+
+## Deliverables and gates
+
+| Deliverable | Gate |
+| --- | --- |
+| Replay skeleton | A parameterized command replays one complete external bag query deterministically; the diagnostic executable validates required topics/transforms, reports data availability and timing, and does not claim detector-result compatibility yet |
+| `SCENE_DISCOVERY` port | Same canonical inputs run through Python and C++; status/candidate parity and agreed numeric tolerances pass; missing TF and deadline fixtures pass |
+| `REFINE_BLOCK` port | Plan-prior fixtures cover `Confirmed`, `Deviated`, `Missing`, and `NotObservable`, with Python/C++ parity |
+| `REFINE_GRASPED` port | Full-bag fixtures include scan-time TF/FK, covariance, and gripper trajectory; occlusion and missing-data behavior pass |
+| Runtime promotion | Development performance gates and held-out production acceptance conditions below pass; ROS wrapper output equals standalone core output |
+
+## First task for the next agent
+
+Inventory the workspace build and message conventions, then commit the smallest
+buildable skeleton: a C++20 core library plus a thin ROS 2 evaluation executable
+that validates a `SCENE_DISCOVERY` request and reports diagnostic input/topic
+availability without emitting a detector result. Add smoke tests for valid and
+missing-required-input behavior. Document a parameterized replay command such
+as `ros2 bag play "${BLOCKPOSE_BAG}" --topics /seyond/points /tf /tf_static`,
+including the actual configured point topic and node invocation once those are
+known. State that `BLOCKPOSE_BAG` must name a complete external bag supplied by
+the operator: no replay bag is checked into this repository. Do not port
+detector math or invent a new result status/schema in that first change.
 
 ## Gates
 
