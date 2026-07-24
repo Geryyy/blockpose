@@ -67,6 +67,44 @@ def _write_case(output: Path, case_id: str, points: np.ndarray, result) -> None:
     )
 
 
+def _write_lineage(output: Path, case_id: str, result) -> None:
+    """Write the exact pre-selection lineage for cross-port diagnostics."""
+    if result.trace is None:
+        raise RuntimeError("lineage fixture requires collect_trace=True")
+    payload = []
+    for item in result.trace.raw_lineage:
+        payload.append(
+            {
+                "id": item.id,
+                "proposal_component": item.proposal_component,
+                "region": item.region,
+                "top_plane": item.top_plane,
+                "side_plane": item.side_plane,
+                "top_normal": item.top_normal.tolist(),
+                "top_centroid": item.top_centroid.tolist(),
+                "side_normal": None if item.side_normal is None else item.side_normal.tolist(),
+                "side_centroid": (
+                    None if item.side_centroid is None else item.side_centroid.tolist()
+                ),
+                "candidate_dims": list(item.candidate_dims),
+                "top_only": item.top_only,
+                "synthesized_pose": {
+                    "position": item.synthesized_pose.position.tolist(),
+                    "rotation": item.synthesized_pose.rotation.tolist(),
+                    "dims": list(item.synthesized_pose.dims),
+                },
+                "evidence": _json_value(asdict(item.evidence)),
+                "top_support_height_m": item.top_support_height_m,
+                "accepted_to_raw": item.accepted_to_raw,
+                "passed_score_threshold": item.passed_score_threshold,
+                "fate": item.fate,
+            }
+        )
+    (output / f"{case_id}.lineage.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
 def _write_plain_text_case(output: Path, case_id: str, points: np.ndarray, result) -> None:
     """Portable C++ input/golden files, generated deterministically at test time."""
     np.savetxt(output / f"{case_id}.xyz", np.asarray(points, dtype=np.float64), fmt="%.17g")
@@ -190,6 +228,7 @@ def main() -> int:
         points = _synthetic_case(entry)
         result = detect_blocks_detailed(points, params, collect_trace=True)
         _write_case(args.output, entry["id"], points, result)
+        _write_lineage(args.output, entry["id"], result)
         _write_refinement_fixture(args.output, entry["id"], result, params)
         if args.plain_text:
             _write_plain_text_case(args.output, entry["id"], points, result)
@@ -205,6 +244,7 @@ def main() -> int:
             points, _ = load_snapshot(snapshot, args.transform_config)
             result = detect_blocks_detailed(points, params, collect_trace=True)
             _write_case(args.output, f"real_{snapshot_id}", points, result)
+            _write_lineage(args.output, f"real_{snapshot_id}", result)
             _write_refinement_fixture(args.output, f"real_{snapshot_id}", result, params)
             if args.plain_text:
                 _write_plain_text_case(args.output, f"real_{snapshot_id}", points, result)

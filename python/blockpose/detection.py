@@ -207,6 +207,34 @@ class TraceHypothesis:
 
 
 @dataclass(frozen=True)
+class RawHypothesisLineage:
+    """Pre-selection provenance for one synthesized cuboid candidate.
+
+    This is diagnostic-only.  It exists so a C++ port mismatch can be located
+    at the proposal/plane/pair boundary instead of being misdiagnosed as an
+    optimizer or NMS problem.
+    """
+
+    id: str
+    proposal_component: int
+    region: int
+    top_plane: int
+    side_plane: int | None
+    top_normal: np.ndarray
+    top_centroid: np.ndarray
+    side_normal: np.ndarray | None
+    side_centroid: np.ndarray | None
+    candidate_dims: tuple[float, float, float]
+    top_only: bool
+    synthesized_pose: BlockPose
+    evidence: HypothesisEvidence
+    top_support_height_m: float
+    accepted_to_raw: bool
+    passed_score_threshold: bool
+    fate: str
+
+
+@dataclass(frozen=True)
 class InferenceTrace:
     """Optional inference-only evidence retained for post-hoc GT joining."""
 
@@ -220,6 +248,7 @@ class InferenceTrace:
     # this distinct from final hypotheses lets ports test solver parity without
     # conflating it with proposal or post-refinement NMS differences.
     pre_refinement_hypotheses: tuple[TraceHypothesis, ...] = ()
+    raw_lineage: tuple[RawHypothesisLineage, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1430,7 +1459,9 @@ def _detect_blocks_impl(
     hypotheses: list[CuboidHypothesis] = []
     plane_subtimings = {"plane_search": 0.0, "plane_full_score_refit": 0.0}
     stage_started = perf_counter()
-    for cluster, proposal_scale in clusters:
+    lineage_seeds: list[RawHypothesisLineage] = []
+    hypothesis_lineage_ids: dict[int, str] = {}
+    for component_index, (cluster, proposal_scale) in enumerate(clusters):
         if sensor_context is not None:
             median_range = float(np.median(np.linalg.norm(cluster - sensor_context.origin, axis=1)))
             density_scale = float(np.clip((5.0 / max(median_range, 1.0)) ** 2, 0.25, 1.0))
@@ -1448,7 +1479,7 @@ def _detect_blocks_impl(
             # A large connected footprint without internal boundary evidence is
             # an elongated object, not a license to tile it with known boxes.
             continue
-        for region in regions:
+        for region_index, region in enumerate(regions):
             counts["plane_regions"] += 1
             planes, fit_counts, fit_timings = _fit_planes(region, cluster_params)
             for name, value in fit_counts.items():
@@ -1462,7 +1493,7 @@ def _detect_blocks_impl(
             # puts faces where no returns are and leaves observed surface
             # unexplained, so `surface_explained` and `free_space_consistency`
             # separate them; selection then keeps the better-scoring one.
-            for dims in _candidate_dims(params):
+            for dims_index, dims in enumerate(_candidate_dims(params)):
                 for top, side in _candidate_plane_sets(planes, cluster_params, ground, dims):
                     top_n = top.normal if top.normal[2] > 0 else -top.normal
                     if side is not None:
@@ -1495,8 +1526,43 @@ def _detect_blocks_impl(
                         top_support_height <= dims[2] * 1.1
                         and abs(float(hypothesis.support_height_m or 0.0)) > 0.135
                     )
-                    if top_support_height >= dims[2] * 0.70 and first_course_supported:
+                    top_index = next(index for index, patch in enumerate(planes) if patch is top)
+                    side_index = (
+                        next(index for index, patch in enumerate(planes) if patch is side)
+                        if side is not None
+                        else None
+                    )
+                    candidate_id = (
+                        f"component-{component_index}/region-{region_index}/dims-{dims_index}"
+                        f"/top-{top_index}/side-{side_index if side_index is not None else 'none'}"
+                    )
+                    accepted_to_raw = (
+                        top_support_height >= dims[2] * 0.70 and first_course_supported
+                    )
+                    lineage_seeds.append(
+                        RawHypothesisLineage(
+                            candidate_id,
+                            component_index,
+                            region_index,
+                            top_index,
+                            side_index,
+                            top.normal.copy(),
+                            top.centroid.copy(),
+                            None if side is None else side.normal.copy(),
+                            None if side is None else side.centroid.copy(),
+                            tuple(dims),
+                            side is None,
+                            pose,
+                            hypothesis.evidence,
+                            top_support_height,
+                            accepted_to_raw,
+                            False,
+                            "raw" if accepted_to_raw else "geometric_rejected",
+                        )
+                    )
+                    if accepted_to_raw:
                         hypotheses.append(hypothesis)
+                        hypothesis_lineage_ids[id(hypothesis)] = candidate_id
             timings["hypothesis_generation_evidence"] += (
                 perf_counter() - hypothesis_started
             ) * 1000.0
@@ -1509,6 +1575,9 @@ def _detect_blocks_impl(
         id(value): f"hypothesis-{index:04d}" for index, value in enumerate(raw_values)
     }
     identity_ids = dict(raw_identity_ids)
+    raw_lineage_by_id = {
+        hypothesis_lineage_ids[id(value)]: raw_identity_ids[id(value)] for value in raw_values
+    }
 
     selection_started = perf_counter()
     hypotheses = [h for h in hypotheses if h.evidence.score >= params.min_score]
@@ -1615,6 +1684,20 @@ def _detect_blocks_impl(
                     raw_fates.get(source_id, "retained"),
                 )
                 for hypothesis, source_id in zip(pre_refinement_values, selected_ids, strict=True)
+            ),
+            tuple(
+                replace(
+                    lineage,
+                    passed_score_threshold=(
+                        raw_lineage_by_id.get(lineage.id) in threshold_ids
+                    ),
+                    fate=(
+                        raw_fates.get(raw_lineage_by_id[lineage.id], lineage.fate)
+                        if lineage.accepted_to_raw
+                        else lineage.fate
+                    ),
+                )
+                for lineage in lineage_seeds
             ),
         )
     return [hypothesis.pose for hypothesis in selected], selected, counts, timings, trace
