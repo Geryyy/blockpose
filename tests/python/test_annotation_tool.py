@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +20,8 @@ from blockpose.annotation_tool import (
 )
 from blockpose.annotations import load_annotations
 from scipy.spatial.transform import Rotation
+
+UTC = timezone.utc
 
 
 def _document() -> AnnotationDocument:

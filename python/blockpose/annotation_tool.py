@@ -11,9 +11,11 @@ import copy
 import os
 import tempfile
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
+
+UTC = timezone.utc
 
 import numpy as np
 import yaml
