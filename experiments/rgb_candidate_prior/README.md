@@ -23,7 +23,10 @@ snapshots and annotations are external, read-only inputs.
 ## Layout
 
 - `gates.py` — non-negotiable input gates (sync, calibration/TF, projection).
-- `export.py` — candidate-set builder + JSONL exporter + audit overlays *(Phase 1)*.
+- `export.py` — Python-detector candidate-set baseline + JSONL exporter + audit overlays.
+- `cpp_export.py` — production C++ post-refinement candidate-trace exporter. It
+  never fabricates GT or perturbation candidates, so it is the input for an
+  end-to-end C++ geometry-vs-RGB ranking ablation.
 - `dataset.py` — JSONL loader + session-level hold-out splitter *(Phase 2)*.
 - `model.py`, `train.py`, `report.py` — model / calibration / held-out report
   *(Phases 3–4, GPU, `sam` extra)*.
@@ -41,6 +44,29 @@ python -m experiments.rgb_candidate_prior.pipeline \
 Or each stage by hand: `sessions` (write `sessions.yaml`), `export` (JSONL +
 crops + overlays + health report), `probe` (frozen DINOv2 leave-one-session-out).
 
+For the production path, first produce a detector trace with the same C++
+commit and parameter files being evaluated. The trace must contain a
+post-refinement, pre-NMS `candidate_trace` for every snapshot; `raw_lineage` is
+not accepted because it is pre-refinement. Then export only those real candidates:
+
+```bash
+python -m experiments.rgb_candidate_prior.cpp_export \
+  --snapshots-dir /path/to/scene_discovery_capture \
+  --detector-trace /path/to/cpp_detector_trace.json \
+  --sessions /path/to/recording_sessions.yaml \
+  --export-root out/cpp_candidate_prior
+```
+
+`--sync-tolerance-s` defaults to the live 0.10 s gate. For a reviewed offline
+capture whose RGB/cloud pairing has been explicitly verified, pass its audited
+tolerance (for example `--sync-tolerance-s 0.35`); it is retained in the
+manifest and is not a claim that this looser gate is safe for live replay.
+
+All candidates competing for one annotated target share the exact same RGB crop
+(the union of their valid projections and the target projection). Only their
+conditioning render and overlay vary by candidate; this prevents a
+pose-dependent crop from becoming a ranking shortcut.
+
 ## Adding new data
 
 New captures follow the same `registration_snapshots/<name>/` layout (`rgb.png`,
@@ -56,6 +82,10 @@ the timestamp-gap proxy without changing anything downstream.
 Runs CPU-only. The backbone is frozen; features are extracted once and cached to
 `.npz`, and head training on cached features is instant. A GPU is only needed to
 fine-tune the backbone at scale or to render photoreal synthetic (Isaac).
+
+`Pillow` (crop/render I/O) and `scikit-learn` (linear-probe baseline) are core
+declared dependencies. DINO itself remains opt-in through the existing model
+extra, so importing either exporter does not load Torch or a model.
 
 ## Findings
 

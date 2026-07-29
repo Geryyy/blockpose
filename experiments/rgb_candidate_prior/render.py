@@ -76,6 +76,27 @@ def crop_bbox(
     return x0, y0, x1, y1
 
 
+def union_crop_bbox(
+    bboxes: list[tuple[int, int, int, int]], camera: CameraModel
+) -> tuple[int, int, int, int] | None:
+    """Return one clamped crop containing every non-empty input crop.
+
+    Candidate ranking must not leak the candidate pose through different RGB
+    context: all candidates competing for one annotated target therefore share
+    this RGB crop.  Their conditioning images and overlays still render their
+    own projected geometry inside that common crop.
+    """
+    if not bboxes:
+        return None
+    x0 = max(0, min(box[0] for box in bboxes))
+    y0 = max(0, min(box[1] for box in bboxes))
+    x1 = min(camera.width, max(box[2] for box in bboxes))
+    y1 = min(camera.height, max(box[3] for box in bboxes))
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return x0, y0, x1, y1
+
+
 def _hull_polygon(points: np.ndarray) -> list[tuple[float, float]] | None:
     if len(points) < 3:
         return None

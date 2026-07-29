@@ -141,6 +141,23 @@ def export_snapshot(
             candidate_params,
             rng,
         )
+
+        # One target is a ranking set.  Every candidate must see identical RGB
+        # pixels; otherwise its pose-dependent crop can become a shortcut for
+        # the classifier.  Build the shared ROI from the target GT plus every
+        # candidate that cleared projection.  Candidate-specific conditioning
+        # and audit overlay remain rendered in this common ROI.
+        target_corners, target_uv, target_in_front = render.project_corners(
+            target.pose, tf.T_world_camera, camera
+        )
+        target_projection = gates.projection_gate(target_corners, tf.T_world_camera, camera)
+        target_bbox = (
+            render.crop_bbox(target_uv, target_in_front, camera, margin_frac=crop_margin_frac)
+            if target_projection.passed
+            else None
+        )
+        prepared: list[tuple[object, object, tuple[int, int, int, int]]] = []
+        crop_boxes = [target_bbox] if target_bbox is not None else []
         for candidate in candidate_set:
             _, uv, in_front = render.project_corners(candidate.pose, tf.T_world_camera, camera)
             corners_world = render.box_corners(candidate.pose, candidate.pose.dims)
@@ -153,19 +170,29 @@ def export_snapshot(
                 counts["gate_dropped"] += 1
                 continue
 
+            prepared.append((candidate, projection, bbox))
+            crop_boxes.append(bbox)
+        shared_bbox = render.union_crop_bbox(crop_boxes, camera)
+        if shared_bbox is None:
+            counts["gate_dropped"] += len(prepared)
+            continue
+
+        for candidate, projection, _ in prepared:
             sample_id = candidate.candidate_id
             rel_rgb = Path("images") / snapshot.name / f"{sample_id.replace('/', '__')}.png"
             rel_cond = Path("renders") / snapshot.name / f"{sample_id.replace('/', '__')}.png"
             rel_overlay = Path("overlays") / snapshot.name / f"{sample_id.replace('/', '__')}.png"
-            render.save_png(render.render_crop(rgb, bbox, out_size=out_size), export_root / rel_rgb)
+            render.save_png(
+                render.render_crop(rgb, shared_bbox, out_size=out_size), export_root / rel_rgb
+            )
             render.save_png(
                 render.render_conditioning(
-                    candidate.pose, tf.T_world_camera, camera, bbox, out_size=out_size
+                    candidate.pose, tf.T_world_camera, camera, shared_bbox, out_size=out_size
                 ),
                 export_root / rel_cond,
             )
             render.save_png(
-                render.render_overlay(rgb, candidate.pose, tf.T_world_camera, camera, bbox),
+                render.render_overlay(rgb, candidate.pose, tf.T_world_camera, camera, shared_bbox),
                 export_root / rel_overlay,
             )
 
@@ -185,7 +212,7 @@ def export_snapshot(
                     "gt_provenance": target.provenance,
                     "gt_visibility": target.visibility,
                     "label_details": candidate.details,
-                    "crop_bbox_xyxy": list(bbox),
+                    "crop_bbox_xyxy": list(shared_bbox),
                     "projection": projection.details,
                     "source": {
                         "snapshot": snapshot.name,

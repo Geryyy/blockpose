@@ -49,7 +49,13 @@ def read_stamps(metadata_path: str | Path) -> tuple[int, int]:
     """Return ``(image_stamp_ns, cloud_stamp_ns)`` from a snapshot ``metadata.yaml``."""
     with Path(metadata_path).open() as handle:
         data = yaml.safe_load(handle)
-    return _stamp_ns(data["image"]["stamp"]), _stamp_ns(data["cloud"]["stamp"])
+    # Registration snapshots predate direct scene-discovery captures and call
+    # the image section `image`; captures intentionally call it `rgb`. Both
+    # name the same sensor timestamp, so accept either schema without guessing.
+    image = data.get("image", data.get("rgb"))
+    if not isinstance(image, dict) or not isinstance(data.get("cloud"), dict):
+        raise ValueError("metadata needs image/rgb and cloud stamp sections")
+    return _stamp_ns(image["stamp"]), _stamp_ns(data["cloud"]["stamp"])
 
 
 def sync_gate(image_stamp_ns: int, cloud_stamp_ns: int, *, tolerance_s: float) -> GateResult:
