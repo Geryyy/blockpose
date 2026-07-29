@@ -16,7 +16,7 @@ of models and configuration from the source ROS workspace.
   the canonical description of current, as-built detector behavior, including
   its default and opt-in paths, limits, and reproducible diagnostics.
 - [`docs/next-steps.md`](docs/next-steps.md) is the active C++20/ROS 2 takeover
-  sequence and defines its replay, parity, and promotion gates.
+  sequence and defines its replay, reviewed-snapshot, and promotion gates.
 - [`docs/implementation-plan.md`](docs/implementation-plan.md) is the future
   target architecture; it is not a description of the current implementation
   or the active ordering.

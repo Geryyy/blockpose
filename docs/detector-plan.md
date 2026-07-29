@@ -3,7 +3,7 @@
 This documents the **Python reference track** and its accumulated evidence.
 The active takeover sequence is now in `docs/next-steps.md`: start the C++20
 core and ROS 2 evaluation/replay node immediately, port `SCENE_DISCOVERY`
-first against complete rosbags, and require parity with this Python reference
+first against complete rosbags, and score it against reviewed annotations
 before adding the prior-conditioned modes. The node is not yet a production
 replacement. `docs/implementation-plan.md` (v4) remains the long-term
 architectural target.

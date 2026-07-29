@@ -23,8 +23,8 @@ trajectory.
 ## Current decision
 
 Start the C++20 core and a thin ROS 2 **evaluation node now**. Its immediate
-purpose is to replay complete rosbags, expose data/TF assumptions, and compare
-results with the Python detector. It is not a production replacement and must
+purpose is to replay complete rosbags, expose data/TF assumptions, and score
+results against reviewed snapshots. It is not a production replacement and must
 not be connected to safety- or autonomy-critical behavior until the gates below
 are met. Python remains the behavioral reference during the port.
 
@@ -51,23 +51,19 @@ are met. Python remains the behavioral reference during the port.
    construction/world model defines the inference ROI; annotation ROIs are for
    scoring only.
 
-3. **Port `SCENE_DISCOVERY` first.** Port preprocessing, workspace crop,
+3. **Port `SCENE_DISCOVERY` first.** Implement preprocessing, workspace crop,
    proposal generation, cuboid refinement, scoring, covariance, observability,
-   and cooperative deadline handling in small comparable slices. Run Python and
-   C++ on the same extracted bag queries after each slice. Profile deadline
-   failures and recovery on full clouds rather than tuning only on the legacy
+   and cooperative deadline handling in small tested slices. Profile deadline
+   failures and recovery on full clouds rather than tuning only on legacy
    snapshots.
 
-4. **Establish parity artifacts while porting.** Freeze representative queries
-   from full bags as canonical inputs, together with Python parameters,
-   structured outputs, overlays, and revision provenance. Require exact parity
-   for statuses and toleranced parity for pose, covariance, score, and selected
-   candidates. Every intentional behavioral difference needs a documented
-   fixture and rationale; do not silently change the Python reference to make a
-   mismatch pass.
+4. **Maintain reviewed snapshot evaluation.** Freeze representative queries
+   from full bags with annotations, structured detector outputs, overlays, and
+   revision provenance. Score pose, count, and false-positive metrics from
+   reviewed labels; document every intentional behavior change.
 
 5. **Add modes in evidence order.** After `SCENE_DISCOVERY` meets its replay and
-   parity gate, port `REFINE_BLOCK` using plan/placement priors. Then port
+   reviewed-snapshot gate, port `REFINE_BLOCK` using plan/placement priors. Then port
    `REFINE_GRASPED` using time-aligned gripper FK, grasp covariance, gripper
    trajectory, and occlusion/filtering inputs. Geometry owns final pose,
    covariance, and absence/observability status; RGB/SAM may remain an optional
@@ -103,8 +99,8 @@ are met. Python remains the behavioral reference during the port.
 | Deliverable | Gate |
 | --- | --- |
 | Replay skeleton | A parameterized command replays one complete external bag query deterministically; the diagnostic executable validates required topics/transforms, reports data availability and timing, and does not claim detector-result compatibility yet |
-| `SCENE_DISCOVERY` port | Same canonical inputs run through Python and C++; status/candidate parity and agreed numeric tolerances pass; missing TF and deadline fixtures pass |
-| `REFINE_BLOCK` port | Plan-prior fixtures cover `Confirmed`, `Deviated`, `Missing`, and `NotObservable`, with Python/C++ parity |
+| `SCENE_DISCOVERY` port | Reviewed snapshot score, missing-TF behavior, and deadline fixtures pass |
+| `REFINE_BLOCK` port | Plan-prior fixtures cover `Confirmed`, `Deviated`, `Missing`, and `NotObservable` |
 | `REFINE_GRASPED` port | Full-bag fixtures include scan-time TF/FK, covariance, and gripper trajectory; occlusion and missing-data behavior pass |
 | Runtime promotion | Development performance gates and held-out production acceptance conditions below pass; ROS wrapper output equals standalone core output |
 

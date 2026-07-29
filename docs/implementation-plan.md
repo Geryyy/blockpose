@@ -241,7 +241,7 @@ exists.)
 > measured snapshots, so Phase P is historical rather than the next task. The
 > active sequence is `docs/next-steps.md`: build the C++20 + ROS 2 evaluation
 > replay skeleton now, port `SCENE_DISCOVERY` first using complete rosbags, and
-> preserve Python/C++ parity. Later phases below describe the target capability,
+> preserve the reviewed-snapshot evaluation contract. Later phases below describe the target capability,
 > not permission to claim production readiness.
 
 **Duration: 2–3 days. Explicitly throwaway code.**
@@ -602,7 +602,7 @@ mapping the three queries; PointCloud2 conversion preserving per-point time
 and intensity; TF trajectory sampling over the scan interval; priors pushed
 from world model; Rerun recording toggle; runtime monitoring.
 *Gate:* on-demand query from the BT on live/replayed data within the 500 ms
-budget; parity test: wrapper output == standalone output on the same bag
+budget; integration test: wrapper output == standalone output on the same bag
 frame.
 
 **Phase 7 (conditional) — learned segmentation.** Only if the Section 10 gate

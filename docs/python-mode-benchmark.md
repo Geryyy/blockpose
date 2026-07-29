@@ -39,7 +39,7 @@ PYTHONPATH=python python tools/eval_cpp_snapshot_runner.py \
 This scorer applies the same post-inference annotation ROI, one-to-one
 shape/distance/orientation match, exact-count, symmetry-aware pose metrics,
 and target cohorts as the Python scene-discovery report. It is the comparison
-to use while C++/Python parity remains incomplete.
+to use for C++ detector evaluation.
 
 `REFINE_BLOCK` runs the current `verify_placed_v1` facade with only the
 existing leave-one-snapshot-out plan fixtures.  Each fixture rejects itself as
