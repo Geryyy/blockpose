@@ -240,11 +240,15 @@ def load_snapshot(
     snapshot_dir: str | Path,
     config_path: str | Path | None = None,
     T_world_cloud: np.ndarray | None = None,
+    *,
+    require_registrations: bool = True,
 ) -> tuple[np.ndarray, list[BlockPose]]:
     """Load a registration snapshot: returns (pts_world, gt_poses).
 
     pts_world: (N, 3) float64 point cloud transformed to world frame.
-    gt_poses: list of BlockPose objects from registrations.yaml.
+    gt_poses: list of BlockPose objects from registrations.yaml. Set
+    `require_registrations=False` for a replay capture that has no legacy
+    registration output; it then returns an empty pose list.
 
     `T_world_cloud` overrides the static config's T_world_seyond, e.g. with a
     per-snapshot transform from `tf.yaml` (see `load_tf_snapshot`).
@@ -253,5 +257,10 @@ def load_snapshot(
     T = T_world_cloud if T_world_cloud is not None else load_T_world_seyond(config_path)
     pts_sensor = load_pcd(snapshot_dir / "cloud.pcd")
     pts_world = apply_transform(pts_sensor, T)
-    gt_poses = load_ground_truth(snapshot_dir / "registrations.yaml")
+    registrations = snapshot_dir / "registrations.yaml"
+    if not registrations.is_file():
+        if require_registrations:
+            raise FileNotFoundError(f"Missing registrations file: {registrations}")
+        return pts_world, []
+    gt_poses = load_ground_truth(registrations)
     return pts_world, gt_poses

@@ -102,3 +102,20 @@ def test_load_snapshot_world_frame_z_range() -> None:
     # Outdoor snapshots can include tall background objects above the work area.
     assert float(pts_world[:, 2].max()) < 25.0
     assert len(gt) >= 1
+
+
+def test_load_snapshot_allows_capture_without_registrations(
+    tmp_path: Path, monkeypatch
+) -> None:
+    snapshot = tmp_path / "capture"
+    snapshot.mkdir()
+    monkeypatch.setattr(
+        "blockpose.io.load_pcd", lambda _path: np.array([[1.0, 2.0, 3.0]], dtype=np.float32)
+    )
+    points, registrations = load_snapshot(
+        snapshot,
+        T_world_cloud=np.eye(4),
+        require_registrations=False,
+    )
+    np.testing.assert_array_equal(points, [[1.0, 2.0, 3.0]])
+    assert registrations == []

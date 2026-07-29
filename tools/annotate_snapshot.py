@@ -257,7 +257,12 @@ class AnnotatorWindow:
             raise FileNotFoundError(f"Missing annotation manifest: {manifest}")
         self.controller = AnnotationController(AnnotationDocument.load(manifest))
         tf = load_tf_snapshot(snapshot / "tf.yaml")
-        self.points, _ = load_snapshot(snapshot, self.config, T_world_cloud=tf.T_world_cloud)
+        self.points, _ = load_snapshot(
+            snapshot,
+            self.config,
+            T_world_cloud=tf.T_world_cloud,
+            require_registrations=False,
+        )
         self.rgb_colors = None
         self.rgb = None
         self.projection_cache = None
