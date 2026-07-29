@@ -27,6 +27,17 @@ from blockpose.pose import BLOCK_DIMS, frame_alignments, rotmat_to_quat_xyzw
 VISIBILITIES = ("unknown", "full", "partial", "heavy_occlusion")
 
 
+def full_workspace_roi(points: np.ndarray, margin_m: float = 0.05) -> tuple[np.ndarray, np.ndarray]:
+    """Return a complete-annotation ROI covering every captured cloud point."""
+    cloud = np.asarray(points, dtype=float)
+    if cloud.ndim != 2 or cloud.shape[1] != 3 or not len(cloud) or not np.all(np.isfinite(cloud)):
+        raise ValueError("points must be a non-empty finite (N, 3) cloud")
+    if not np.isfinite(margin_m) or margin_m < 0.0:
+        raise ValueError("ROI margin must be finite and non-negative")
+    margin = np.full(3, float(margin_m))
+    return cloud.min(axis=0) - margin, cloud.max(axis=0) + margin
+
+
 def canonicalize_block_frame(
     rotation: np.ndarray, dimensions: tuple[float, float, float]
 ) -> np.ndarray:

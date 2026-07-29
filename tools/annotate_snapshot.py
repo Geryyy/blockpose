@@ -27,6 +27,7 @@ from blockpose.annotation_tool import (  # noqa: E402
     AnnotationController,
     AnnotationDocument,
     camera_ray,
+    full_workspace_roi,
     initial_camera_focus,
     nearest_point_to_ray_with_distance,
     orientation_summary,
@@ -40,7 +41,7 @@ from blockpose.io import (  # noqa: E402
     load_snapshot,
     load_tf_snapshot,
 )
-from blockpose.projection import colorize_world_points  # noqa: E402
+from blockpose.projection import colorize_world_points, project_points, world_to_camera  # noqa: E402
 from blockpose.rgb_annotation import (  # noqa: E402
     AsyncSegmentationWorker,
     MaskSelectionParams,
@@ -64,6 +65,16 @@ INITIAL_EYE = np.array([0.0, 0.0, 0.0])
 INITIAL_UP = np.array([0.0, 0.0, 1.0])
 INITIAL_DIRECTION = np.array([-1.0, 0.0, 0.0])
 DEFAULT_PICK_RADIUS_M = 0.30
+ROI_COLOR = np.array([0, 220, 255], dtype=np.uint8)
+BOX_EDGES = tuple(
+    (first, second)
+    for first in range(8)
+    for second in range(first + 1, 8)
+    if bin(first ^ second).count("1") == 1
+)
+BOX_SIGNS = np.array(
+    [[x, y, z] for x in (-1.0, 1.0) for y in (-1.0, 1.0) for z in (-1.0, 1.0)]
+)
 
 
 def discover_snapshot_dirs(root: Path) -> list[Path]:
@@ -78,6 +89,31 @@ def discover_snapshot_dirs(root: Path) -> list[Path]:
         and (item / "annotations.yaml").is_file()
         and item.name not in excluded
     )
+
+
+def cuboid_corners(position: np.ndarray, rotation: np.ndarray, dimensions) -> np.ndarray:
+    return np.asarray(position, dtype=float) + (BOX_SIGNS * (np.asarray(dimensions) / 2.0)) @ np.asarray(rotation, dtype=float).T
+
+
+def draw_projected_edges(
+    image: np.ndarray, corners_world: np.ndarray, T_world_camera: np.ndarray, camera, color: np.ndarray
+) -> None:
+    """Draw in-frame edges of a world-frame cuboid without another GUI dependency."""
+    camera_points = world_to_camera(corners_world, T_world_camera)
+    uv, in_front = project_points(camera_points, camera)
+    height, width = image.shape[:2]
+    for first, second in BOX_EDGES:
+        if not (in_front[first] and in_front[second]):
+            continue
+        start, end = uv[first], uv[second]
+        if max(start[0], end[0]) < 0 or min(start[0], end[0]) >= width or max(start[1], end[1]) < 0 or min(start[1], end[1]) >= height:
+            continue
+        start = np.clip(np.rint(start).astype(int), [0, 0], [width - 1, height - 1])
+        end = np.clip(np.rint(end).astype(int), [0, 0], [width - 1, height - 1])
+        steps = max(abs(end - start).max(), 1)
+        for point in np.linspace(start, end, int(steps) + 1).astype(int):
+            u, v = point
+            image[max(0, v - 1):min(height, v + 2), max(0, u - 1):min(width, u + 2)] = color
 
 
 class AnnotatorWindow:
@@ -105,6 +141,8 @@ class AnnotatorWindow:
         self._changing_snapshot_combo = False
         self.points = np.empty((0, 3))
         self.rgb_colors: np.ndarray | None = None
+        self.T_world_camera: np.ndarray | None = None
+        self.camera = None
         self.controller: AnnotationController
         self._last_button_down_s = -np.inf
         self.rgb: np.ndarray | None = None
@@ -159,7 +197,7 @@ class AnnotatorWindow:
         self.complete.set_on_checked(lambda _checked: self._mark_widget_dirty())
         self.notes.set_on_text_changed(lambda _text: self._mark_widget_dirty())
         for field in self.roi_fields:
-            field.set_on_value_changed(lambda _value: self._mark_widget_dirty())
+            field.set_on_value_changed(lambda _value: self._roi_fields_changed())
         self.window.add_child(self.scene)
         self.window.add_child(self.rgb_view)
         self.window.add_child(self.panel)
@@ -228,11 +266,12 @@ class AnnotatorWindow:
         history.add_child(self._button("Reset camera", self._reset_camera))
         self.panel.add_child(history)
         self.panel.add_child(self.complete)
-        self.panel.add_child(gui.Label("ROI min XYZ / max XYZ"))
+        self.panel.add_child(gui.Label("Annotation ROI (defaults to full captured cloud)"))
         roi_grid = gui.VGrid(3, 3)
         for field in self.roi_fields:
             roi_grid.add_child(field)
         self.panel.add_child(roi_grid)
+        self.panel.add_child(self._button("Use full captured cloud", self._set_full_workspace_roi))
         self.panel.add_child(self.notes)
         self.panel.add_child(self._button("Validate & Save", self._save))
         self.panel.add_child(self.status)
@@ -263,8 +302,12 @@ class AnnotatorWindow:
             T_world_cloud=tf.T_world_cloud,
             require_registrations=False,
         )
+        if self.controller.document.roi_min is None or self.controller.document.roi_max is None:
+            self.controller.document.roi_min, self.controller.document.roi_max = full_workspace_roi(self.points)
         self.rgb_colors = None
         self.rgb = None
+        self.T_world_camera = tf.T_world_camera
+        self.camera = None
         self.projection_cache = None
         self.candidate_masks = {}
         self.selected_rgb_points = np.empty((0, 3))
@@ -275,6 +318,7 @@ class AnnotatorWindow:
             try:
                 self.rgb = load_rgb(snapshot / "rgb.png")
                 camera = load_camera_model()
+                self.camera = camera
                 self.rgb_colors, _ = colorize_world_points(
                     self.points,
                     tf.T_world_camera,
@@ -288,6 +332,7 @@ class AnnotatorWindow:
                 self._refresh_rgb()
             except (ValueError, KeyError):
                 self.rgb_colors = None
+                self.camera = None
         self._changing_snapshot_combo = True
         self.snapshot_combo.selected_index = snapshot_selection_index(self.snapshots, snapshot)
         self._changing_snapshot_combo = False
@@ -338,6 +383,15 @@ class AnnotatorWindow:
         material.shader = "defaultUnlit"
         material.point_size = 2.0
         self.scene.scene.add_geometry("cloud", cloud, material)
+        roi = self._active_roi()
+        if roi is not None:
+            roi_box = o3d.geometry.AxisAlignedBoundingBox(*roi)
+            roi_lines = o3d.geometry.LineSet.create_from_axis_aligned_bounding_box(roi_box)
+            roi_material = rendering.MaterialRecord()
+            roi_material.shader = "unlitLine"
+            roi_material.line_width = 3.0
+            roi_material.base_color = tuple(ROI_COLOR / 255.0) + (1.0,)
+            self.scene.scene.add_geometry("annotation-roi", roi_lines, roi_material)
         if len(self.selected_rgb_points):
             selected = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(self.selected_rgb_points))
             selected.paint_uniform_color((1.0, 0.1, 0.8))
@@ -383,6 +437,28 @@ class AnnotatorWindow:
             shown[self.selected_mask] = (
                 0.55 * shown[self.selected_mask] + 0.45 * overlay[self.selected_mask]
             ).astype(np.uint8)
+        if self.camera is not None and self.T_world_camera is not None:
+            roi = self._active_roi()
+            if roi is not None:
+                low, high = roi
+                draw_projected_edges(
+                    shown,
+                    cuboid_corners((low + high) / 2.0, np.eye(3), high - low),
+                    self.T_world_camera,
+                    self.camera,
+                    ROI_COLOR,
+                )
+            for index, target in enumerate(self.controller.document.targets):
+                color = np.asarray(BOX_COLORS[target.review_status][:3]) * 255.0
+                if index == self.controller.selected:
+                    color = np.array([26, 179, 255])
+                draw_projected_edges(
+                    shown,
+                    cuboid_corners(target.position, target.rotation, target.dimensions),
+                    self.T_world_camera,
+                    self.camera,
+                    color.astype(np.uint8),
+                )
         self.rgb_view.update_image(o3d.geometry.Image(np.ascontiguousarray(shown)))
 
     def _on_rgb_mouse(self, event):
@@ -503,6 +579,33 @@ class AnnotatorWindow:
     def _ignore_reason_changed(self, text: str) -> None:
         if not self._loading_widgets:
             self.controller.set_ignore_reason(text)
+
+    def _active_roi(self) -> tuple[np.ndarray, np.ndarray] | None:
+        document = self.controller.document
+        if document.roi_min is None or document.roi_max is None:
+            return None
+        if np.any(document.roi_min >= document.roi_max):
+            return None
+        return document.roi_min, document.roi_max
+
+    def _set_full_workspace_roi(self) -> None:
+        self.controller.document.roi_min, self.controller.document.roi_max = full_workspace_roi(self.points)
+        self._load_document_widgets()
+        self._mark_widget_dirty()
+        self._refresh_scene()
+        self._refresh_rgb()
+
+    def _roi_fields_changed(self) -> None:
+        if self._loading_widgets:
+            return
+        values = np.array([field.double_value for field in self.roi_fields])
+        if not np.all(np.isfinite(values)) or np.any(values[:3] >= values[3:]):
+            self.status.text = "ROI needs finite min XYZ values strictly below max XYZ."
+            return
+        self.controller.document.roi_min, self.controller.document.roi_max = values[:3], values[3:]
+        self._mark_widget_dirty()
+        self._refresh_scene()
+        self._refresh_rgb()
 
     def _mark_widget_dirty(self) -> None:
         if not self._loading_widgets:

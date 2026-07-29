@@ -10,6 +10,7 @@ from blockpose.annotation_tool import (
     AnnotationDocument,
     EditableTarget,
     camera_ray,
+    full_workspace_roi,
     initial_camera_focus,
     nearest_point_to_ray,
     nearest_point_to_ray_with_distance,
@@ -29,6 +30,13 @@ def _document() -> AnnotationDocument:
         "scene",
         [EditableTarget("prior", np.zeros(3), np.eye(3), provenance="upstream_registration")],
     )
+
+
+def test_full_workspace_roi_contains_cloud_with_margin() -> None:
+    points = np.array([[-2.0, 3.0, 1.0], [4.0, -1.0, 5.0]])
+    low, high = full_workspace_roi(points)
+    np.testing.assert_allclose(low, [-2.05, -1.05, 0.95])
+    np.testing.assert_allclose(high, [4.05, 3.05, 5.05])
 
 
 def test_schema_v1_priors_load_pending(tmp_path: Path) -> None:

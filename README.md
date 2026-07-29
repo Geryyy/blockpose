@@ -111,8 +111,10 @@ python3 tools/annotate_snapshot.py \
 ```
 
 The capture directory contains `cloud.pcd`, `rgb.png`, `tf.yaml`, detector
-priors, and `annotations.yaml`. Approve/reject the priors, add missed blocks,
-set the ROI, then save. Use the cloud/TF as authority when RGB is marked stale.
+priors, and `annotations.yaml`. The annotator defaults its ROI to the full
+captured cloud and draws it cyan in both views; projected annotation boxes use
+their review colors. Approve/reject priors, add missed blocks, then save. Use
+the cloud/TF as authority when RGB is marked stale.
 
 ## Reference bag workflow
 
