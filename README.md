@@ -96,6 +96,24 @@ The devcontainer uses the same core image and automatically mounts the repo-loca
 ctest, and clang-format targets do not exist yet; adding their minimal
 scaffolding is the first task in [`docs/next-steps.md`](docs/next-steps.md).
 
+## Label a replay scene-discovery capture
+
+```bash
+# Start replay with capture enabled; trigger Scene Discovery once in RViz.
+ros2 launch concrete_block_perception remote_replay_world_model.launch.py \
+  use_sim_time:=True rviz:=True tool:=pzs100_description \
+  world_model_scene_discovery_params:=/workspaces/ros2_baustelle_ws/src/concrete_block_stack/concrete_block_perception/config/grip_at_top_world_model_scene_discovery_capture.yaml
+
+# Open the captured cloud/RGB/TF and seeded annotations; no uv required.
+python3 tools/annotate_snapshot.py \
+  --root /workspaces/ros2_baustelle_ws/scene_discovery_capture \
+  /workspaces/ros2_baustelle_ws/scene_discovery_capture/<capture-name>
+```
+
+The capture directory contains `cloud.pcd`, `rgb.png`, `tf.yaml`, detector
+priors, and `annotations.yaml`. Approve/reject the priors, add missed blocks,
+set the ROI, then save. Use the cloud/TF as authority when RGB is marked stale.
+
 ## Reference bag workflow
 
 No bag was present when the source material was exported. From the original ROS
