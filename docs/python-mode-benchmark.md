@@ -26,20 +26,9 @@ the query finishes does it open the annotation manifest and use the complete
 ROI to select predictions and targets for scoring. Ground truth and ROI never
 crop or otherwise condition inference.
 
-The matching C++ core baseline is a two-step run: first invoke
-`concrete_block_detector_snapshot_runner` with the deployed parameter files,
-then score its JSON without re-running inference:
-
-```bash
-PYTHONPATH=python python tools/eval_cpp_snapshot_runner.py \
-  --runner-json /tmp/cpp-snapshot-output.json \
-  --output out/cpp-scene-discovery-benchmark.json
-```
-
-This scorer applies the same post-inference annotation ROI, one-to-one
-shape/distance/orientation match, exact-count, symmetry-aware pose metrics,
-and target cohorts as the Python scene-discovery report. It is the comparison
-to use for C++ detector evaluation.
+The C++ detector owns its reviewed-snapshot scoring workflow alongside its
+runner in the `concrete_block_detector` repository. This keeps the Python
+prototype's benchmark independent of the deployed detector implementation.
 
 `REFINE_BLOCK` runs the current `verify_placed_v1` facade with only the
 existing leave-one-snapshot-out plan fixtures.  Each fixture rejects itself as
