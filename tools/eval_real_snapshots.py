@@ -142,7 +142,7 @@ def evaluate_snapshot(
     """
     tf_snapshot = load_tf_snapshot(snap_dir / "tf.yaml")
     pts_world, registrations = load_snapshot(
-        snap_dir, config_path, T_world_cloud=tf_snapshot.T_world_cloud
+        snap_dir, config_path, T_world_cloud=tf_snapshot.T_world_cloud, require_registrations=False
     )
     annotation_path = snap_dir / "annotations.yaml"
     annotations = load_annotations(annotation_path) if annotation_path.is_file() else None
@@ -483,9 +483,9 @@ def run_suite(
         for snapshot in per_snapshot:
             for target in snapshot["target_diagnostics"]:
                 key = f"{snapshot['snapshot']}/{target['id']}"
-                scenario = taxonomy[key]
+                scenario = taxonomy.get(key)
                 fixture = fixtures.get(key)
-                target["taxonomy"] = asdict(scenario)
+                target["taxonomy"] = asdict(scenario) if scenario is not None else None
                 target["plan_provenance"] = (
                     {
                         "stable_slot_id": fixture.stable_slot_id,

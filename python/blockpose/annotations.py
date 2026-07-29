@@ -81,9 +81,12 @@ def load_annotations(path: str | Path) -> SnapshotAnnotations:
     if complete and roi is None:
         raise ValueError("complete annotations require an annotated_roi")
 
+    blocks = data.get("blocks") or []
+    if not isinstance(blocks, list):
+        raise ValueError("blocks must be a list or null")
     targets = []
     target_ids: set[str] = set()
-    for item in data.get("blocks", []):
+    for item in blocks:
         target_id = str(item.get("id", "")).strip()
         if not target_id:
             raise ValueError("block id must be non-empty")

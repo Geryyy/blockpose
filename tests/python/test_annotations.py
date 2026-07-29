@@ -64,3 +64,11 @@ def test_snapshot_name_must_match_directory(tmp_path: Path) -> None:
     manifest.write_text("schema_version: 1\nsnapshot: another\nannotation_complete: false\n")
     with pytest.raises(ValueError, match="does not match directory"):
         load_annotations(manifest)
+
+
+def test_null_blocks_means_an_empty_annotation_list(tmp_path: Path) -> None:
+    manifest = tmp_path / "annotations.yaml"
+    manifest.write_text(
+        f"schema_version: 2\nsnapshot: {tmp_path.name}\nannotation_complete: false\nblocks:\n"
+    )
+    assert load_annotations(manifest).targets == ()
