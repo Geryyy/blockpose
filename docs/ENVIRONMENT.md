@@ -6,7 +6,7 @@ Docker.
 ```text
 docker/Dockerfile.core   Ubuntu 24.04, gcc-13, CMake/Ninja/ccache,
                          Eigen 3.4, Ceres 2.2, Open3D C++ SDK 0.19.0 (/opt/open3d),
-                         yaml-cpp, nlohmann-json, CLI11, pybind11, GTest, uv.
+                         yaml-cpp, nlohmann-json, CLI11, nanobind, GTest, uv.
                          Phases P–5 and all of CI live here. NO ROS.
 
 docker/Dockerfile.ros2   FROM blockpose-core + ROS 2 Jazzy, colcon,

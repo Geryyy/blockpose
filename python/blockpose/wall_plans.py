@@ -9,8 +9,7 @@ with, and both matter:
 
 1. **Blocks are laid down.** `block_size` is ``[0.9, 0.6, 0.6]`` and course
    centres sit at z = 0.3 with a 0.6 m rise between courses, so the 0.9 m long
-   axis is HORIZONTAL. `docs/detector-plan.md` used to describe the long axis as
-   roughly vertical, which was wrong for the target task.
+   axis is horizontal.
 
    `basic_pick_and_place` places its block at z = 0.45 rather than 0.3. That is
    **not** an upright block: it is the same laid block with 0.15 m of clearance,

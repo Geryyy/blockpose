@@ -4,7 +4,7 @@ Blind detection discovers blocks from geometry alone. That is the right default,
 but it cannot separate blocks laid in contact or with a 2 cm joint: at the
 sensor's resolution the abutting faces are coplanar and continuous, and the
 returns that mark the gap are stripped by ground removal and clustering before
-any splitter sees them (measured; see docs/detector-plan.md). A wall being built
+any splitter sees them. A wall being built
 is exactly the case where the plan IS known -- the robot placed the blocks -- so
 the expected poses are available and should be used.
 

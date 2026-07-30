@@ -37,9 +37,9 @@ def build_notebook():
             """
 # Blockpose detector — frozen Python development diagnostic
 
-This notebook is the rerunnable showcase for the three production-facing
-detector modes described in `docs/PERCEPTION_PIPELINE.md`.  It runs the
-reviewed real snapshots from a clean kernel and retains its outputs.  The
+This notebook is the rerunnable showcase for the three historical Python
+detector modes. It runs the reviewed real snapshots from a clean kernel and
+retains its outputs. The
 results are **development diagnostics**, not a production acceptance claim:
 all snapshots and plan fixtures are development material.
 

@@ -1,9 +1,7 @@
-"""Offline RGB candidate-prior experiment (see docs/rgb-candidate-prior-plan.md).
+"""Offline data/export code for the DINO RGB prior experiment.
 
-Experimental code kept OUTSIDE ``python/blockpose/`` until it passes the
-promotion criteria in ``docs/rgb-candidate-prior.md``.  Nothing here imports a
-model runtime (torch) at import time; the model phases live behind the ``sam``
-optional extra and are imported only when explicitly invoked.
+See ``docs/dino-rgb-prior-ros-integration.md``. Nothing here imports a model
+runtime at import time; model code remains opt-in.
 """
 
 from __future__ import annotations

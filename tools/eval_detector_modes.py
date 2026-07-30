@@ -2,8 +2,8 @@
 """Run the frozen real-snapshot benchmark for all Python detector modes.
 
 The written JSON contains compact metrics plus per-target overlay poses for
-the showcase notebook.  It is a development diagnostic, never an acceptance
-artifact: see ``docs/python-mode-benchmark.md``.
+the showcase notebook. It is a development diagnostic, never an acceptance
+artifact.
 """
 
 from __future__ import annotations

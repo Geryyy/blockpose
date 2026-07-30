@@ -1,12 +1,12 @@
 # experiments/rgb_candidate_prior
 
-Offline baseline for the RGB **candidate-conditioned visual likelihood**
-described in [../../docs/rgb-candidate-prior.md](../../docs/rgb-candidate-prior.md).
-Phasing and rationale: [../../docs/rgb-candidate-prior-plan.md](../../docs/rgb-candidate-prior-plan.md).
+Offline data/export baseline for the DINO RGB **proposer and verifier** in
+[../../docs/dino-rgb-prior-ros-integration.md](../../docs/dino-rgb-prior-ros-integration.md).
 
-RGB **scores** candidates that the geometry pipeline already produced (and may
-abstain). It does not detect blocks or regress a metric pose. Captured
-snapshots and annotations are external, read-only inputs.
+The current exporter covers candidate-conditioned visual likelihoods. It is
+also the data/provenance basis for the future region proposer. RGB does not
+regress a metric pose; captured snapshots and annotations are external,
+read-only inputs.
 
 ## Contract
 
@@ -17,8 +17,8 @@ snapshots and annotations are external, read-only inputs.
   export root (schema in the design doc). Failed input gates produce **no
   sample** rather than a guessed one.
 - Predictions are JSONL keyed by `sample_id` with at least `rgb_probability`,
-  `uncertainty`, `model_id`, `calibration_version`. ROS integration consumes
-  only scored candidates, and only after the promotion criteria pass.
+  `uncertainty`, `model_id`, `calibration_version`. ROS consumes only
+  evidence/regions after held-out promotion tests pass.
 
 ## Layout
 
@@ -48,6 +48,16 @@ For the production path, first produce a detector trace with the same C++
 commit and parameter files being evaluated. The trace must contain a
 post-refinement, pre-NMS `candidate_trace` for every snapshot; `raw_lineage` is
 not accepted because it is pre-refinement. Then export only those real candidates:
+
+**`--detector-trace` is *not* `detector_candidates.yaml`.** The
+`scene_discovery_capture/*/detector_candidates.yaml` files written during
+capture are a different, schema_version 1 artifact (YAML, a flat `candidates`
+list, `dimensions` alongside `pose`, `orientation_xyzw`). `cpp_export.py`
+consumes the schema_version 2 JSON trace (a `snapshots` list, per-candidate
+`pose["dims"]`) emitted **on demand** by the C++
+`concrete_block_detector_snapshot_runner` in its schema-v2 candidate-trace
+mode — run that against the capture to produce the JSON file this command
+needs.
 
 ```bash
 python -m experiments.rgb_candidate_prior.cpp_export \
@@ -87,8 +97,8 @@ fine-tune the backbone at scale or to render photoreal synthetic (Isaac).
 declared dependencies. DINO itself remains opt-in through the existing model
 extra, so importing either exporter does not load Torch or a model.
 
-## Findings
+## Status
 
-See [../../docs/rgb-candidate-prior-findings.md](../../docs/rgb-candidate-prior-findings.md):
-frozen DINOv2 gives ~0.72–0.75 held-out AUROC — a viable prior, currently limited
-by held-out data quantity, not model capacity.
+The existing frozen-DINO candidate ranking probe is feasibility evidence only.
+It does not establish end-to-end recovery of missed blocks; use the architecture
+document's ablation gate before promoting either module into ROS.

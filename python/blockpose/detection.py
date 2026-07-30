@@ -59,7 +59,7 @@ class DetectionParams:
     # remaining features let a laid hypothesis win on upright geometry -- measured
     # as a 0.20 m centre error plus false positives on clutter. Ranking
     # orientations needs a feature that penalises a box protruding into space the
-    # returns show is empty; see docs/detector-plan.md.
+    # returns show is empty.
     #
     # Set explicitly to enable, e.g. ((0.6, 0.6, 0.9),) when a scene says the
     # blocks stand upright, or both entries to accept the current precision cost.

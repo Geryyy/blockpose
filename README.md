@@ -1,25 +1,17 @@
 # Blockpose
 
-Blockpose is a standalone workspace for reliable 6-DoF pose estimation of
-concrete blocks from point clouds. The current implementation is a
-Python/Open3D detector used as the behavioral reference. The next development
-step is to add a C++20 core and thin ROS 2 evaluation node so complete rosbags
-can drive the port, beginning with `SCENE_DISCOVERY`; this scaffolding is
-planned but is **not implemented in this repository yet**. It is an evaluation
-path, not a production replacement. The current repository contains the
-implementation roadmap, development environment, tests, and a curated export
-of models and configuration from the source ROS workspace.
+Blockpose is the development workspace for concrete-block perception data,
+annotation, offline evaluation, and learned RGB priors. The production ROS 2
+detector lives in the sibling `concrete_block_detector` package; this repository
+trains and evaluates optional RGB evidence modules against captured rosbags.
 
 ## Start here
 
-- [`docs/current-detector-pipeline.md`](docs/current-detector-pipeline.md) is
-  the canonical description of current, as-built detector behavior, including
-  its default and opt-in paths, limits, and reproducible diagnostics.
-- [`docs/next-steps.md`](docs/next-steps.md) is the active C++20/ROS 2 takeover
-  sequence and defines its replay, reviewed-snapshot, and promotion gates.
-- [`docs/implementation-plan.md`](docs/implementation-plan.md) is the future
-  target architecture; it is not a description of the current implementation
-  or the active ordering.
+- [`docs/dino-rgb-prior-ros-integration.md`](docs/dino-rgb-prior-ros-integration.md)
+  is the authoritative architecture and integration contract for the optional
+  DINO RGB proposer and verifier.
+- [`docs/annotation-tool.md`](docs/annotation-tool.md) explains how to review
+  scene-discovery captures and create ground truth.
 - [`docs/ENVIRONMENT.md`](docs/ENVIRONMENT.md) explains the Docker and local
   development workflow.
 - [`config/`](config/) contains calibration, perception, initialization, block
@@ -43,11 +35,8 @@ urdf/             reference robot and sensor descriptions
 ```
 
 `launch_context/`, `urdf/`, much of `config/`, and the existing assets are
-reference/provenance material rather than a finished standalone runtime. Some
-files still name packages from the original ROS workspace and are intentionally
-kept unchanged so their origin and integration assumptions remain inspectable.
-Treat those exported reference files as unmaintained unless their use is
-documented by the current pipeline or environment documentation.
+reference/provenance material, not a standalone ROS runtime. The runtime
+integration boundary is documented in the DINO RGB prior architecture.
 
 ## Clone and large assets
 
@@ -92,9 +81,44 @@ make check
 The devcontainer uses the same core image and automatically mounts the repo-local
 `data/` directory at `/data` with `BLOCKPOSE_DATASET=/data`.
 
-`make check` currently runs the Python test suite and lint only. C++ build,
-ctest, and clang-format targets do not exist yet; adding their minimal
-scaffolding is the first task in [`docs/next-steps.md`](docs/next-steps.md).
+`make check` runs the repository checks. The production C++ detector has its
+own build and replay tests in the source ROS workspace.
+
+## Portable C++ core
+
+`cpp/` is the production algorithm: it contains the ROS-free filtering,
+geometry, priors, cuboid refinement, selection, and candidate tracing used by
+`concrete_block_detector`. Build and install it before configuring the ROS
+wrapper:
+
+```bash
+cmake -S cpp -B .build/blockpose-core -DBLOCKPOSE_CORE_BUILD_TESTING=ON
+cmake --build .build/blockpose-core --parallel
+ctest --test-dir .build/blockpose-core --output-on-failure
+cmake --install .build/blockpose-core --prefix <blockpose-core-prefix>
+
+# The ROS package uses normal CMake package discovery; no relative includes.
+CMAKE_PREFIX_PATH=<blockpose-core-prefix>:$CMAKE_PREFIX_PATH \
+  colcon build --packages-select concrete_block_detector
+```
+
+The optional `blockpose._core` nanobind module exposes the same geometry core
+to standalone Python tools. It is intentionally separate from the pure Python
+annotation/training package while packaging is being consolidated:
+
+```bash
+python3 -m pip install nanobind
+cmake -S cpp -B .build/blockpose-python \
+  -DBLOCKPOSE_CORE_BUILD_PYTHON=ON \
+  -Dnanobind_DIR="$(python3 -m nanobind --cmake_dir)"
+cmake --build .build/blockpose-python --parallel
+cmake --install .build/blockpose-python \
+  --prefix "$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["platlib"])')"
+```
+
+`blockpose._core.discover(points)` currently provides the geometry-only
+baseline. Parity-critical FK, gripper, RGB, and trace inputs remain exposed
+first through the standalone capture runner while the Python DTOs are added.
 
 ## Label a replay scene-discovery capture
 
@@ -140,8 +164,8 @@ python3 tools/export_reference_bag.py \
 For gripper removal, record `/tf`, `/tf_static`, `/joint_states` (or
 `/joint_states_rviz`), and `/seyond/points` together. The exporter can produce
 point clouds, images, TF streams, camera information, and a manifest. Its output
-directory is ignored because captured data should be curated into the external
-dataset described by the implementation plan.
+directory is ignored; curate reviewed captures in the external dataset mount
+used for offline evaluation and training.
 
 ## Coordinate-frame note
 
