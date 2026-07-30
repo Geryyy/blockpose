@@ -1,92 +1,232 @@
 # syntax=docker/dockerfile:1.7
-# blockpose core development image — Python/Open3D prototyping.
+# blockpose development image:
+# - DINOv2 backbone + trainable MLP head
+# - SAM 2 / Grounded-SAM-2 dataset preparation
+# - Open3D visualization
+# - CUDA-enabled PyTorch development
 
 ARG UV_VERSION=0.5.24
+
+ARG CUDA_VERSION=12.8.1
+ARG UBUNTU_VERSION=24.04
+
+ARG PYTHON_VERSION=3.11
+
+ARG TORCH_VERSION=2.10.0
+ARG TORCHVISION_VERSION=0.25.0
+ARG TORCH_CUDA_INDEX=cu128
+
 ARG NODE_MAJOR=24
 ARG OPENCLAUDE_VERSION=0.24.0
 
+# ---------------------------------------------------------------------------
+# uv binary
+# ---------------------------------------------------------------------------
 FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 
-FROM ubuntu:24.04
+# ---------------------------------------------------------------------------
+# CUDA development image
+#
+# "devel" is required because:
+# - Grounding DINO compiles CUDA deformable-attention operators
+# - SAM 2 can compile a CUDA extension
+# ---------------------------------------------------------------------------
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu${UBUNTU_VERSION}
 
 ARG DEBIAN_FRONTEND=noninteractive
+
+ARG PYTHON_VERSION
+ARG TORCH_VERSION
+ARG TORCHVISION_VERSION
+ARG TORCH_CUDA_INDEX
+
 ARG NODE_MAJOR
 ARG OPENCLAUDE_VERSION
 
-# ---------------------------------------------------------------------------
-# System packages: Python + GUI/X11 runtime libs for Open3D's visualizer
-# ---------------------------------------------------------------------------
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        git \
-        git-lfs \
-        curl \
-        ca-certificates \
-        gnupg \
-        python3 \
-        python3-dev \
-        python3-venv \
-        # runtime deps of Open3D's GUI/X11 visualization tools
-        libdbus-1-3 \
-        libegl1 \
-        libglib2.0-0 \
-        libgl1 \
-        libgl1-mesa-dri \
-        libglx-mesa0 \
-        libglu1-mesa-dev \
-        libgomp1 \
-        libice6 \
-        libjpeg-turbo8 \
-        libpng16-16 \
-        libsm6 \
-        libx11-6 \
-        libwayland-cursor0 \
-        libxcb-cursor0 \
-        libxext6 \
-        libxfixes3 \
-        libxi6 \
-        libxinerama1 \
-        libxkbcommon-x11-0 \
-        libxrandr2 \
-        libxrender1 \
-        # convenience
-        less \
-        jq \
-        unzip \
-        xz-utils \
-    && rm -rf /var/lib/apt/lists/*
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # ---------------------------------------------------------------------------
-# uv — Python environment manager (venv + lockfile inside the container)
+# CUDA and Python environment
+# ---------------------------------------------------------------------------
+ENV CUDA_HOME=/usr/local/cuda \
+  NVIDIA_VISIBLE_DEVICES=all \
+  NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics \
+  CUDA_MODULE_LOADING=LAZY \
+  PYTHONDONTWRITEBYTECODE=1 \
+  PYTHONUNBUFFERED=1 \
+  UV_LINK_MODE=copy \
+  UV_PYTHON_INSTALL_DIR=/opt/uv/python \
+  UV_CACHE_DIR=/opt/uv/cache \
+  UV_PROJECT_ENVIRONMENT=/opt/venv \
+  VIRTUAL_ENV=/opt/venv
+
+ENV PATH="${VIRTUAL_ENV}/bin:${CUDA_HOME}/bin:${PATH}"
+
+# ---------------------------------------------------------------------------
+# System packages
+# ---------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  # development toolchain for SAM 2 / Grounding DINO extensions
+  build-essential \
+  cmake \
+  ninja-build \
+  pkg-config \
+  \
+  # general development
+  git \
+  git-lfs \
+  curl \
+  wget \
+  ca-certificates \
+  gnupg \
+  sudo \
+  python3 \
+  \
+  # image/video dataset preparation
+  ffmpeg \
+  \
+  # Open3D / OpenCV / X11 / OpenGL runtime
+  libdbus-1-3 \
+  libegl1 \
+  libglib2.0-0 \
+  libgl1 \
+  libgl1-mesa-dri \
+  libglx-mesa0 \
+  libglu1-mesa-dev \
+  libgomp1 \
+  libice6 \
+  libjpeg-turbo8 \
+  libpng16-16 \
+  libsm6 \
+  libvulkan1 \
+  libwayland-cursor0 \
+  libx11-6 \
+  libxext6 \
+  libxfixes3 \
+  libxi6 \
+  libxinerama1 \
+  libxkbcommon-x11-0 \
+  libxrandr2 \
+  libxrender1 \
+  libxcb-cursor0 \
+  mesa-utils \
+  xauth \
+  \
+  # convenience
+  bash-completion \
+  less \
+  jq \
+  nano \
+  rsync \
+  unzip \
+  xz-utils \
+  && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# uv
 # ---------------------------------------------------------------------------
 COPY --from=uv /uv /uvx /usr/local/bin/
+
+# ---------------------------------------------------------------------------
+# Python 3.11 + base ML environment
+#
+# The environment lives outside /workspace so it is not hidden when the
+# repository is mounted into /workspace by VS Code.
+# ---------------------------------------------------------------------------
+RUN uv python install "${PYTHON_VERSION}" \
+  && uv venv --python "${PYTHON_VERSION}" "${VIRTUAL_ENV}" \
+  \
+  # Official CUDA-enabled PyTorch wheels
+  && uv pip install \
+  --python "${VIRTUAL_ENV}/bin/python" \
+  "torch==${TORCH_VERSION}" \
+  "torchvision==${TORCHVISION_VERSION}" \
+  --index-url "https://download.pytorch.org/whl/${TORCH_CUDA_INDEX}" \
+  \
+  # Computer vision / training / dataset tooling
+  && uv pip install \
+  --python "${VIRTUAL_ENV}/bin/python" \
+  "setuptools>=69,<76" \
+  wheel \
+  "numpy>=1.26,<2.0" \
+  scipy \
+  pandas \
+  pillow \
+  opencv-python \
+  open3d \
+  matplotlib \
+  tqdm \
+  pyyaml \
+  scikit-learn \
+  tensorboard \
+  torchmetrics \
+  timm \
+  einops \
+  omegaconf \
+  hydra-core \
+  fvcore \
+  iopath \
+  submitit \
+  accelerate \
+  safetensors \
+  huggingface-hub \
+  "transformers>=4.40,<4.55" \
+  supervision \
+  pycocotools \
+  av \
+  addict \
+  yapf \
+  termcolor \
+  ipykernel \
+  nvitop \
+  && rm -rf "${UV_CACHE_DIR}"
+
+# Grounded-SAM-2's current Hugging Face demo is incompatible with
+# transformers >= 4.55, hence the explicit upper bound above.
 
 # ---------------------------------------------------------------------------
 # Node.js + OpenClaude CLI
 # ---------------------------------------------------------------------------
 RUN install -d -m 0755 /etc/apt/keyrings \
-    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
-        | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
-    && chmod 0644 /etc/apt/keyrings/nodesource.gpg \
-    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
-        > /etc/apt/sources.list.d/nodesource.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends nodejs \
-    && npm install -g "@gitlawb/openclaude@${OPENCLAUDE_VERSION}" \
-    && npm cache clean --force \
-    && rm -rf /var/lib/apt/lists/*
+  && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+  | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+  && chmod 0644 /etc/apt/keyrings/nodesource.gpg \
+  && echo \
+  "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
+  > /etc/apt/sources.list.d/nodesource.list \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends nodejs \
+  && npm install -g "@gitlawb/openclaude@${OPENCLAUDE_VERSION}" \
+  && npm cache clean --force \
+  && rm -rf /var/lib/apt/lists/*
 
-# Ensure Git LFS is initialized for both root during build and the dev user.
-RUN git lfs install --system
+# ---------------------------------------------------------------------------
+# Git LFS and development user
+#
+# Ubuntu 24.04 normally already contains the uid-1000 "ubuntu" user.
+# ---------------------------------------------------------------------------
+RUN git lfs install --system \
+  && if ! id -u ubuntu >/dev/null 2>&1; then \
+  groupadd --gid 1000 ubuntu \
+  && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash ubuntu; \
+  fi \
+  && usermod --shell /bin/bash ubuntu \
+  && echo "ubuntu ALL=(root) NOPASSWD:ALL" \
+  > /etc/sudoers.d/ubuntu \
+  && chmod 0440 /etc/sudoers.d/ubuntu \
+  && chown -R ubuntu:ubuntu /opt/venv /opt/uv
 
-# Ubuntu 24.04 ships a non-root 'ubuntu' user (uid 1000) — use it so files
-# created in mounted volumes belong to the host user.
+# Verify that the installed Torch build contains CUDA support.
+# A GPU is not visible during docker build, so torch.cuda.is_available()
+# will normally still be false here.
+RUN python -c \
+  "import torch; print('Torch:', torch.__version__); print('Torch CUDA:', torch.version.cuda); assert torch.version.cuda is not None"
+
 USER ubuntu
 WORKDIR /workspace
 
-# uv keeps its venv in-project (.venv) so it survives via the repo mount.
-ENV UV_PROJECT_ENVIRONMENT=/workspace/.venv \
-    PATH=/workspace/.venv/bin:$PATH
-
-RUN printf '\nif [ -f /workspace/.venv/bin/activate ]; then\n    source /workspace/.venv/bin/activate\nfi\n' >> ~/.bashrc
+RUN printf '\n# Python environment supplied by the development image\n' >> ~/.bashrc \
+  && printf 'export VIRTUAL_ENV=/opt/venv\n' >> ~/.bashrc \
+  && printf 'export PATH=/opt/venv/bin:$PATH\n' >> ~/.bashrc
 
 CMD ["/bin/bash"]

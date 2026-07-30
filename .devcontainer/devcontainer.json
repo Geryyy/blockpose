@@ -6,40 +6,87 @@
   },
   "workspaceFolder": "/workspace",
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
+  // Documents that this development environment requires a GPU.
+  // Actual GPU forwarding is handled by --gpus=all below.
+  "hostRequirements": {
+    "gpu": true
+  },
   "mounts": [
     "source=${localWorkspaceFolder}/data,target=/data,type=bind,consistency=cached",
-    "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind"
+    // Open3D / matplotlib GUI windows
+    "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind",
+    // Persistent model and package caches
+    "source=blockpose-huggingface-cache,target=/home/ubuntu/.cache/huggingface,type=volume",
+    "source=blockpose-torch-cache,target=/home/ubuntu/.cache/torch,type=volume",
+    "source=blockpose-uv-cache,target=/home/ubuntu/.cache/uv,type=volume"
   ],
   "containerEnv": {
     "BLOCKPOSE_DATASET": "/data",
+    // X11/Open3D
     "DISPLAY": "${localEnv:DISPLAY}",
     "QT_X11_NO_MITSHM": "1",
     "XDG_SESSION_TYPE": "x11",
     "GDK_BACKEND": "x11",
     "QT_QPA_PLATFORM": "xcb",
     "GLFW_PLATFORM": "x11",
-    "LIBGL_ALWAYS_SOFTWARE": "1"
+    // NVIDIA runtime
+    "NVIDIA_VISIBLE_DEVICES": "all",
+    "NVIDIA_DRIVER_CAPABILITIES": "compute,utility,graphics",
+    // Persistent download/build caches
+    "HF_HOME": "/home/ubuntu/.cache/huggingface",
+    "TORCH_HOME": "/home/ubuntu/.cache/torch",
+    "UV_CACHE_DIR": "/home/ubuntu/.cache/uv",
+    // Reduces repeated compilation of CUDA extensions
+    "TORCH_EXTENSIONS_DIR": "/home/ubuntu/.cache/torch/extensions",
+    // Optional: explicitly choose GPU 0
+    "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
   },
   "remoteUser": "ubuntu",
-  "postCreateCommand": "uv sync --all-extras",
+  // --inexact is required for the proposed Dockerfile because that image
+  // already installs packages that might not yet exist in uv.lock.
+  "postCreateCommand": "sudo mkdir -p /home/ubuntu/.cache/huggingface /home/ubuntu/.cache/torch/extensions /home/ubuntu/.cache/uv && sudo chown -R ubuntu:ubuntu /home/ubuntu/.cache && uv sync --all-extras --inexact",
   "customizations": {
     "vscode": {
       "extensions": [
         "ms-python.python",
+        "ms-python.debugpy",
         "ms-toolsai.jupyter",
         "charliermarsh.ruff",
         "anthropic.claude-code",
         "openai.chatgpt"
       ],
       "settings": {
-        "python.defaultInterpreterPath": "/workspace/.venv/bin/python",
+        "python.defaultInterpreterPath": "/opt/venv/bin/python",
+        "python.terminal.activateEnvironment": true,
+        "jupyter.jupyterServerType": "local",
         "workbench.colorTheme": "Monokai Dimmed"
       }
     }
   },
-  // Rerun can run on the HOST (rerun --serve or native app); the container can
-  // also open X11 GUI tools through the mounted display socket.
-  // Forward the default gRPC port both ways.
-  "forwardPorts": [9876, 8888],
-  "runArgs": ["--network=host", "--ipc=host"]
+  // Host networking lets the container access a host-side Rerun server
+  // through localhost:9876.
+  //
+  // host IPC gives PyTorch DataLoader workers access to the host's shared
+  // memory and avoids small /dev/shm problems.
+  "runArgs": [
+    "--gpus=all",
+    "--network=host",
+    "--ipc=host"
+  ],
+  "forwardPorts": [
+    9876,
+    8888,
+    6006
+  ],
+  "portsAttributes": {
+    "9876": {
+      "label": "Rerun"
+    },
+    "8888": {
+      "label": "Jupyter"
+    },
+    "6006": {
+      "label": "TensorBoard"
+    }
+  }
 }
