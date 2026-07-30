@@ -9,6 +9,13 @@ the RGB experiment measures the candidates the ROS detector can actually rank.
 The trace is deliberately an input artifact: generate it with the same detector
 commit and parameter files that are being evaluated, then retain its checksum in
 the JSONL provenance.
+
+This is NOT the ``scene_discovery_capture/*/detector_candidates.yaml`` capture
+file: that is a different, schema_version 1 YAML artifact (flat ``candidates``
+list, ``dimensions`` alongside ``pose``). ``--detector-trace`` must instead be
+the schema_version 2 JSON trace (a ``snapshots`` list, per-candidate
+``pose["dims"]``) produced on demand by the C++
+``concrete_block_detector_snapshot_runner``.
 """
 
 from __future__ import annotations
@@ -91,6 +98,25 @@ def _verify_trace_inputs(snapshot: Path, trace_snapshot: dict[str, Any]) -> None
         raise ValueError("detector trace cloud/TF fingerprint does not match capture")
 
 
+_SCHEMA1_CAPTURE_HINT = (
+    "this looks like a schema_version 1 'detector_candidates.yaml' scene-discovery capture file "
+    "(YAML, a flat 'candidates' list, 'dimensions' as a sibling of 'pose'), which is NOT "
+    "cpp_export.py's input. cpp_export.py requires the schema_version 2 JSON trace with a "
+    "'snapshots' list and per-candidate pose['dims'], produced on demand by the C++ "
+    "concrete_block_detector_snapshot_runner (schema-v2 candidate-trace mode); point "
+    "--detector-trace at that instead."
+)
+
+
+def _looks_like_schema1_capture(data: Any) -> bool:
+    """Detect the detector_candidates.yaml shape so the error can name it explicitly."""
+    return (
+        isinstance(data, dict)
+        and data.get("schema_version") == 1
+        and isinstance(data.get("candidates"), list)
+    )
+
+
 def load_detector_trace(path: Path) -> tuple[dict[str, list[CppCandidate]], dict[str, Any]]:
     """Load C++ post-refinement candidates keyed by capture name.
 
@@ -98,7 +124,23 @@ def load_detector_trace(path: Path) -> tuple[dict[str, list[CppCandidate]], dict
     pre-refinement poses.  Refusing it prevents silently training on a different
     candidate distribution than the production selector sees.
     """
-    data = json.loads(path.read_text())
+    text = path.read_text()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as error:
+        try:
+            yaml_guess = yaml.safe_load(text)
+        except yaml.YAMLError:
+            yaml_guess = None
+        if _looks_like_schema1_capture(yaml_guess):
+            raise ValueError(
+                f"{path} is not a schema_version 2 detector trace: {_SCHEMA1_CAPTURE_HINT}"
+            ) from error
+        raise ValueError(f"detector trace at {path} is not valid JSON: {error}") from error
+    if _looks_like_schema1_capture(data):
+        raise ValueError(
+            f"{path} is not a schema_version 2 detector trace: {_SCHEMA1_CAPTURE_HINT}"
+        )
     if data.get("schema_version") != 2:
         raise ValueError(
             "detector trace must use schema_version 2 with an explicit candidate stage"

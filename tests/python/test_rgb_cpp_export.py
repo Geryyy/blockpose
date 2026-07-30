@@ -83,6 +83,32 @@ def test_cpp_trace_requires_post_refinement_candidate_trace(tmp_path: Path) -> N
         load_detector_trace(trace)
 
 
+def test_cpp_trace_rejects_schema1_capture_shape(tmp_path: Path) -> None:
+    """Feeding the detector_candidates.yaml capture shape must name the mismatch, not KeyError."""
+    trace = tmp_path / "trace.json"
+    trace.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "candidate_id_namespace": "request_local",
+                "reference_frame": "world",
+                "candidates": [
+                    {
+                        "candidate_id": "detector_candidate_000",
+                        "pose": {
+                            "position": [-11.5555, 2.63818, 0.693449],
+                            "orientation_xyzw": [-0.00766093, 0.0287269, 0.685699, 0.727278],
+                        },
+                        "dimensions": [0.9, 0.6, 0.6],
+                    }
+                ],
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="schema_version 1 'detector_candidates.yaml'"):
+        load_detector_trace(trace)
+
+
 def test_cpp_trace_loads_runner_pose_shape(tmp_path: Path) -> None:
     trace = tmp_path / "trace.json"
     trace.write_text(
