@@ -16,7 +16,7 @@ REPO_ROOT = Path(__file__).parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "python"))
 
-from blockpose.io import CameraModel  # noqa: E402
+from blockpose.io import CameraModel, load_camera_model  # noqa: E402
 from blockpose.pose import BlockPose  # noqa: E402
 
 from experiments.rgb_region_prior import export  # noqa: E402
@@ -257,7 +257,7 @@ def test_export_snapshot_writes_record_and_mask(tmp_path: Path) -> None:
     status = export.export_snapshot(
         snapshot,
         export_root=export_root,
-        calibration_path=calibration_path,
+        camera=load_camera_model(calibration_path),
         calibration_checksum="deadbeef",
         split_group="snap_a",
         sync_tolerance_s=0.10,
@@ -300,7 +300,7 @@ def test_export_snapshot_gate_failed_on_sync_drops_sample(tmp_path: Path) -> Non
     status = export.export_snapshot(
         snapshot,
         export_root=export_root,
-        calibration_path=calibration_path,
+        camera=load_camera_model(calibration_path),
         calibration_checksum="deadbeef",
         split_group="snap_b",
         sync_tolerance_s=0.10,
@@ -325,7 +325,7 @@ def test_export_snapshot_zero_blocks_still_exports(tmp_path: Path) -> None:
     status = export.export_snapshot(
         snapshot,
         export_root=export_root,
-        calibration_path=calibration_path,
+        camera=load_camera_model(calibration_path),
         calibration_checksum="deadbeef",
         split_group="snap_c",
         sync_tolerance_s=0.10,
@@ -351,7 +351,7 @@ def test_export_snapshot_skips_incomplete_annotations(tmp_path: Path) -> None:
     status = export.export_snapshot(
         snapshot,
         export_root=export_root,
-        calibration_path=calibration_path,
+        camera=load_camera_model(calibration_path),
         calibration_checksum="deadbeef",
         split_group="snap_d",
         sync_tolerance_s=0.10,

@@ -116,7 +116,7 @@ def _load_image(path: Path) -> np.ndarray:
     return np.asarray(Image.open(path).convert("RGB"))
 
 
-def _block_masks_for_sample(sample: RegionSample, *, snapshots_dir: Path, calibration_path) -> dict:
+def _block_masks_for_sample(sample: RegionSample, *, snapshots_dir: Path, camera) -> dict:
     """Recompute each approved block's own silhouette fresh from annotations.yaml.
 
     The exported record only stores the *union* mask (what the head trains
@@ -130,7 +130,6 @@ def _block_masks_for_sample(sample: RegionSample, *, snapshots_dir: Path, calibr
     snapshot = snapshots_dir / sample.sample_id
     annotations = load_annotations(snapshot / "annotations.yaml")
     tf = load_tf_snapshot(snapshot / "tf.yaml")
-    camera = load_camera_model(calibration_path)
     masks = {}
     for target in approved_targets(annotations):
         mask = block_silhouette_mask(target.pose, tf.T_world_camera, camera)
@@ -166,6 +165,7 @@ def main() -> int:
 
     args = parse_args()
     head, config = load_dino_region_proposer(args.checkpoint)
+    camera = load_camera_model(args.calibration)
 
     def extract_regions(probability_map: np.ndarray) -> list[np.ndarray]:
         return [proposal.mask for proposal in extract_region_proposals(probability_map, config)]
@@ -210,7 +210,7 @@ def main() -> int:
         probability_map = np.asarray(head.predict_proposal_map(image))
         predicted_regions = extract_regions(probability_map)
         block_masks = _block_masks_for_sample(
-            sample, snapshots_dir=args.snapshots_dir, calibration_path=args.calibration
+            sample, snapshots_dir=args.snapshots_dir, camera=camera
         )
         result = evaluate_snapshot_recall(
             predicted_regions, block_masks, iou_threshold=args.iou_threshold

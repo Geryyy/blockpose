@@ -23,7 +23,7 @@ REPO_ROOT = Path(__file__).parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "python"))
 
-from blockpose.io import CameraModel  # noqa: E402
+from blockpose.io import CameraModel, load_camera_model  # noqa: E402
 from blockpose.pose import BlockPose, rotmat_to_quat_xyzw  # noqa: E402
 
 from experiments.rgb_region_prior import export_weak  # noqa: E402
@@ -212,7 +212,7 @@ def test_export_capture_writes_record_and_union_mask(tmp_path: Path) -> None:
         capture,
         anchors,
         export_root=export_root,
-        calibration_path=calibration_path,
+        camera=load_camera_model(calibration_path),
         calibration_checksum="deadbeef",
         anchors_checksum="feedface",
         sync_tolerance_s=0.10,
@@ -254,7 +254,7 @@ def test_export_capture_all_anchors_dropped_projection_is_not_exported(tmp_path:
         capture,
         anchors,
         export_root=export_root,
-        calibration_path=calibration_path,
+        camera=load_camera_model(calibration_path),
         calibration_checksum="deadbeef",
         anchors_checksum="feedface",
         sync_tolerance_s=0.10,

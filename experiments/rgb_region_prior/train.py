@@ -37,6 +37,7 @@ sys.path.insert(0, str(REPO_ROOT / "tools"))
 
 from ablate_rgb_proposals import load_split_manifest  # noqa: E402
 
+from experiments.embedding_cache import cached_embed_all  # noqa: E402
 from experiments.rgb_region_prior.dataset import (  # noqa: E402
     RegionDataset,
     RegionSample,
@@ -50,7 +51,7 @@ from experiments.rgb_region_prior.model import (  # noqa: E402
 )
 
 if TYPE_CHECKING:
-    from blockpose.rgb_region_proposer import DinoRegionProposerHead
+    from blockpose.rgb_region_proposer import DinoRegionProposerConfig, DinoRegionProposerHead
 
 DEFAULT_EXPORT_ROOT = REPO_ROOT / "out" / "rgb_region_prior"
 DEFAULT_SPLITS = REPO_ROOT / "config" / "rgb_ablation_splits.yaml"
@@ -71,27 +72,12 @@ def _load_mask(path: Path) -> np.ndarray:
 def embed_all(
     head: "DinoRegionProposerHead", samples: list[RegionSample], cache: Path | None
 ) -> dict[str, np.ndarray]:
-    """Frozen backbone patch-grid features per ``sample_id``, cached since the backbone is frozen.
+    """Frozen patch-grid features per ``sample_id``, cached since the backbone is frozen."""
 
-    Mirrors ``experiments.rgb_candidate_prior.train``'s ``embed_all`` shape.
-    """
-    ids = [sample.sample_id for sample in samples]
-    if cache is not None and cache.is_file():
-        blob = np.load(cache, allow_pickle=True)
-        if list(blob["ids"]) == ids:
-            print(f"loaded cached dino_proposer features {blob['features'].shape}")
-            return dict(zip(ids, blob["features"], strict=True))
+    def _embed_one(sample: RegionSample) -> np.ndarray:
+        return np.asarray(head.patch_features(_load_image(sample.image_path)))
 
-    features = []
-    for index, sample in enumerate(samples):
-        image = _load_image(sample.image_path)
-        features.append(np.asarray(head.patch_features(image)))
-        print(f"  embedded {index + 1}/{len(samples)}", end="\r")
-    print()
-    stacked = np.stack(features)
-    if cache is not None:
-        np.savez(cache, ids=np.array(ids), features=stacked)
-    return dict(zip(ids, stacked, strict=True))
+    return cached_embed_all(samples, cache, embed_one=_embed_one, label="dino_proposer")
 
 
 def _targets_for(
@@ -290,10 +276,49 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _train_one_pass(
+    config: "DinoRegionProposerConfig",
+    device: str,
+    train_samples: list[RegionSample],
+    weak_samples: list[RegionSample],
+    features: dict[str, np.ndarray],
+    *,
+    epochs: int,
+    lr: float,
+    seed: int,
+    weak_mass_fraction: float,
+    eval_samples: list[RegionSample] | None,
+) -> tuple["DinoRegionProposerHead", dict, dict | None, dict[str, float]]:
+    """Train one fresh head on ``train_samples`` (+ mass-normalized weak samples).
+
+    Evaluates on ``eval_samples`` if given (``None`` for the final union pass,
+    which has no held-out slice left). Shared by the held-out-fold path, each
+    cross-validation fold, and the final pass -- they differ only in which
+    samples go where.
+    """
+    from blockpose.rgb_region_proposer import DinoRegionProposerHead
+
+    sample_weights = mass_normalized_weak_weights(train_samples, weak_samples, weak_mass_fraction)
+    head = DinoRegionProposerHead(config, device=device)
+    train_report = train_head(
+        head,
+        train_samples + weak_samples,
+        features,
+        epochs=epochs,
+        lr=lr,
+        device=device,
+        seed=seed,
+        sample_weights=sample_weights or None,
+    )
+    eval_report = (
+        evaluate_loss(head, eval_samples, features, device) if eval_samples is not None else None
+    )
+    return head, train_report, eval_report, sample_weights
+
+
 def main() -> int:
-    # Deferred: see module docstring "Assumed runtime API" -- keeps this
-    # script (and its train_head/embed_all unit tests) importable even before
-    # blockpose.rgb_region_proposer exists.
+    # Deferred (not module scope) so this script -- and its train_head/embed_all
+    # unit tests -- stay importable without torch/transformers installed.
     from blockpose.rgb_region_proposer import (
         DinoRegionProposerConfig,
         DinoRegionProposerHead,
@@ -368,17 +393,11 @@ def main() -> int:
             )
         holdout_groups = {g for g, f in group_fold.items() if f == args.held_out_fold}
         train_samples, eval_samples = split_by_session(dev_dataset, holdout_groups)
-        sample_weights = mass_normalized_weak_weights(
-            train_samples, weak_samples, args.weak_mass_fraction
+        held_out_head, train_report, eval_report, sample_weights = _train_one_pass(
+            config, device, train_samples, weak_samples, features,
+            epochs=args.epochs, lr=args.lr, seed=args.seed,
+            weak_mass_fraction=args.weak_mass_fraction, eval_samples=eval_samples,
         )
-        train_samples_with_weak = train_samples + weak_samples
-
-        held_out_head = DinoRegionProposerHead(config, device=device)
-        train_report = train_head(
-            held_out_head, train_samples_with_weak, features, epochs=args.epochs, lr=args.lr,
-            device=device, seed=args.seed, sample_weights=sample_weights or None,
-        )
-        eval_report = evaluate_loss(held_out_head, eval_samples, features, device)
 
         args.checkpoint_out.mkdir(parents=True, exist_ok=True)
         save_checkpoint(args.checkpoint_out, held_out_head, config)
@@ -418,15 +437,11 @@ def main() -> int:
     for held_out in folds:
         holdout_groups = {g for g, f in group_fold.items() if f == held_out}
         train_samples, eval_samples = split_by_session(dev_dataset, holdout_groups)
-        fold_sample_weights = mass_normalized_weak_weights(
-            train_samples, weak_samples, args.weak_mass_fraction
+        _, train_report, eval_report, fold_sample_weights = _train_one_pass(
+            config, device, train_samples, weak_samples, features,
+            epochs=args.epochs, lr=args.lr, seed=args.seed,
+            weak_mass_fraction=args.weak_mass_fraction, eval_samples=eval_samples,
         )
-        fold_head = DinoRegionProposerHead(config, device=device)
-        train_report = train_head(
-            fold_head, train_samples + weak_samples, features, epochs=args.epochs, lr=args.lr,
-            device=device, seed=args.seed, sample_weights=fold_sample_weights or None,
-        )
-        eval_report = evaluate_loss(fold_head, eval_samples, features, device)
         cross_validation[f"fold_{held_out}_held_out"] = {
             "train_snapshot_groups": sorted({s.split_group for s in train_samples}),
             "eval_snapshot_groups": sorted({s.split_group for s in eval_samples}),
@@ -437,13 +452,10 @@ def main() -> int:
             "eval": eval_report,
         }
 
-    final_sample_weights = mass_normalized_weak_weights(
-        list(dev_dataset.samples), weak_samples, args.weak_mass_fraction
-    )
-    final_head = DinoRegionProposerHead(config, device=device)
-    final_train_report = train_head(
-        final_head, list(dev_dataset.samples) + weak_samples, features, epochs=args.epochs,
-        lr=args.lr, device=device, seed=args.seed, sample_weights=final_sample_weights or None,
+    final_head, final_train_report, _, final_sample_weights = _train_one_pass(
+        config, device, list(dev_dataset.samples), weak_samples, features,
+        epochs=args.epochs, lr=args.lr, seed=args.seed,
+        weak_mass_fraction=args.weak_mass_fraction, eval_samples=None,
     )
     args.checkpoint_out.mkdir(parents=True, exist_ok=True)
     save_checkpoint(args.checkpoint_out, final_head, config)

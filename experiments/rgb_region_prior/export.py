@@ -138,7 +138,7 @@ def export_snapshot(
     snapshot: Path,
     *,
     export_root: Path,
-    calibration_path: Path,
+    camera: CameraModel,
     calibration_checksum: str,
     split_group: str,
     sync_tolerance_s: float,
@@ -152,7 +152,6 @@ def export_snapshot(
     if not annotations.annotation_complete:
         return {"snapshot": snapshot.name, "status": "skipped_annotation_incomplete"}
 
-    camera = load_camera_model(calibration_path)
     rgb = load_rgb(snapshot / "rgb.png")
 
     calib = gates.calibration_gate(camera, rgb.shape)
@@ -318,6 +317,7 @@ def main() -> int:
     if args.sessions is not None:
         sessions = yaml.safe_load(args.sessions.read_text()) or {}
 
+    camera = load_camera_model(args.calibration)
     calibration_checksum = gates.sha256_file(args.calibration)
     snapshots = sorted(p for p in args.snapshots_dir.iterdir() if (p / "tf.yaml").is_file())
     if args.limit is not None:
@@ -331,7 +331,7 @@ def main() -> int:
                 export_snapshot(
                     snapshot,
                     export_root=export_root,
-                    calibration_path=args.calibration,
+                    camera=camera,
                     calibration_checksum=calibration_checksum,
                     split_group=sessions.get(snapshot.name, snapshot.name),
                     sync_tolerance_s=args.sync_tolerance_s,

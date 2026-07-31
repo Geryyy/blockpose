@@ -25,7 +25,9 @@ import math
 
 import torch
 
-from experiments.rgb_candidate_prior.dataset import CandidateDataset, Sample
+from experiments.fold_safety import development_fold_of_snapshot as development_fold_of_snapshot
+from experiments.fold_safety import fold_of_group as fold_of_group
+from experiments.fold_safety import select_development_groups as select_development_groups
 
 _VALID_LABELS = frozenset({"positive", "negative", "ignore"})
 
@@ -103,76 +105,6 @@ def first_correct_rank(scores: list[float], labels: list[str]) -> int | None:
         if label == "positive":
             return index
     return None
-
-
-def development_fold_of_snapshot(manifest: dict) -> dict[str, int]:
-    """Map snapshot name -> development fold id from a loaded split manifest.
-
-    Only ``development``-split groups are included; ``final`` snapshots
-    (``selection_eligible: false``) are never returned, so callers cannot
-    accidentally train or select on them.
-    """
-    mapping: dict[str, int] = {}
-    for group in manifest["groups"].values():
-        if group["split"] != "development":
-            continue
-        for snapshot in group["snapshots"]:
-            mapping[snapshot] = group["fold"]
-    return mapping
-
-
-def fold_of_group(samples: list[Sample], snapshot_fold: dict[str, int]) -> int | None:
-    """Development fold id for one ``split_group``, resolved via true snapshot names.
-
-    ``split_group`` may be a session id assigned by ``sessions.py``, not a raw
-    snapshot name, so this always resolves through each sample's recorded
-    ``source.snapshot`` rather than string-matching ``split_group`` against
-    the manifest. Returns ``None`` if no member snapshot is in a development
-    fold (i.e. the group is entirely ``final``/unlisted data).
-    """
-    folds = {
-        snapshot_fold[snapshot]
-        for sample in samples
-        if (snapshot := sample.raw.get("source", {}).get("snapshot")) in snapshot_fold
-    }
-    if not folds:
-        return None
-    if len(folds) > 1:
-        raise ValueError(
-            f"split_group spans multiple development folds ({sorted(folds)}); "
-            "held-out splitting requires exactly one fold per split_group"
-        )
-    return next(iter(folds))
-
-
-def select_development_groups(
-    dataset: CandidateDataset, snapshot_fold: dict[str, int]
-) -> tuple[CandidateDataset, dict[str, int]]:
-    """Restrict a dataset to samples whose ``split_group`` resolves to a development fold.
-
-    Returns the restricted dataset plus the resolved ``{split_group: fold}``
-    map, so callers can build per-fold held-out splits with
-    ``dataset.split_by_session``.
-
-    A ``split_group`` (session) can mix development and ``final`` snapshots
-    if they happen to land in the same session bucket; keeping every sample
-    of a group once *any* member resolves to a fold would leak ``final``
-    (``selection_eligible: false``) candidates into training. Each sample is
-    therefore also checked individually against its own recorded
-    ``source.snapshot``, not just its group's resolved fold.
-    """
-    group_fold: dict[str, int] = {}
-    for group, samples in dataset.groups().items():
-        fold = fold_of_group(samples, snapshot_fold)
-        if fold is not None:
-            group_fold[group] = fold
-    kept = tuple(
-        sample
-        for sample in dataset.samples
-        if sample.split_group in group_fold
-        and sample.raw.get("source", {}).get("snapshot") in snapshot_fold
-    )
-    return CandidateDataset(root=dataset.root, samples=kept), group_fold
 
 
 def _logit(probability: torch.Tensor, *, eps: float = 1e-6) -> torch.Tensor:

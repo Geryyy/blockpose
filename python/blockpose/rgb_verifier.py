@@ -18,14 +18,20 @@ this module) never requires torch.
 
 from __future__ import annotations
 
-import json
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
 from scipy import ndimage
+
+from blockpose._dino_backbone import load_frozen_backbone
+from blockpose._head_checkpoint import (
+    config_from_payload,
+    read_checkpoint_config,
+    write_checkpoint_config,
+)
 
 if TYPE_CHECKING:
     import torch
@@ -148,22 +154,12 @@ class DinoVerifierHead:
     def _load(self) -> None:
         if self._backbone is not None:
             return
-        try:
-            import torch
-            from torch import nn
-            from transformers import AutoImageProcessor, AutoModel
-        except ImportError as error:
-            missing = error.name or "an optional dependency"
-            raise RuntimeError(
-                f"dino_verifier is missing {missing!r}. Install the optional dependencies with "
-                "`uv sync --extra sam`, then retry."
-            ) from error
-        if self.device == "auto":
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self._processor = AutoImageProcessor.from_pretrained(self.config.model_id)
-        backbone = AutoModel.from_pretrained(self.config.model_id).to(self.device).eval()
-        backbone.requires_grad_(False)
+        torch, self._processor, backbone, self.device = load_frozen_backbone(
+            self.config.model_id, self.device, head_name="dino_verifier"
+        )
         self._backbone = backbone
+        from torch import nn
+
         hidden_size = backbone.config.hidden_size
         head = nn.Sequential(
             nn.Linear(hidden_size * len(_REGION_NAMES), self.config.hidden_dim),
@@ -220,16 +216,11 @@ def save_checkpoint(
 ) -> None:
     """Save the trainable MLP head, config, and calibration temperature.
 
-    On-disk format (owned entirely by this module -- callers must go through
+    On-disk format (see `blockpose._head_checkpoint`, shared with
+    `rgb_region_proposer.py` -- callers must go through
     `save_checkpoint`/`load_dino_verifier`, never read these files directly):
-    ``path`` is a directory containing
-
-    - ``mlp_head.pt``: a torch state dict of the trainable MLP head only.
-      The frozen DINOv2 backbone is never serialized; it is re-loaded from
-      `config.model_id` by `load_dino_verifier`.
-    - ``config.json``: `DinoVerifierConfig` fields plus
-      `calibration_temperature` and a `schema_version` for forward-safe
-      loading.
+    a directory with `mlp_head.pt` (trainable MLP state dict only -- the
+    frozen backbone is never serialized) and `config.json`.
     """
     import torch
 
@@ -237,12 +228,12 @@ def save_checkpoint(
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
     torch.save(head.mlp.state_dict(), path / "mlp_head.pt")
-    payload = {
-        "schema_version": _CHECKPOINT_SCHEMA_VERSION,
-        "calibration_temperature": float(calibration_temperature),
-        **asdict(config),
-    }
-    (path / "config.json").write_text(json.dumps(payload, indent=2) + "\n")
+    write_checkpoint_config(
+        path,
+        config,
+        _CHECKPOINT_SCHEMA_VERSION,
+        calibration_temperature=float(calibration_temperature),
+    )
 
 
 def load_dino_verifier(path: Path) -> tuple[DinoVerifierHead, DinoVerifierConfig, float]:
@@ -254,23 +245,17 @@ def load_dino_verifier(path: Path) -> tuple[DinoVerifierHead, DinoVerifierConfig
     import torch
 
     path = Path(path)
-    config_path, weights_path = path / "config.json", path / "mlp_head.pt"
-    if not config_path.is_file() or not weights_path.is_file():
-        raise FileNotFoundError(
-            f"{path} is not a dino_verifier checkpoint (missing config/weights)"
-        )
-    payload = json.loads(config_path.read_text())
-    if payload.get("schema_version") != _CHECKPOINT_SCHEMA_VERSION:
-        raise ValueError(
-            f"unsupported dino_verifier checkpoint schema {payload.get('schema_version')!r}"
-        )
-    calibration_temperature = float(payload["calibration_temperature"])
-    config = DinoVerifierConfig(
-        **{field: payload[field] for field in asdict(DinoVerifierConfig()) if field in payload}
+    payload = read_checkpoint_config(
+        path,
+        weights_filename="mlp_head.pt",
+        schema_version=_CHECKPOINT_SCHEMA_VERSION,
+        checkpoint_kind="dino_verifier",
     )
+    calibration_temperature = float(payload["calibration_temperature"])
+    config = config_from_payload(DinoVerifierConfig, payload)
     head = DinoVerifierHead(config)
     head._load()
-    state_dict = torch.load(weights_path, map_location=head.device)
+    state_dict = torch.load(path / "mlp_head.pt", map_location=head.device)
     head.mlp.load_state_dict(state_dict)
     head.mlp.eval()
     return head, config, calibration_temperature

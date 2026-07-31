@@ -22,8 +22,9 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "python"))
 sys.path.insert(0, str(REPO_ROOT))  # so `experiments.rgb_candidate_prior.render` resolves too
+sys.path.insert(0, str(REPO_ROOT / "tools"))  # so `ablate_rgb_edge_prior` resolves too
 
-from blockpose.annotations import load_annotations  # noqa: E402
+from ablate_rgb_edge_prior import _first_correct_rank, _load_targets  # noqa: E402
 from blockpose.detection import (  # noqa: E402
     DetectionParams,
     SensorContext,
@@ -84,23 +85,6 @@ def _rank(
     )
 
 
-def _first_correct_rank(candidates: list[dict]) -> int | None:
-    for index, candidate in enumerate(candidates):
-        if candidate["correct"]:
-            return index
-    return None
-
-
-def _load_targets(snapshot: Path):
-    annotation_path = snapshot / "annotations.yaml"
-    if not annotation_path.is_file():
-        return []
-    annotations = load_annotations(annotation_path)
-    if not annotations.annotation_complete:
-        return []
-    return [target for target in annotations.targets if target.is_evaluation_target]
-
-
 def _candidate_bbox(
     pose: BlockPose, tf: TFSnapshot, camera: CameraModel
 ) -> tuple[int, int, int, int] | None:
@@ -114,7 +98,7 @@ def evaluate_snapshot(
     head: DinoVerifierHead,
     config: DinoVerifierConfig,
     calibration_temperature: float,
-    calibration_path: Path,
+    camera: CameraModel,
     candidate_radius_m: float,
     score_band: float,
     dino_margin: float,
@@ -132,7 +116,6 @@ def evaluate_snapshot(
     )
     assert result.trace is not None
     rgb = load_rgb(snapshot / "rgb.png")
-    camera = load_camera_model(calibration_path)
     dino_ms_total = 0.0
     scored: list[dict] = []
     for target in targets:
@@ -308,6 +291,7 @@ def main() -> int:
             "this tool refuses to silently fall back to a geometry-only no-op."
         )
     head, config, calibration_temperature = load_dino_verifier(args.checkpoint)
+    camera = load_camera_model(args.calibration)
     snapshots = sorted(
         path for path in args.snapshots_dir.iterdir() if (path / "tf.yaml").is_file()
     )
@@ -317,7 +301,7 @@ def main() -> int:
             head=head,
             config=config,
             calibration_temperature=calibration_temperature,
-            calibration_path=args.calibration,
+            camera=camera,
             candidate_radius_m=args.candidate_radius_m,
             score_band=args.geometry_score_band,
             dino_margin=args.dino_margin,

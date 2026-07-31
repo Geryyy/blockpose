@@ -13,6 +13,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
+from experiments.fold_safety import split_by_session as split_by_session  # noqa: F401
+
 
 @dataclass(frozen=True)
 class Sample:
@@ -78,21 +80,3 @@ class CandidateDataset:
         for sample in self.samples:
             counts[sample.label] += 1
         return dict(counts)
-
-
-def split_by_session(
-    dataset: CandidateDataset, holdout_groups: set[str]
-) -> tuple[list[Sample], list[Sample]]:
-    """Partition samples into ``(train, holdout)`` by whole ``split_group``.
-
-    ``holdout_groups`` must name groups that exist; every sample of a held-out
-    group goes to holdout so no correlated crop leaks into train.
-    """
-    available = set(dataset.groups())
-    unknown = holdout_groups - available
-    if unknown:
-        raise ValueError(f"unknown holdout groups: {sorted(unknown)} (have {sorted(available)})")
-    train, holdout = [], []
-    for sample in dataset.samples:
-        (holdout if sample.split_group in holdout_groups else train).append(sample)
-    return train, holdout

@@ -47,6 +47,7 @@ from blockpose.rgb_verifier import (  # noqa: E402
     save_checkpoint,
 )
 
+from experiments.embedding_cache import cached_embed_all  # noqa: E402
 from experiments.rgb_candidate_prior.dataset import (  # noqa: E402
     CandidateDataset,
     Sample,
@@ -75,24 +76,12 @@ def embed_all(
     head: DinoVerifierHead, samples: list[Sample], cache: Path | None
 ) -> dict[str, np.ndarray]:
     """Pooled region features per ``sample_id``, cached since the backbone is frozen."""
-    ids = [sample.sample_id for sample in samples]
-    if cache is not None and cache.is_file():
-        blob = np.load(cache, allow_pickle=True)
-        if list(blob["ids"]) == ids:
-            print(f"loaded cached dino_verifier features {blob['features'].shape}")
-            return dict(zip(ids, blob["features"], strict=True))
 
-    features = []
-    for index, sample in enumerate(samples):
-        rgb = _load_image(sample.rgb_path)
-        conditioning = _load_image(sample.conditioning_path)
-        features.append(head.embed_regions(rgb, conditioning))
-        print(f"  embedded {index + 1}/{len(samples)}", end="\r")
-    print()
-    stacked = np.stack(features)
-    if cache is not None:
-        np.savez(cache, ids=np.array(ids), features=stacked)
-    return dict(zip(ids, stacked, strict=True))
+    def _embed_one(sample: Sample) -> np.ndarray:
+        rgb, cond = _load_image(sample.rgb_path), _load_image(sample.conditioning_path)
+        return head.embed_regions(rgb, cond)
+
+    return cached_embed_all(samples, cache, embed_one=_embed_one, label="dino_verifier")
 
 
 def _candidate_sets(root: Path, samples: list[Sample]) -> dict[str, list[Sample]]:
@@ -249,6 +238,39 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _train_one_pass(
+    config: DinoVerifierConfig,
+    features: dict[str, np.ndarray],
+    train_blocks: dict[str, list[Sample]],
+    eval_blocks: dict[str, list[Sample]] | None,
+    *,
+    epochs: int,
+    lr: float,
+    margin: float,
+    device: str,
+    seed: int,
+) -> tuple[DinoVerifierHead, dict, dict | None, list[float], list[float]]:
+    """Train one fresh head on ``train_blocks``; evaluate + pool calibration data if given.
+
+    Returns ``(head, train_report, eval_report_or_None, scores, labels)`` --
+    ``scores``/``labels`` are ``eval_blocks``' raw predictions for calibration
+    fitting (empty lists when ``eval_blocks`` is ``None``, the final pass's
+    case, since no held-out slice remains once every fold trains on all data).
+    Shared by the held-out-fold path, each cross-validation fold, and the
+    final pass -- they differ only in which blocks go where and what happens
+    to the returned scores/labels.
+    """
+    head, train_report = train_head(
+        config, train_blocks, features,
+        epochs=epochs, lr=lr, margin=margin, device=device, seed=seed,
+    )
+    if eval_blocks is None:
+        return head, train_report, None, [], []
+    eval_report = evaluate_blocks(head.mlp, features, eval_blocks, device)
+    scores, labels = _pooled_calibration_data(head.mlp, features, eval_blocks, device)
+    return head, train_report, eval_report, scores, labels
+
+
 def main() -> int:
     args = parse_args()
     manifest = load_split_manifest(args.splits)
@@ -295,18 +317,10 @@ def main() -> int:
         train_blocks = _candidate_sets(dev_dataset.root, train_samples)
         eval_blocks = _candidate_sets(dev_dataset.root, eval_samples)
 
-        held_out_head, train_report = train_head(
-            config,
-            train_blocks,
-            features,
-            epochs=args.epochs,
-            lr=args.lr,
-            margin=args.margin,
-            device=device,
-            seed=args.seed,
+        held_out_head, train_report, eval_report, scores, labels = _train_one_pass(
+            config, features, train_blocks, eval_blocks,
+            epochs=args.epochs, lr=args.lr, margin=args.margin, device=device, seed=args.seed,
         )
-        eval_report = evaluate_blocks(held_out_head.mlp, features, eval_blocks, device)
-        scores, labels = _pooled_calibration_data(held_out_head.mlp, features, eval_blocks, device)
         if scores:
             temperature = fit_temperature(torch.tensor(scores), torch.tensor(labels))
         else:
@@ -352,25 +366,16 @@ def main() -> int:
         train_blocks = _candidate_sets(dev_dataset.root, train_samples)
         eval_blocks = _candidate_sets(dev_dataset.root, eval_samples)
 
-        head, train_report = train_head(
-            config,
-            train_blocks,
-            features,
-            epochs=args.epochs,
-            lr=args.lr,
-            margin=args.margin,
-            device=device,
-            seed=args.seed,
+        head, train_report, eval_report, scores, labels = _train_one_pass(
+            config, features, train_blocks, eval_blocks,
+            epochs=args.epochs, lr=args.lr, margin=args.margin, device=device, seed=args.seed,
         )
-        eval_report = evaluate_blocks(head.mlp, features, eval_blocks, device)
         cross_validation[f"fold_{held_out}_held_out"] = {
             "train_snapshot_groups": sorted(set(s.split_group for s in train_samples)),
             "eval_snapshot_groups": sorted(set(s.split_group for s in eval_samples)),
             "train": train_report,
             "eval": eval_report,
         }
-
-        scores, labels = _pooled_calibration_data(head.mlp, features, eval_blocks, device)
         pooled_scores.extend(scores)
         pooled_labels.extend(labels)
 
@@ -380,15 +385,9 @@ def main() -> int:
     # above instead (each prediction came from a head that never saw that
     # sample's fold during training).
     final_blocks = _candidate_sets(dev_dataset.root, list(dev_dataset.samples))
-    final_head, final_train_report = train_head(
-        config,
-        final_blocks,
-        features,
-        epochs=args.epochs,
-        lr=args.lr,
-        margin=args.margin,
-        device=device,
-        seed=args.seed,
+    final_head, final_train_report, _, _, _ = _train_one_pass(
+        config, features, final_blocks, None,
+        epochs=args.epochs, lr=args.lr, margin=args.margin, device=device, seed=args.seed,
     )
 
     if pooled_scores:

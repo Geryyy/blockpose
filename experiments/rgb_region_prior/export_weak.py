@@ -132,7 +132,7 @@ def export_capture(
     anchors: list[dict],
     *,
     export_root: Path,
-    calibration_path: Path,
+    camera: CameraModel,
     calibration_checksum: str,
     anchors_checksum: str,
     sync_tolerance_s: float,
@@ -149,7 +149,6 @@ def export_capture(
             "details": {"missing": missing},
         }
 
-    camera = load_camera_model(calibration_path)
     rgb = load_rgb(capture / "rgb.png")
 
     calib = gates.calibration_gate(camera, rgb.shape)
@@ -349,6 +348,7 @@ def main() -> int:
     export_root = args.export_root
     export_root.mkdir(parents=True, exist_ok=True)
 
+    camera = load_camera_model(args.calibration)
     calibration_checksum = gates.sha256_file(args.calibration)
     anchors_checksum = gates.sha256_file(args.anchors)
     anchors = load_anchors(args.anchors)
@@ -373,7 +373,7 @@ def main() -> int:
                     capture,
                     by_capture[name],
                     export_root=export_root,
-                    calibration_path=args.calibration,
+                    camera=camera,
                     calibration_checksum=calibration_checksum,
                     anchors_checksum=anchors_checksum,
                     sync_tolerance_s=args.sync_tolerance_s,
