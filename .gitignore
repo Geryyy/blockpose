@@ -28,6 +28,19 @@ Testing/
 .coverage.*
 htmlcov/
 
+# Datasets (see docs/ENVIRONMENT.md: bags/canonical samples live outside
+# version control, mounted at /data). Curated annotations/config alongside
+# them -- the actual reviewed ground truth, not raw sensor data -- stay
+# tracked explicitly (see tools/quarantine_cleanup.sh's canonical-annotation
+# backup guard, which depends on annotations.yaml being git-tracked).
+/data/*
+!/data/registration_snapshots/
+/data/registration_snapshots/*
+!/data/registration_snapshots/snapshot_exclusions.yaml
+!/data/registration_snapshots/*/
+/data/registration_snapshots/*/*
+!/data/registration_snapshots/*/annotations.yaml
+
 # Runtime captures and generated diagnostics
 /.cleanup-quarantine/
 /reference_bag_export/

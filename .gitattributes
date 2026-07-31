@@ -2,5 +2,3 @@
 assets/environment/seibersdorf_environment/meshes/seibersdorf_environment.obj filter=lfs diff=lfs merge=lfs -text
 assets/environment/seibersdorf_environment/materials/textures/*.png filter=lfs diff=lfs merge=lfs -text
 assets/environment/seibersdorf_office_container/seibersdorf_office_container.blend filter=lfs diff=lfs merge=lfs -text
-data/registration_snapshots/**/*.pcd filter=lfs diff=lfs merge=lfs -text
-data/registration_snapshots/**/*.png filter=lfs diff=lfs merge=lfs -text
