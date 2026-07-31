@@ -7,12 +7,22 @@ timestamp in their directory name, treating a gap larger than ``--gap-seconds``
 as a session boundary.  These are *provisional* sessions -- honest enough for a
 held-out proxy, but flagged as such so nobody mistakes them for verified runs.
 
+``data/seibersdorf_dataset`` names are a different shape (a scenario label
+before the timestamp, e.g. ``grip_at_bottom__1783428244_423788800``): the
+scenario label is already a real experimental-condition boundary, a better
+independence proxy than clustering raw timestamps, so ``--naming seibersdorf``
+groups by that label directly instead of a time gap.
+
 An optional ``--overrides`` YAML (``snapshot_name: session_id``) wins over the
 automatic assignment, so once true session labels are known they are dropped in
 without changing anything downstream.
 
     python -m experiments.rgb_candidate_prior.sessions \\
         --snapshots-dir data/registration_snapshots --output sessions.yaml
+
+    python -m experiments.rgb_candidate_prior.sessions \\
+        --naming seibersdorf \\
+        --snapshots-dir data/seibersdorf_dataset --output seibersdorf_sessions.yaml
 """
 
 from __future__ import annotations
@@ -29,6 +39,10 @@ DEFAULT_SNAPSHOTS = REPO_ROOT / "data" / "registration_snapshots"
 
 # Directory names begin with a Unix-seconds timestamp, e.g. 1783427923_...seq5.
 _TIMESTAMP = re.compile(r"^(\d+)_")
+
+# seibersdorf_dataset names are <scenario_label>__<sec>_<nanosec>, e.g.
+# 2026_07_07_grip_at_bottom__1783428244_423788800.
+_SCENARIO_LABEL = re.compile(r"^(.+)__\d+_\d+$")
 
 
 def _snapshot_seconds(name: str) -> int | None:
@@ -65,15 +79,42 @@ def assign_sessions(
     return mapping
 
 
+def assign_scenario_groups(
+    snapshot_names: list[str], *, overrides: dict[str, str] | None = None
+) -> dict[str, str]:
+    """Map each snapshot to its scenario label; overrides take precedence.
+
+    Every capture from the same scenario burst shares one group, since they are
+    the same physical setup at ~1 Hz, not independent runs. Names that don't
+    match the ``<label>__<sec>_<nanosec>`` shape go to ``group_unknown`` so they
+    never silently merge into a labelled cluster.
+    """
+    overrides = overrides or {}
+    mapping: dict[str, str] = {}
+    for name in snapshot_names:
+        match = _SCENARIO_LABEL.match(name)
+        mapping[name] = match.group(1) if match else "group_unknown"
+    mapping.update({name: overrides[name] for name in snapshot_names if name in overrides})
+    return mapping
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshots-dir", type=Path, default=DEFAULT_SNAPSHOTS)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
+        "--naming",
+        choices=("registration", "seibersdorf"),
+        default="registration",
+        help="'registration' clusters by timestamp gap (default); 'seibersdorf' "
+        "groups by the scenario label before the timestamp.",
+    )
+    parser.add_argument(
         "--gap-seconds",
         type=float,
         default=120.0,
-        help="Time gap (s) above which a new session starts (default: 120).",
+        help="Time gap (s) above which a new session starts; --naming registration only "
+        "(default: 120).",
     )
     parser.add_argument(
         "--overrides",
@@ -91,11 +132,15 @@ def main() -> int:
         return 1
     names = [p.name for p in args.snapshots_dir.iterdir() if (p / "tf.yaml").is_file()]
     overrides = yaml.safe_load(args.overrides.read_text()) if args.overrides else None
-    mapping = assign_sessions(names, gap_seconds=args.gap_seconds, overrides=overrides or {})
+    if args.naming == "seibersdorf":
+        mapping = assign_scenario_groups(names, overrides=overrides or {})
+    else:
+        mapping = assign_sessions(names, gap_seconds=args.gap_seconds, overrides=overrides or {})
     args.output.write_text(yaml.safe_dump(mapping, sort_keys=True))
 
     sessions = sorted(set(mapping.values()))
-    print(f"{len(names)} snapshots -> {len(sessions)} sessions (gap {args.gap_seconds:g}s)")
+    label = "gap {:g}s".format(args.gap_seconds) if args.naming == "registration" else "by label"
+    print(f"{len(names)} snapshots -> {len(sessions)} groups ({args.naming}, {label})")
     for session in sessions:
         members = sorted(name for name, sid in mapping.items() if sid == session)
         print(f"  {session}: {len(members)} snapshots")

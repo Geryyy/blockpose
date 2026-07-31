@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from blockpose.io import CameraModel
 from blockpose.rgb_proposals import (
+    DinoRegionProposalProvider,
     GeometryOnlyProposalProvider,
     ImageProposal,
     MaskAssociationParams,
@@ -22,6 +23,7 @@ from blockpose.rgb_proposals import (
     proposal_point_indices,
     save_proposal_cache,
 )
+from blockpose.rgb_region_proposer import DinoRegionProposerConfig
 
 
 def _camera() -> CameraModel:
@@ -196,6 +198,85 @@ def test_sam_provider_is_optional_and_reports_missing_runtime_only_on_use(monkey
     provider = Sam2PointPromptProvider(lambda image: [(1, 1)], backend=UnavailableBackend())
     with pytest.raises(RuntimeError, match="SAM2 unavailable"):
         provider.propose(np.zeros((4, 4, 3), np.uint8))
+
+
+class _StubProposerHead:
+    """Stands in for `DinoRegionProposerHead` in tests that must not require torch."""
+
+    def __init__(self, probability_map: np.ndarray, config: DinoRegionProposerConfig):
+        self.config = config
+        self.device = "cpu"
+        self._probability_map = probability_map
+        self.calls: list[np.ndarray] = []
+
+    def predict_proposal_map(self, rgb: np.ndarray) -> np.ndarray:
+        self.calls.append(rgb)
+        return self._probability_map
+
+
+def _synthetic_probability_map(shape: tuple[int, int]) -> np.ndarray:
+    probability_map = np.zeros(shape, dtype=np.float64)
+    probability_map[2:9, 2:9] = 0.9  # 7x7 = 49 px, kept
+    probability_map[20:22, 20:22] = 0.95  # 2x2 = 4 px, dropped by min_component_area_px
+    return probability_map
+
+
+def test_dino_region_proposal_provider_produces_valid_proposals_from_a_stub_head() -> None:
+    shape = (40, 40)
+    config = DinoRegionProposerConfig(min_component_area_px=10, foreground_threshold=0.5)
+    head = _StubProposerHead(_synthetic_probability_map(shape), config)
+    provider = DinoRegionProposalProvider(head)
+
+    rgb = np.zeros((*shape, 3), dtype=np.uint8)
+    batch = provider.propose(rgb, timestamp_ns=42)
+
+    assert batch.provider == "dino_region_proposer"
+    assert batch.image_shape == shape  # ProposalBatch.__post_init__ enforces this per-proposal too
+    assert len(batch.proposals) == 1
+    proposal = batch.proposals[0]
+    assert proposal.provider == "dino_region_proposer"
+    assert proposal.model_id == config.model_id
+    assert proposal.timestamp_ns == 42
+    assert np.any(proposal.mask)
+    x, y, w, h = proposal.bbox_xywh
+    assert x >= 0 and y >= 0 and w >= 1 and h >= 1
+    assert head.calls and head.calls[0] is rgb
+
+
+def test_dino_region_proposal_provider_requires_head_or_checkpoint() -> None:
+    with pytest.raises(ValueError, match="head or a checkpoint"):
+        DinoRegionProposalProvider()
+
+
+def test_dino_region_proposal_provider_rejects_missing_or_malformed_rgb() -> None:
+    provider = DinoRegionProposalProvider(
+        _StubProposerHead(np.zeros((4, 4)), DinoRegionProposerConfig())
+    )
+    with pytest.raises(ValueError, match="requires RGB"):
+        provider.propose(None)
+    with pytest.raises(ValueError, match="H, W, 3"):
+        provider.propose(np.zeros((4, 4)))
+
+
+def test_dino_region_proposal_provider_loads_checkpoint_lazily(tmp_path, monkeypatch) -> None:
+    calls: list[object] = []
+    stub_config = DinoRegionProposerConfig(min_component_area_px=1)
+    stub_head = _StubProposerHead(np.full((10, 10), 0.9), stub_config)
+
+    def fake_load(path):
+        calls.append(path)
+        return stub_head, stub_config
+
+    monkeypatch.setattr("blockpose.rgb_region_proposer.load_dino_region_proposer", fake_load)
+    checkpoint = tmp_path / "ckpt"
+    provider = DinoRegionProposalProvider(checkpoint=checkpoint)
+    assert calls == []  # nothing loaded until propose() is called
+
+    batch = provider.propose(np.zeros((10, 10, 3), dtype=np.uint8))
+
+    assert calls == [checkpoint]
+    assert batch.provider == "dino_region_proposer"
+    assert len(batch.proposals) == 1
 
 
 def test_association_rejects_non_rigid_or_nonfinite_camera_transforms() -> None:

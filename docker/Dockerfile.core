@@ -5,12 +5,12 @@
 # - Open3D visualization
 # - CUDA-enabled PyTorch development
 
-ARG UV_VERSION=0.5.24
+ARG UV_VERSION=0.12.0
 
 ARG CUDA_VERSION=12.8.1
 ARG UBUNTU_VERSION=24.04
 
-ARG PYTHON_VERSION=3.11
+ARG PYTHON_VERSION=3.12
 
 ARG TORCH_VERSION=2.10.0
 ARG TORCHVISION_VERSION=0.25.0
@@ -49,16 +49,20 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # CUDA and Python environment
 # ---------------------------------------------------------------------------
 ENV CUDA_HOME=/usr/local/cuda \
-  NVIDIA_VISIBLE_DEVICES=all \
-  NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics \
-  CUDA_MODULE_LOADING=LAZY \
-  PYTHONDONTWRITEBYTECODE=1 \
-  PYTHONUNBUFFERED=1 \
-  UV_LINK_MODE=copy \
-  UV_PYTHON_INSTALL_DIR=/opt/uv/python \
-  UV_CACHE_DIR=/opt/uv/cache \
-  UV_PROJECT_ENVIRONMENT=/opt/venv \
-  VIRTUAL_ENV=/opt/venv
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics \
+    CUDA_MODULE_LOADING=LAZY \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_INSTALL_DIR=/opt/uv/python \
+    UV_CACHE_DIR=/opt/uv/cache \
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
+    VIRTUAL_ENV=/opt/venv \
+    UV_HTTP_TIMEOUT=600 \
+    UV_HTTP_CONNECT_TIMEOUT=60 \
+    UV_HTTP_RETRIES=10 \
+    UV_CONCURRENT_DOWNLOADS=4
 
 ENV PATH="${VIRTUAL_ENV}/bin:${CUDA_HOME}/bin:${PATH}"
 
@@ -128,12 +132,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=uv /uv /uvx /usr/local/bin/
 
 # ---------------------------------------------------------------------------
-# Python 3.11 + base ML environment
+# Python 3.12 + base ML environment
 #
 # The environment lives outside /workspace so it is not hidden when the
 # repository is mounted into /workspace by VS Code.
 # ---------------------------------------------------------------------------
-RUN uv python install "${PYTHON_VERSION}" \
+RUN --mount=type=cache,target=/opt/uv/cache,sharing=locked \
+    uv python install "${PYTHON_VERSION}" \
   && uv venv --python "${PYTHON_VERSION}" "${VIRTUAL_ENV}" \
   \
   # Official CUDA-enabled PyTorch wheels
@@ -170,7 +175,7 @@ RUN uv python install "${PYTHON_VERSION}" \
   accelerate \
   safetensors \
   huggingface-hub \
-  "transformers>=4.40,<4.55" \
+  "transformers>=4.57" \
   supervision \
   pycocotools \
   av \
@@ -178,11 +183,14 @@ RUN uv python install "${PYTHON_VERSION}" \
   yapf \
   termcolor \
   ipykernel \
-  nvitop \
-  && rm -rf "${UV_CACHE_DIR}"
+  nvitop
 
-# Grounded-SAM-2's current Hugging Face demo is incompatible with
-# transformers >= 4.55, hence the explicit upper bound above.
+# transformers>=4.57 is required for the native Sam2Model/Sam2Processor
+# classes used by blockpose.rgb_annotation.TransformersSam2Backend (the SAM2
+# point-prompt annotation assist actually wired into the repo). This is newer
+# than Grounded-SAM-2's current Hugging Face demo supports (<4.55); Grounded-
+# SAM-2 isn't integrated anywhere in-repo yet, so that compatibility is
+# deferred until it actually is.
 
 # ---------------------------------------------------------------------------
 # Node.js + OpenClaude CLI

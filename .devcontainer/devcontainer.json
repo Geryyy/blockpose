@@ -44,7 +44,12 @@
   "remoteUser": "ubuntu",
   // --inexact is required for the proposed Dockerfile because that image
   // already installs packages that might not yet exist in uv.lock.
-  "postCreateCommand": "sudo mkdir -p /home/ubuntu/.cache/huggingface /home/ubuntu/.cache/torch/extensions /home/ubuntu/.cache/uv && sudo chown -R ubuntu:ubuntu /home/ubuntu/.cache && uv sync --all-extras --inexact",
+  // The image bakes /opt/venv and /opt/uv while building as uid 1000; if the
+  // container's remapped ubuntu uid differs (e.g. to match the host user),
+  // those paths are left owned by the stale uid and uv sync/uv run fail
+  // trying to write into them. Re-chown them here every time, same as the
+  // cache dirs below.
+  "postCreateCommand": "sudo mkdir -p /home/ubuntu/.cache/huggingface /home/ubuntu/.cache/torch/extensions /home/ubuntu/.cache/uv && sudo chown -R ubuntu:ubuntu /home/ubuntu/.cache /opt/venv /opt/uv && uv sync --all-extras --inexact",
   "customizations": {
     "vscode": {
       "extensions": [

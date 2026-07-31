@@ -28,15 +28,27 @@ dev = [
     "plotly>=5.20",
 ]
 sam = [
-    "torch>=2.5",
-    "torchvision>=0.20",
+    "torch==2.10.0",
+    "torchvision==0.25.0",
     "transformers>=4.57",
 ]
 
 # SAM remains opt-in: normal detector and annotator installs do not pull model runtimes.
+# torch/torchvision are pinned exact and routed to the CUDA 12.8 wheel index below so
+# `uv sync` reproduces exactly what docker/Dockerfile.core bakes into the image, instead
+# of drifting to whatever's newest on PyPI on every sync.
 
 [tool.uv]
 package = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu128" }]
+torchvision = [{ index = "pytorch-cu128" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
 
 [build-system]
 requires = ["hatchling"]

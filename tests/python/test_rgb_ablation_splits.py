@@ -24,6 +24,16 @@ def test_diagnostic_manifest_has_explicit_dev_final_semantics() -> None:
     )
 
 
+def test_seibersdorf_manifest_is_all_development_leave_one_scenario_out() -> None:
+    manifest = load_split_manifest(REPO_ROOT / "config" / "rgb_ablation_splits_seibersdorf.yaml")
+    assert not manifest["selection_eligible"]
+    assert not manifest["final_enabled"]
+    assert "not_validated_run_ids" in manifest["grouping_evidence"]
+    assert {group["split"] for group in manifest["groups"].values()} == {"development"}
+    folds = sorted(group["fold"] for group in manifest["groups"].values())
+    assert folds == list(range(len(manifest["groups"])))
+
+
 def test_manifest_rejects_duplicate_snapshot_across_groups(tmp_path: Path) -> None:
     manifest = tmp_path / "bad.yaml"
     manifest.write_text(

@@ -26,6 +26,11 @@ from scipy import ndimage
 from blockpose.io import CameraModel, load_rgb
 from blockpose.projection import project_points, world_to_camera
 from blockpose.rgb_annotation import TransformersSam2Backend, load_candidate_masks
+from blockpose.rgb_region_proposer import (
+    DinoRegionProposerConfig,
+    DinoRegionProposerHead,
+    extract_region_proposals,
+)
 
 
 @dataclass(frozen=True)
@@ -212,6 +217,72 @@ class Sam2PointPromptProvider:
             tuple(image.shape[:2]),
             (perf_counter_ns() - started) / 1e6,
             {"model_id": self.model_id, "device": self.device, "prompt_source": "external"},
+        )
+
+
+class DinoRegionProposalProvider:
+    """`dino_proposer`: full-image, high-recall regions from `DinoRegionProposerHead`.
+
+    Sees only the RGB frame -- never LiDAR, fitted candidates, or ground
+    truth -- matching this module's provider contract. Constructed either
+    with an already-built `head` (e.g. a stub in tests, or a caller-owned
+    trained head) or with a `checkpoint` directory that is loaded lazily via
+    `rgb_region_proposer.load_dino_region_proposer` on the first `.propose()`
+    call, so constructing this provider never requires torch/transformers.
+    """
+
+    def __init__(
+        self,
+        head: DinoRegionProposerHead | None = None,
+        *,
+        checkpoint: Path | None = None,
+        config: DinoRegionProposerConfig | None = None,
+    ) -> None:
+        if head is None and checkpoint is None:
+            raise ValueError("DinoRegionProposalProvider requires a head or a checkpoint")
+        self._head = head
+        self._checkpoint = Path(checkpoint) if checkpoint is not None else None
+        self._config = config if config is not None else (head.config if head is not None else None)
+
+    def _resolve(self) -> tuple[DinoRegionProposerHead, DinoRegionProposerConfig]:
+        if self._head is None:
+            from blockpose.rgb_region_proposer import load_dino_region_proposer
+
+            assert self._checkpoint is not None
+            self._head, loaded_config = load_dino_region_proposer(self._checkpoint)
+            if self._config is None:
+                self._config = loaded_config
+        assert self._config is not None
+        return self._head, self._config
+
+    def propose(
+        self,
+        rgb: np.ndarray | None,
+        *,
+        snapshot: Path | None = None,
+        timestamp_ns: int | None = None,
+    ) -> ProposalBatch:
+        if rgb is None:
+            raise ValueError("dino_proposer proposal generation requires RGB")
+        image = np.asarray(rgb)
+        if image.ndim != 3 or image.shape[2] != 3:
+            raise ValueError("rgb must have shape (H, W, 3)")
+        started = perf_counter_ns()
+        head, config = self._resolve()
+        probability_map = head.predict_proposal_map(image)
+        proposals = extract_region_proposals(
+            probability_map,
+            config,
+            provider="dino_region_proposer",
+            model_id=config.model_id,
+            timestamp_ns=timestamp_ns,
+        )
+        return ProposalBatch(
+            proposals,
+            "dino_region_proposer",
+            tuple(image.shape[:2]),
+            (perf_counter_ns() - started) / 1e6,
+            {"model_id": config.model_id, "device": head.device},
         )
 
 

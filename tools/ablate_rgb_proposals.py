@@ -38,6 +38,8 @@ from blockpose.io import (  # noqa: E402
     load_tf_snapshot,
 )
 from blockpose.rgb_proposals import (  # noqa: E402
+    DinoRegionProposalProvider,
+    ImageProposalProvider,
     MaskAssociationParams,
     StoredMaskProposalProvider,
     associate_mask_to_lidar,
@@ -213,28 +215,40 @@ def evaluate_snapshot(
     association_params: MaskAssociationParams,
     cache_dir: Path | None,
     calibration_jitter_px: float,
+    provider: ImageProposalProvider | None = None,
+    provider_name: str = "stored_mask_replay",
+    provider_config: dict | None = None,
 ) -> dict:
-    """Run an inference-only proposal replay; target poses are loaded afterward."""
+    """Run an inference-only proposal replay; target poses are loaded afterward.
+
+    ``provider``/``provider_name``/``provider_config`` default to the original
+    ``StoredMaskProposalProvider`` oracle/replay baseline; pass a different
+    ``ImageProposalProvider`` (e.g. ``DinoRegionProposalProvider``) plus its own
+    name/config to ablate a real model the same way.
+    """
     tf = load_tf_snapshot(snapshot / "tf.yaml")
     points, targets = load_snapshot(snapshot, T_world_cloud=tf.T_world_cloud)
     rgb = load_rgb(snapshot / "rgb.png")
     camera = load_camera_model(calibration_path)
     if rgb.shape[:2] != (camera.height, camera.width):
         raise ValueError(f"RGB/camera shape mismatch in {snapshot.name}")
-    provider = StoredMaskProposalProvider()
+    if provider is None:
+        provider = StoredMaskProposalProvider()
+        provider_name = "stored_mask_replay"
+        provider_config = {"source": "metadata.candidate_masks"}
     provenance = make_cache_provenance(
         snapshot,
-        provider="stored_mask_replay",
-        provider_config={"source": "metadata.candidate_masks"},
+        provider=provider_name,
+        provider_config=provider_config,
         calibration={"K": camera.K.tolist(), "D": camera.D.tolist(), "shape": list(rgb.shape[:2])},
         extrinsics=tf.T_world_camera.tolist(),
         association_params=association_params,
     )
-    key = proposal_cache_key(snapshot, "stored_mask_replay", provenance=provenance)
+    key = proposal_cache_key(snapshot, provider_name, provenance=provenance)
     batch = None
     cache_hit = False
     if cache_dir is not None:
-        cache_path = cache_dir / snapshot.name / "stored_mask_replay"
+        cache_path = cache_dir / snapshot.name / provider_name
         batch = load_proposal_cache(cache_path, expected_key=key, expected_provenance=provenance)
         cache_hit = batch is not None
     if batch is None:
@@ -321,7 +335,19 @@ def main() -> int:
     parser.add_argument("--calibration-sigma-px", type=float, default=2.0)
     parser.add_argument("--soft-margin-px", type=float, default=12.0)
     parser.add_argument("--calibration-jitter-px", type=float, default=3.0)
+    parser.add_argument(
+        "--provider",
+        choices=("stored_mask_replay", "dino_region_proposer"),
+        default="stored_mask_replay",
+        help="stored_mask_replay is the oracle/replay baseline (default); "
+        "dino_region_proposer ablates a trained checkpoint (requires --checkpoint).",
+    )
+    parser.add_argument(
+        "--checkpoint", type=Path, help="dino_region_proposer checkpoint dir (see train.py)"
+    )
     args = parser.parse_args()
+    if args.provider == "dino_region_proposer" and args.checkpoint is None:
+        parser.error("--provider dino_region_proposer requires --checkpoint")
     manifest = load_split_manifest(args.splits)
     if args.split == "development" and args.fold is None:
         parser.error("--fold is required for the development split")
@@ -346,6 +372,16 @@ def main() -> int:
         )
     except ValueError as error:
         parser.error(str(error))
+    if args.provider == "dino_region_proposer":
+        provider: ImageProposalProvider | None = DinoRegionProposalProvider(
+            checkpoint=args.checkpoint
+        )
+        provider_name = "dino_region_proposer"
+        provider_config = {"checkpoint": str(args.checkpoint)}
+    else:
+        provider = None  # evaluate_snapshot defaults to StoredMaskProposalProvider
+        provider_name = "stored_mask_replay"
+        provider_config = None
     details = [
         evaluate_snapshot(
             snapshot,
@@ -354,6 +390,9 @@ def main() -> int:
             association_params=params,
             cache_dir=args.cache_dir,
             calibration_jitter_px=args.calibration_jitter_px,
+            provider=provider,
+            provider_name=provider_name,
+            provider_config=provider_config,
         )
         for snapshot in snapshots
     ]
