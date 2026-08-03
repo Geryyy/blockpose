@@ -18,4 +18,14 @@ TEST(GripperSelfFilter, RejectsInvalidBox)
     std::invalid_argument);
 }
 
+TEST(GripperSelfFilter, KeepsInclusiveAxisAlignedWorkspace)
+{
+  std::size_t removed = 0U;
+  const auto kept = keep_points_inside_axis_aligned_box(
+    {Point(0.0, 0.0, 0.0), Point(1.0, 1.0, 1.0), Point(1.1, 0.0, 0.0)},
+    Point::Zero(), Point::Ones(), &removed);
+  EXPECT_EQ(removed, 1U); ASSERT_EQ(kept.size(), 2U);
+  EXPECT_THROW(keep_points_inside_axis_aligned_box({}, Point::Ones(), Point::Zero()), std::invalid_argument);
+}
+
 }}  // namespace blockpose::core

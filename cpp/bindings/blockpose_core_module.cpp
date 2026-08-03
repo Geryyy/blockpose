@@ -202,6 +202,83 @@ nb::dict annotation_snap_from_numpy(
   output["position"] = std::move(position); output["rotation"] = std::move(rotation); return output;
 }
 
+nb::object points_to_numpy(const blockpose::core::Points & points)
+{
+  auto numpy = nb::module_::import_("numpy");
+  nb::object array = numpy.attr("empty")(nb::make_tuple(points.size(), 3), numpy.attr("float64"));
+  auto output = nb::cast<nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig>>(
+    array);
+  for (std::size_t row = 0; row < points.size(); ++row) {
+    for (std::size_t column = 0; column < 3; ++column) {output(row, column) = points[row](column);}
+  }
+  return array;
+}
+
+void validate_ground_parameters(const blockpose::core::GroundParameters & parameters)
+{
+  const auto positive = [](double value, const char * name) {
+      if (!std::isfinite(value) || value <= 0.0) {throw std::invalid_argument(std::string(name) + " must be finite and positive");}
+    };
+  positive(parameters.thickness, "thickness"); positive(parameters.ransac_distance, "ransac_distance");
+  positive(parameters.local_cell_size, "local_cell_size");
+  if (!std::isfinite(parameters.z_percentile) || parameters.z_percentile < 0.0 || parameters.z_percentile > 100.0 ||
+    !std::isfinite(parameters.normal_min_z) || parameters.normal_min_z < 0.0 || parameters.normal_min_z > 1.0 ||
+    !std::isfinite(parameters.local_clearance) || parameters.local_clearance < 0.0 || parameters.ransac_iterations == 0U)
+  {
+    throw std::invalid_argument("GroundParameters contains an invalid range or zero iteration count");
+  }
+}
+
+nb::dict remove_ground_from_numpy(
+  const nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig> & input,
+  const blockpose::core::GroundParameters & parameters)
+{
+  validate_ground_parameters(parameters);
+  const auto points = points_from_numpy(input);
+  blockpose::core::GroundRemovalResult result;
+  { nb::gil_scoped_release release; result = blockpose::core::remove_ground(points, parameters); }
+  nb::dict ground;
+  ground["normal"] = nb::make_tuple(result.ground.normal.x(), result.ground.normal.y(), result.ground.normal.z());
+  ground["offset"] = result.ground.offset;
+  ground["source"] = result.ground.source;
+  ground["cell_size"] = result.ground.cell_size;
+  nb::dict output;
+  output["points"] = points_to_numpy(result.above_ground);
+  output["input_count"] = points.size();
+  output["removed_count"] = points.size() - result.above_ground.size();
+  output["ground"] = std::move(ground);
+  return output;
+}
+
+nb::dict filter_workspace_from_numpy(
+  const nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig> & input,
+  const nb::ndarray<nb::numpy, double, nb::ndim<1>, nb::c_contig> & minimum,
+  const nb::ndarray<nb::numpy, double, nb::ndim<1>, nb::c_contig> & maximum)
+{
+  const auto points = points_from_numpy(input); const auto low = point_from_numpy(minimum, "workspace minimum");
+  const auto high = point_from_numpy(maximum, "workspace maximum");
+  std::size_t removed = 0U;
+  blockpose::core::Points kept;
+  {nb::gil_scoped_release release; kept = blockpose::core::keep_points_inside_axis_aligned_box(points, low, high, &removed);}
+  nb::dict output; output["points"] = points_to_numpy(kept); output["input_count"] = points.size(); output["removed_count"] = removed; return output;
+}
+
+nb::dict filter_exclusion_boxes_from_numpy(
+  const nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig> & input,
+  const nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig> & centers,
+  const nb::ndarray<nb::numpy, double, nb::ndim<3>, nb::c_contig> & rotations,
+  const nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig> & sizes)
+{
+  if (centers.shape(1) != 3 || sizes.shape(1) != 3 || rotations.shape(1) != 3 || rotations.shape(2) != 3 || centers.shape(0) != sizes.shape(0) || centers.shape(0) != rotations.shape(0)) {throw std::invalid_argument("exclusion boxes require centers (N,3), rotations (N,3,3), and sizes (N,3)");}
+  std::vector<blockpose::core::OrientedBox> boxes; boxes.reserve(centers.shape(0));
+  for (std::size_t index = 0; index < centers.shape(0); ++index) {
+    blockpose::core::OrientedBox box; for (std::size_t axis = 0; axis < 3; ++axis) {box.center(axis) = centers(index, axis); box.size(axis) = sizes(index, axis); for (std::size_t col = 0; col < 3; ++col) {box.rotation(axis, col) = rotations(index, axis, col);}} boxes.push_back(box);
+  }
+  const auto points = points_from_numpy(input); std::size_t removed = 0U; blockpose::core::Points kept;
+  {nb::gil_scoped_release release; kept = blockpose::core::remove_points_inside_oriented_boxes(points, boxes, &removed);}
+  nb::dict output; output["points"] = points_to_numpy(kept); output["input_count"] = points.size(); output["removed_count"] = removed; return output;
+}
+
 blockpose::core::SensorContext sensor_context_from_numpy(
   const nb::ndarray<nb::numpy, double, nb::ndim<1>, nb::c_contig> & origin,
   const nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig> & ray_directions,
@@ -632,6 +709,23 @@ NB_MODULE(_core, module)
     .def_rw("reject_ambiguous", &blockpose::core::AnnotationSnapParameters::reject_ambiguous);
   module.def("annotation_snap", &annotation_snap_from_numpy, nb::arg("points"), nb::arg("seed"),
     nb::arg("parameters") = blockpose::core::AnnotationSnapParameters{}, "Fit a canonical block pose around an annotation click.");
+  auto ground_parameters = nb::class_<blockpose::core::GroundParameters>(module, "GroundParameters");
+  ground_parameters.def(nb::init<>())
+    .def_rw("z_percentile", &blockpose::core::GroundParameters::z_percentile)
+    .def_rw("thickness", &blockpose::core::GroundParameters::thickness)
+    .def_rw("ransac_distance", &blockpose::core::GroundParameters::ransac_distance)
+    .def_rw("normal_min_z", &blockpose::core::GroundParameters::normal_min_z)
+    .def_rw("ransac_iterations", &blockpose::core::GroundParameters::ransac_iterations)
+    .def_rw("ransac_seed", &blockpose::core::GroundParameters::ransac_seed)
+    .def_rw("local_cell_size", &blockpose::core::GroundParameters::local_cell_size)
+    .def_rw("local_clearance", &blockpose::core::GroundParameters::local_clearance);
+  module.def("remove_ground", &remove_ground_from_numpy, nb::arg("points"),
+    nb::arg("parameters") = blockpose::core::GroundParameters{},
+    "Remove C++-modelled ground and return retained points plus model diagnostics.");
+  module.def("filter_workspace", &filter_workspace_from_numpy, nb::arg("points"), nb::arg("minimum"), nb::arg("maximum"),
+    "Keep points inside an inclusive axis-aligned workspace ROI.");
+  module.def("filter_exclusion_boxes", &filter_exclusion_boxes_from_numpy, nb::arg("points"), nb::arg("centers"), nb::arg("rotations"), nb::arg("sizes"),
+    "Remove points inside explicit oriented exclusion boxes.");
 #ifdef BLOCKPOSE_CORE_WITH_VISION
   auto rgb_parameters = nb::class_<blockpose::vision::RgbEdgePriorParameters>(
     module, "RgbEdgePriorParameters");

@@ -16,12 +16,18 @@ from pathlib import Path
 
 import numpy as np
 import open3d as o3d
+import yaml
 from open3d.visualization import gui, rendering
 from scipy.spatial.transform import Rotation
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "python"))
 
+from blockpose.annotation_preprocess import (  # noqa: E402
+    filter_exclusion_boxes,
+    filter_workspace,
+    remove_ground,
+)
 from blockpose.annotation_snap import SnapParams, snap_block_to_cloud  # noqa: E402
 from blockpose.annotation_tool import (  # noqa: E402
     VISIBILITIES,
@@ -104,9 +110,7 @@ BOX_EDGES = tuple(
     for second in range(first + 1, 8)
     if bin(first ^ second).count("1") == 1
 )
-BOX_SIGNS = np.array(
-    [[x, y, z] for x in (-1.0, 1.0) for y in (-1.0, 1.0) for z in (-1.0, 1.0)]
-)
+BOX_SIGNS = np.array([[x, y, z] for x in (-1.0, 1.0) for y in (-1.0, 1.0) for z in (-1.0, 1.0)])
 
 
 def discover_snapshot_dirs(root: Path) -> list[Path]:
@@ -156,7 +160,7 @@ def draw_projected_edges(
         steps = max(abs(end - start).max(), 1)
         for point in np.linspace(start, end, int(steps) + 1).astype(int):
             u, v = point
-            image[max(0, v - 1):min(height, v + 2), max(0, u - 1):min(width, u + 2)] = color
+            image[max(0, v - 1) : min(height, v + 2), max(0, u - 1) : min(width, u + 2)] = color
 
 
 class AnnotatorWindow:
@@ -222,11 +226,20 @@ class AnnotatorWindow:
         self.rgb_toggle.checked = True
         self.rgb_toggle.set_on_checked(lambda _checked: self._refresh_scene())
         self.remove_ground_toggle = gui.Checkbox("Remove ground")
-        # Ground removal was a deleted Python detector stage. Keep the UI
-        # control visibly unavailable until the native preprocessing API lands.
         self.remove_ground_toggle.checked = False
-        self.remove_ground_toggle.enabled = False
         self.remove_ground_toggle.set_on_checked(lambda _checked: self._on_point_filters_changed())
+        self.workspace_toggle = gui.Checkbox("Limit to workspace ROI")
+        self.workspace_toggle.checked = False
+        self.workspace_toggle.set_on_checked(lambda _checked: self._on_point_filters_changed())
+        self.workspace_fields = [self._number() for _ in range(6)]
+        for field in self.workspace_fields:
+            field.set_on_value_changed(lambda _value: self._on_point_filters_changed())
+        self.self_filter_toggle = gui.Checkbox("Remove gripper exclusion boxes")
+        self.self_filter_toggle.checked = False
+        self.self_filter_toggle.enabled = False
+        self.self_filter_toggle.set_on_checked(lambda _checked: self._on_point_filters_changed())
+        self.self_filter_boxes: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+        self.self_filter_reason = gui.Label("Disabled: no explicit per-snapshot gripper exclusions")
         self.remove_background_toggle = gui.Checkbox("Remove background (range cutoff)")
         self.remove_background_toggle.checked = True
         self.remove_background_toggle.set_on_checked(
@@ -302,11 +315,23 @@ class AnnotatorWindow:
 
         preprocessing_section = self._section("Preprocessing")
         preprocessing_section.add_child(self.remove_ground_toggle)
+        preprocessing_section.add_child(self.workspace_toggle)
+        workspace_grid = gui.VGrid(4, 3)
+        for label, field in zip(
+            ("min X", "min Y", "min Z", "max X", "max Y", "max Z"),
+            self.workspace_fields,
+            strict=True,
+        ):
+            workspace_grid.add_child(gui.Label(label))
+            workspace_grid.add_child(field)
+        preprocessing_section.add_child(workspace_grid)
         preprocessing_section.add_child(self.remove_background_toggle)
         range_row = gui.Horiz(3)
         range_row.add_child(gui.Label("max range (m)"))
         range_row.add_child(self.max_range_field)
         preprocessing_section.add_child(range_row)
+        preprocessing_section.add_child(self.self_filter_toggle)
+        preprocessing_section.add_child(self.self_filter_reason)
 
         candidates_section = self._section("Candidate sources")
         for key, _label in CANDIDATE_SOURCES:
@@ -315,9 +340,7 @@ class AnnotatorWindow:
         candidates_section.add_child(self.candidate_status)
 
         blocks_section = self._section("Blocks")
-        blocks_section.add_child(
-            gui.Label("Blocks: pending=yellow, approved=green, rejected=red")
-        )
+        blocks_section.add_child(gui.Label("Blocks: pending=yellow, approved=green, rejected=red"))
         blocks_section.add_child(self.target_list)
 
         pose_section = self._section("Pose")
@@ -416,6 +439,12 @@ class AnnotatorWindow:
         self.max_range_field.double_value = default_max_range_m(
             self.raw_points, self.T_world_cloud[:3, 3]
         )
+        workspace_min, workspace_max = full_workspace_roi(self.raw_points)
+        for field, value in zip(
+            self.workspace_fields, (*workspace_min, *workspace_max), strict=True
+        ):
+            field.double_value = float(value)
+        self._load_self_filter_boxes(snapshot)
         self.rgb = None
         self.T_world_camera = tf.T_world_camera
         self.camera = None
@@ -449,8 +478,43 @@ class AnnotatorWindow:
         self._refresh_scene(reset_camera=True)
 
     def _on_point_filters_changed(self) -> None:
-        self._apply_point_filters()
+        try:
+            self._apply_point_filters()
+        except (ImportError, ValueError) as error:
+            self.status.text = f"Preprocessing unchanged: {error}"
+            return
+        if self.rgb is not None:
+            self._refresh_rgb()
         self._refresh_scene()
+
+    def _load_self_filter_boxes(self, snapshot: Path) -> None:
+        """Load only explicit per-capture gripper boxes; never infer robot geometry."""
+        path = snapshot / "gripper_exclusions.yaml"
+        self.self_filter_boxes = None
+        self.self_filter_toggle.checked = False
+        self.self_filter_toggle.enabled = False
+        if not path.is_file():
+            self.self_filter_reason.text = "Disabled: no explicit per-snapshot gripper exclusions"
+            return
+        try:
+            payload = yaml.safe_load(path.read_text()) or {}
+            boxes = payload.get("boxes", [])
+            centers = np.asarray([item["center"] for item in boxes], dtype=np.float64)
+            rotations = np.asarray([item["rotation"] for item in boxes], dtype=np.float64)
+            sizes = np.asarray([item["size"] for item in boxes], dtype=np.float64)
+            if (
+                centers.ndim != 2
+                or centers.shape[1] != 3
+                or rotations.shape != (len(boxes), 3, 3)
+                or sizes.shape != centers.shape
+                or not len(boxes)
+            ):
+                raise ValueError("boxes must contain center (3), rotation (3x3), and size (3)")
+            self.self_filter_boxes = centers, rotations, sizes
+            self.self_filter_toggle.enabled = True
+            self.self_filter_reason.text = f"{len(boxes)} explicit gripper exclusion box(es) loaded"
+        except (OSError, TypeError, ValueError, KeyError, yaml.YAMLError) as error:
+            self.self_filter_reason.text = f"Disabled: invalid gripper_exclusions.yaml ({error})"
 
     def _apply_point_filters(self) -> None:
         """Recompute the working cloud from `raw_points` under the current filter toggles.
@@ -462,10 +526,21 @@ class AnnotatorWindow:
         `_load_snapshot`), independent of these display/candidate filters.
         """
         points = self.raw_points
+        if self.remove_ground_toggle.checked:
+            points, ground = remove_ground(points)
+            self.status.text = (
+                f"Ground removed: {ground['removed_count']} points ({ground['source']})"
+            )
+        if self.workspace_toggle.checked:
+            minimum = np.array([field.double_value for field in self.workspace_fields[:3]])
+            maximum = np.array([field.double_value for field in self.workspace_fields[3:]])
+            points, _ = filter_workspace(points, minimum, maximum)
         if self.remove_background_toggle.checked and self.T_world_cloud is not None:
             points = remove_background_by_range(
                 points, self.T_world_cloud[:3, 3], self.max_range_field.double_value
             )
+        if self.self_filter_toggle.checked and self.self_filter_boxes is not None:
+            points, _ = filter_exclusion_boxes(points, *self.self_filter_boxes)
         self.points = points
         self.selected_rgb_points = np.empty((0, 3))
         self.selected_mask = None
@@ -591,9 +666,7 @@ class AnnotatorWindow:
                 material.shader = "unlitLine"
                 material.line_width = 3.0 if candidate.accepted else 1.5
                 material.base_color = color
-                self.scene.scene.add_geometry(
-                    f"candidate-{key}-{candidate_index}", lines, material
-                )
+                self.scene.scene.add_geometry(f"candidate-{key}-{candidate_index}", lines, material)
 
     def _compute_candidates(self) -> None:
         if compute_candidate_sources is None:

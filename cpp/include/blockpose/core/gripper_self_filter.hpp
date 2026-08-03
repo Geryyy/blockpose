@@ -63,4 +63,23 @@ inline Points remove_points_inside_oriented_boxes(
   return output;
 }
 
+inline Points keep_points_inside_axis_aligned_box(
+  const Points & input, const Point & minimum, const Point & maximum,
+  std::size_t * removed_count = nullptr)
+{
+  if (!minimum.allFinite() || !maximum.allFinite() || (minimum.array() > maximum.array()).any()) {
+    throw std::invalid_argument("workspace minimum must not exceed finite maximum");
+  }
+  Points output; output.reserve(input.size()); std::size_t removed = 0U;
+  for (const auto & point : input) {
+    if ((point.array() >= minimum.array()).all() && (point.array() <= maximum.array()).all()) {
+      output.push_back(point);
+    } else {
+      ++removed;
+    }
+  }
+  if (removed_count != nullptr) {*removed_count = removed;}
+  return output;
+}
+
 }  // namespace blockpose::core
