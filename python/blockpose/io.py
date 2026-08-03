@@ -88,12 +88,47 @@ class TFSnapshot:
     image_frame: str
     cloud_frame: str
     transforms: dict[str, np.ndarray]  # name -> (4, 4) float64 matrix
+    transform_frames: dict[str, tuple[str, str]] = field(default_factory=dict)
+
+    @staticmethod
+    def _canonical_frame_name(name: str) -> str:
+        """Compare TF frame spelling without treating '/' and '_' as different.
+
+        Captures made by different recorders have used both ``elastic/K9`` and
+        ``elastic_K9`` in transform names.  The actual TF parent/child fields
+        are authoritative, but normalising here also supports older snapshots
+        that retained only a generated transform name.
+        """
+        return str(name).strip().lstrip("/").replace("/", "_")
 
     def lookup(self, parent: str, child: str) -> np.ndarray:
         name = f"T_{parent}_{child}"
-        if name not in self.transforms:
-            raise KeyError(f"{name} not found in tf snapshot (have: {sorted(self.transforms)})")
-        return self.transforms[name]
+        if name in self.transforms:
+            return self.transforms[name]
+        canonical_parent = self._canonical_frame_name(parent)
+        canonical_child = self._canonical_frame_name(child)
+        matches = [
+            transform_name
+            for transform_name, (stored_parent, stored_child) in self.transform_frames.items()
+            if self._canonical_frame_name(stored_parent) == canonical_parent
+            and self._canonical_frame_name(stored_child) == canonical_child
+        ]
+        # Older hand-written snapshots may lack parent/child fields.  Fall
+        # back to the conventional generated transform key in that case.
+        if not matches:
+            canonical_name = f"T_{canonical_parent}_{canonical_child}"
+            matches = [
+                transform_name
+                for transform_name in self.transforms
+                if self._canonical_frame_name(transform_name) == canonical_name
+            ]
+        if len(matches) == 1:
+            return self.transforms[matches[0]]
+        if len(matches) > 1:
+            raise KeyError(
+                f"TF lookup for {parent!r} -> {child!r} is ambiguous: {sorted(matches)}"
+            )
+        raise KeyError(f"{name} not found in tf snapshot (have: {sorted(self.transforms)})")
 
     @property
     def T_world_cloud(self) -> np.ndarray:
@@ -110,6 +145,7 @@ def load_tf_snapshot(path: str | Path) -> TFSnapshot:
     with path.open() as f:
         data = yaml.safe_load(f)
     transforms: dict[str, np.ndarray] = {}
+    transform_frames: dict[str, tuple[str, str]] = {}
     for entry in data["transforms"]:
         if not entry.get("available", True):
             continue
@@ -117,11 +153,14 @@ def load_tf_snapshot(path: str | Path) -> TFSnapshot:
         if T.shape != (4, 4):
             raise ValueError(f"Expected 4x4 matrix for {entry['name']!r}, got {T.shape}")
         transforms[entry["name"]] = T
+        if "parent" in entry and "child" in entry:
+            transform_frames[entry["name"]] = (str(entry["parent"]), str(entry["child"]))
     return TFSnapshot(
         reference_frame=data["reference_frame"],
         image_frame=data["image_frame"],
         cloud_frame=data["cloud_frame"],
         transforms=transforms,
+        transform_frames=transform_frames,
     )
 
 

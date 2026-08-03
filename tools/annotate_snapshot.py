@@ -25,7 +25,10 @@ sys.path.insert(0, str(REPO_ROOT / "python"))
 
 from blockpose.annotation_preprocess import (  # noqa: E402
     filter_exclusion_boxes,
+    filter_pzs100_gripper,
     filter_workspace,
+    load_pzs100_self_filter_config,
+    pzs100_self_filter_available,
     remove_ground,
 )
 from blockpose.annotation_snap import SnapParams, snap_block_to_cloud  # noqa: E402
@@ -76,6 +79,7 @@ except ImportError:
 
 DEFAULT_ROOT = REPO_ROOT / "data" / "registration_snapshots"
 DEFAULT_CONFIG = REPO_ROOT / "config" / "transforms_pzs100_initial_pose_1.yaml"
+PZS100_SELF_FILTER_CONFIG = REPO_ROOT / "config" / "pzs100_gripper_filter.yaml"
 BOX_COLORS = {
     "pending": (1.0, 0.75, 0.0, 1.0),
     "approved": (0.1, 0.9, 0.2, 1.0),
@@ -107,6 +111,21 @@ WORKFLOW_SECTION_TITLES = (
 SELECTED_BLOCK_POINTS_COLOR = (0.0, 0.9, 0.9)
 SELECTED_BLOCK_POINTS_BAND_M = 0.10
 BASE_POINT_SIZE = 3.5
+# The PZS100 self-filter is intentionally visible in the scene.  Keep its
+# surfaces faint so they explain which part of the cloud was masked without
+# hiding the annotation targets or auto-fit comparison boxes.
+PZS_FILTER_VOLUME_COLOR = (1.0, 0.32, 0.04, 0.13)
+PZS_FILTER_OUTLINE_COLOR = (1.0, 0.46, 0.08, 1.0)
+PZS_FILTER_RAIL_COLOR = (0.1, 0.82, 1.0, 1.0)
+PZS_FILTER_OUTLINE_WIDTH = 2.0
+PZS_FILTER_RAIL_WIDTH = 4.0
+PZS_FILTER_STATUS_PREFIXES = (
+    "PZS100 gripper removed:",
+    "PZS100 gripper filter disabled.",
+    "PZS100 gripper filter unavailable:",
+    "PZS100 gripper filter failed:",
+    "PZS100 filter active; overlay unavailable",
+)
 INITIAL_EYE = np.array([0.0, 0.0, 0.0])
 INITIAL_UP = np.array([0.0, 0.0, 1.0])
 INITIAL_DIRECTION = np.array([-1.0, 0.0, 0.0])
@@ -246,12 +265,21 @@ class AnnotatorWindow:
         self.workspace_fields = [self._number() for _ in range(6)]
         for field in self.workspace_fields:
             field.set_on_value_changed(lambda _value: self._on_point_filters_changed())
-        self.self_filter_toggle = gui.Checkbox("Remove gripper exclusion boxes")
+        self.self_filter_toggle = gui.Checkbox("Remove PZS100 gripper points")
         self.self_filter_toggle.checked = False
         self.self_filter_toggle.enabled = False
         self.self_filter_toggle.set_on_checked(lambda _checked: self._on_point_filters_changed())
+        # Native PZS100 poses are the primary source.  Explicit boxes remain a
+        # compatibility layer for captures that genuinely need extra masking.
+        self.pzs100_filter_inputs: tuple[
+            np.ndarray, np.ndarray, np.ndarray, np.ndarray, object
+        ] | None = None
+        # Populated only by a successful invocation of the native filter.
+        # These are its diagnostic volumes/rail segments, in world coordinates,
+        # rather than approximations reconstructed by the GUI.
+        self.pzs100_filter_diagnostics: dict[str, np.ndarray] | None = None
         self.self_filter_boxes: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
-        self.self_filter_reason = gui.Label("Disabled: no explicit per-snapshot gripper exclusions")
+        self.self_filter_reason = gui.Label("Disabled: loading PZS100 filter profile")
         self.remove_background_toggle = gui.Checkbox("Remove background (range cutoff)")
         self.remove_background_toggle.checked = True
         self.remove_background_toggle.set_on_checked(
@@ -524,7 +552,7 @@ class AnnotatorWindow:
             self.workspace_fields, (*workspace_min, *workspace_max), strict=True
         ):
             field.double_value = float(value)
-        self._load_self_filter_boxes(snapshot)
+        self._load_self_filter_boxes(snapshot, tf)
         self.rgb = None
         self.T_world_camera = tf.T_world_camera
         self.camera = None
@@ -570,34 +598,87 @@ class AnnotatorWindow:
             self._refresh_rgb()
         self._refresh_scene()
 
-    def _load_self_filter_boxes(self, snapshot: Path) -> None:
-        """Load only explicit per-capture gripper boxes; never infer robot geometry."""
+    def _load_self_filter_boxes(self, snapshot: Path, tf) -> None:
+        """Configure native PZS100 rails, with explicit boxes as a safe fallback.
+
+        Captured TF is authoritative for the rail endpoints.  Unlike the old
+        UI, no per-snapshot ``gripper_exclusions.yaml`` is necessary for the
+        standard PZS100 filter to be active.
+        """
         path = snapshot / "gripper_exclusions.yaml"
+        self.pzs100_filter_inputs = None
+        self.pzs100_filter_diagnostics = None
         self.self_filter_boxes = None
         self.self_filter_toggle.checked = False
         self.self_filter_toggle.enabled = False
-        if not path.is_file():
-            self.self_filter_reason.text = "Disabled: no explicit per-snapshot gripper exclusions"
-            return
+        pzs_reason = ""
         try:
-            payload = yaml.safe_load(path.read_text()) or {}
-            boxes = payload.get("boxes", [])
-            centers = np.asarray([item["center"] for item in boxes], dtype=np.float64)
-            rotations = np.asarray([item["rotation"] for item in boxes], dtype=np.float64)
-            sizes = np.asarray([item["size"] for item in boxes], dtype=np.float64)
-            if (
-                centers.ndim != 2
-                or centers.shape[1] != 3
-                or rotations.shape != (len(boxes), 3, 3)
-                or sizes.shape != centers.shape
-                or not len(boxes)
-            ):
-                raise ValueError("boxes must contain center (3), rotation (3x3), and size (3)")
-            self.self_filter_boxes = centers, rotations, sizes
+            available, native_reason = pzs100_self_filter_available()
+            if not available:
+                raise ImportError(native_reason)
+            profile = load_pzs100_self_filter_config(PZS100_SELF_FILTER_CONFIG)
+            if not profile.enabled:
+                raise ValueError("profile is disabled")
+            parents, rails, rotations, outward_axes = [], [], [], []
+            for rail in profile.rails:
+                T_world_parent = tf.lookup(tf.reference_frame, rail.parent_frame)
+                T_world_rail = tf.lookup(tf.reference_frame, rail.rail_frame)
+                parents.append(T_world_parent[:3, 3])
+                rails.append(T_world_rail[:3, 3])
+                rotations.append(T_world_parent[:3, :3])
+                outward_axes.append(rail.outward_axis_parent)
+            self.pzs100_filter_inputs = (
+                np.asarray(parents, dtype=np.float64),
+                np.asarray(rails, dtype=np.float64),
+                np.asarray(rotations, dtype=np.float64),
+                np.asarray(outward_axes, dtype=np.float64),
+                profile.parameters,
+            )
+        except (ImportError, KeyError, OSError, TypeError, ValueError, yaml.YAMLError) as error:
+            pzs_reason = str(error)
+
+        legacy_reason = ""
+        if path.is_file():
+            try:
+                payload = yaml.safe_load(path.read_text()) or {}
+                boxes = payload.get("boxes", [])
+                centers = np.asarray([item["center"] for item in boxes], dtype=np.float64)
+                rotations = np.asarray([item["rotation"] for item in boxes], dtype=np.float64)
+                sizes = np.asarray([item["size"] for item in boxes], dtype=np.float64)
+                if (
+                    centers.ndim != 2
+                    or centers.shape[1] != 3
+                    or rotations.shape != (len(boxes), 3, 3)
+                    or sizes.shape != centers.shape
+                    or not len(boxes)
+                ):
+                    raise ValueError("boxes must contain center (3), rotation (3x3), and size (3)")
+                self.self_filter_boxes = centers, rotations, sizes
+            except (OSError, TypeError, ValueError, KeyError, yaml.YAMLError) as error:
+                legacy_reason = f"invalid gripper_exclusions.yaml ({error})"
+
+        if self.pzs100_filter_inputs is not None:
+            self.self_filter_toggle.checked = True
             self.self_filter_toggle.enabled = True
-            self.self_filter_reason.text = f"{len(boxes)} explicit gripper exclusion box(es) loaded"
-        except (OSError, TypeError, ValueError, KeyError, yaml.YAMLError) as error:
-            self.self_filter_reason.text = f"Disabled: invalid gripper_exclusions.yaml ({error})"
+            suffix = (
+                f"; {len(self.self_filter_boxes[0])} legacy explicit box(es) ignored to avoid "
+                "combining unrelated capture-specific masks"
+                if self.self_filter_boxes is not None
+                else ""
+            )
+            self.self_filter_reason.text = (
+                f"PZS100 native filter ready from captured K9/K11 rails; "
+                f"its translucent filter volumes and rails are shown in 3D{suffix}"
+            )
+            return
+        if self.self_filter_boxes is not None:
+            self.self_filter_toggle.enabled = True
+            self.self_filter_reason.text = (
+                "PZS100 unavailable: " + pzs_reason + "; explicit exclusion boxes available"
+            )
+            return
+        detail = pzs_reason or legacy_reason or "no PZS100 TF rails or explicit exclusions"
+        self.self_filter_reason.text = f"Disabled: {detail}"
 
     def _apply_point_filters(self) -> None:
         """Recompute the working cloud from `raw_points` under the current filter toggles.
@@ -608,6 +689,14 @@ class AnnotatorWindow:
         recomputed here -- it always covers the full raw capture (see
         `_load_snapshot`), independent of these display/candidate filters.
         """
+        had_pzs_status = self.status.text.startswith(PZS_FILTER_STATUS_PREFIXES)
+        if had_pzs_status:
+            self.status.text = ""
+        # Never retain a diagnostic overlay from a previous filter pass.  In
+        # particular, turning the PZS checkbox off, changing snapshots, or a
+        # native filter failure must immediately remove the old volumes.
+        self.pzs100_filter_diagnostics = None
+        pzs_filter_failed = False
         points = self.raw_points
         if self.remove_ground_toggle.checked:
             points, ground = remove_ground(points)
@@ -622,8 +711,49 @@ class AnnotatorWindow:
             points = remove_background_by_range(
                 points, self.T_world_cloud[:3, 3], self.max_range_field.double_value
             )
-        if self.self_filter_toggle.checked and self.self_filter_boxes is not None:
-            points, _ = filter_exclusion_boxes(points, *self.self_filter_boxes)
+        if self.self_filter_toggle.checked and self.pzs100_filter_inputs is not None:
+            try:
+                points, removed, diagnostics = filter_pzs100_gripper(
+                    points, *self.pzs100_filter_inputs
+                )
+                self.pzs100_filter_diagnostics = diagnostics
+                self.status.text = f"PZS100 gripper removed: {removed} points"
+            except (ImportError, ValueError, RuntimeError) as error:
+                # A stale .so or malformed capture must not make the annotator
+                # unusable.  Keep the cloud untouched and expose the cause.
+                self.self_filter_toggle.checked = False
+                self.self_filter_toggle.enabled = self.self_filter_boxes is not None
+                self.pzs100_filter_inputs = None
+                self.self_filter_reason.text = f"Disabled: PZS100 native filter failed ({error})"
+                self.status.text = f"PZS100 gripper filter failed: {error}"
+                pzs_filter_failed = True
+        # Explicit boxes are a legacy fallback, rather than another mask to
+        # silently combine with the current FK-based PZS100 geometry.
+        if (
+            self.self_filter_toggle.checked
+            and self.pzs100_filter_inputs is None
+            and self.self_filter_boxes is not None
+        ):
+            points, removed = filter_exclusion_boxes(points, *self.self_filter_boxes)
+            self.status.text = f"Explicit gripper exclusions removed: {removed} points"
+        elif not self.self_filter_toggle.checked and not pzs_filter_failed:
+            # Make a state transition visible when toggling an otherwise-ready
+            # filter off.  If another preprocessing operation produced status
+            # in this same pass (e.g. ground removal), leave that more useful
+            # result intact.
+            if (
+                self.pzs100_filter_inputs is not None
+                and had_pzs_status
+                and not self.remove_ground_toggle.checked
+            ):
+                self.status.text = "PZS100 gripper filter disabled."
+            elif (
+                self.pzs100_filter_inputs is None
+                and self.self_filter_boxes is None
+                and not self.remove_ground_toggle.checked
+            ):
+                detail = self.self_filter_reason.text.removeprefix("Disabled: ")
+                self.status.text = f"PZS100 gripper filter unavailable: {detail}"
         self.points = points
         self.selected_rgb_points = np.empty((0, 3))
         self.selected_mask = None
@@ -712,6 +842,7 @@ class AnnotatorWindow:
         material.shader = "defaultUnlit"
         material.point_size = BASE_POINT_SIZE
         self.scene.scene.add_geometry("cloud", cloud, material)
+        self._add_pzs100_filter_geometries()
         if len(self.selected_rgb_points):
             selected = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(self.selected_rgb_points))
             selected.paint_uniform_color((1.0, 0.1, 0.8))
@@ -742,6 +873,86 @@ class AnnotatorWindow:
             self.scene.setup_camera(60.0, bounds, bounds.get_center())
             self._reset_camera()
         self.scene.force_redraw()
+
+    def _add_pzs100_filter_geometries(self) -> None:
+        """Render native PZS filter diagnostics as read-only scene context.
+
+        The native core supplies the exact oriented exclusion boxes used for
+        masking, plus the captured rail endpoints.  This routine deliberately
+        has no connection to editable targets or candidate computation: it is
+        a visual explanation of an already-applied preprocessing step only.
+        """
+        diagnostics = self.pzs100_filter_diagnostics
+        if diagnostics is None:
+            return
+        try:
+            centers = np.asarray(diagnostics["centers"], dtype=float)
+            rotations = np.asarray(diagnostics["rotations"], dtype=float)
+            sizes = np.asarray(diagnostics["sizes"], dtype=float)
+            rail_starts = np.asarray(diagnostics["rail_starts"], dtype=float)
+            rail_ends = np.asarray(diagnostics["rail_ends"], dtype=float)
+            count = len(centers)
+            if (
+                centers.shape != (count, 3)
+                or rotations.shape != (count, 3, 3)
+                or sizes.shape != (count, 3)
+                or rail_starts.shape != (count, 3)
+                or rail_ends.shape != (count, 3)
+                or not np.all(np.isfinite(centers))
+                or not np.all(np.isfinite(rotations))
+                or not np.all(np.isfinite(sizes))
+                or not np.all(np.isfinite(rail_starts))
+                or not np.all(np.isfinite(rail_ends))
+                or np.any(sizes <= 0.0)
+            ):
+                raise ValueError("invalid native rail-box diagnostics")
+        except (KeyError, TypeError, ValueError) as error:
+            # Filtering remains valid even if an incompatible native build
+            # returns malformed optional diagnostics.  Do not let decoration
+            # prevent operators from viewing or annotating the cloud.
+            self.pzs100_filter_diagnostics = None
+            self.status.text = f"PZS100 filter active; overlay unavailable ({error})"
+            return
+
+        volume_material = rendering.MaterialRecord()
+        volume_material.shader = "defaultUnlitTransparency"
+        volume_material.base_color = PZS_FILTER_VOLUME_COLOR
+        volume_material.has_alpha = True
+        outline_material = rendering.MaterialRecord()
+        outline_material.shader = "unlitLine"
+        outline_material.base_color = PZS_FILTER_OUTLINE_COLOR
+        outline_material.line_width = PZS_FILTER_OUTLINE_WIDTH
+        rail_material = rendering.MaterialRecord()
+        rail_material.shader = "unlitLine"
+        rail_material.base_color = PZS_FILTER_RAIL_COLOR
+        rail_material.line_width = PZS_FILTER_RAIL_WIDTH
+
+        # A single LineSet keeps both rails visually consistent and makes their
+        # captured endpoints obvious, while each volume has a transparent face
+        # mesh and a crisp outline for depth perception.
+        rail_lines = o3d.geometry.LineSet(
+            points=o3d.utility.Vector3dVector(np.vstack((rail_starts, rail_ends))),
+            lines=o3d.utility.Vector2iVector(
+                np.asarray([[index, index + count] for index in range(count)], dtype=np.int32)
+            ),
+        )
+        self.scene.scene.add_geometry("pzs-filter-rails", rail_lines, rail_material)
+        for index, (center, rotation, size) in enumerate(
+            zip(centers, rotations, sizes, strict=True)
+        ):
+            # create_box starts at the origin.  Center it first, then apply the
+            # native world-frame orientation and translation.
+            volume = o3d.geometry.TriangleMesh.create_box(*size)
+            volume.translate(-size / 2.0)
+            volume.rotate(rotation, center=np.zeros(3))
+            volume.translate(center)
+            self.scene.scene.add_geometry(f"pzs-filter-volume-{index}", volume, volume_material)
+
+            box = o3d.geometry.OrientedBoundingBox(center, rotation, size)
+            outline = o3d.geometry.LineSet.create_from_oriented_bounding_box(box)
+            self.scene.scene.add_geometry(
+                f"pzs-filter-outline-{index}", outline, outline_material
+            )
 
     def _reset_camera(self) -> None:
         focus = initial_camera_focus(self.points, INITIAL_EYE, INITIAL_DIRECTION)

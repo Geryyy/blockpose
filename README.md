@@ -98,6 +98,15 @@ The standalone PZS100 profile is
 is intentionally ROS-free and can be used by snapshot/annotation adapters on
 the GPU machine.
 
+The snapshot annotator uses this profile automatically when a capture contains
+the recorded `world -> elastic/K9`, `K10_left_rail`, `K11`, and
+`K12_right_rail` transforms.  The **Remove PZS100 gripper points** preprocessing
+toggle starts enabled only when that TF, profile, and the native `_core` API are
+available; it removes the same points from the display, auto-fit, and manual
+snap operations.  A legacy `gripper_exclusions.yaml` remains supported as a
+fallback when the native PZS100 filter cannot be configured, but is no longer
+required for PZS100 captures.
+
 ```bash
 cmake -S cpp -B .build/blockpose-core -DBLOCKPOSE_CORE_BUILD_TESTING=ON
 cmake --build .build/blockpose-core --parallel

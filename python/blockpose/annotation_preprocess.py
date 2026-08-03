@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import importlib
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
+import yaml
 
 
 @dataclass(frozen=True)
@@ -18,6 +20,66 @@ class GroundRemovalParams:
     ransac_seed: int = 0
     local_cell_size: float = 0.5
     local_clearance: float = 0.05
+
+
+@dataclass(frozen=True)
+class Pzs100SelfFilterParams:
+    """Portable PZS100 rail-box profile consumed by the native core."""
+
+    outboard_extent_m: float = 0.30
+    cross_rail_extent_m: float = 0.90
+    rail_end_margin_m: float = 0.00
+
+
+@dataclass(frozen=True)
+class Pzs100RailConfig:
+    name: str
+    parent_frame: str
+    rail_frame: str
+    outward_axis_parent: np.ndarray
+
+
+@dataclass(frozen=True)
+class Pzs100SelfFilterConfig:
+    enabled: bool
+    parameters: Pzs100SelfFilterParams
+    rails: tuple[Pzs100RailConfig, ...]
+
+
+def load_pzs100_self_filter_config(path: str | Path) -> Pzs100SelfFilterConfig:
+    """Read and validate the checked-in, ROS-free PZS100 filter profile."""
+    with Path(path).open(encoding="utf-8") as stream:
+        payload = yaml.safe_load(stream) or {}
+    if payload.get("schema_version") != 1 or payload.get("model") != "pzs100":
+        raise ValueError("expected schema_version: 1 and model: pzs100")
+    rails = []
+    for item in payload.get("rails", []):
+        axis = np.asarray(item["outward_axis_parent"], dtype=np.float64)
+        if axis.shape != (3,) or not np.all(np.isfinite(axis)) or np.linalg.norm(axis) <= 1e-9:
+            raise ValueError(f"rail {item.get('name', '?')!r} needs a finite non-zero outward axis")
+        rails.append(
+            Pzs100RailConfig(
+                name=str(item["name"]),
+                parent_frame=str(item["parent_frame"]),
+                rail_frame=str(item["rail_frame"]),
+                outward_axis_parent=axis,
+            )
+        )
+    if len(rails) != 2:
+        raise ValueError("PZS100 profile must define exactly two rails")
+    parameters = Pzs100SelfFilterParams(
+        outboard_extent_m=float(payload["outboard_extent_m"]),
+        cross_rail_extent_m=float(payload["cross_rail_extent_m"]),
+        rail_end_margin_m=float(payload["rail_end_margin_m"]),
+    )
+    if (
+        not np.all(np.isfinite(tuple(vars(parameters).values())))
+        or parameters.outboard_extent_m <= 0
+        or parameters.cross_rail_extent_m <= 0
+        or parameters.rail_end_margin_m < 0
+    ):
+        raise ValueError("PZS100 extents must be finite and positive (margin non-negative)")
+    return Pzs100SelfFilterConfig(bool(payload.get("enabled", True)), parameters, tuple(rails))
 
 
 def _core():
@@ -64,3 +126,47 @@ def filter_exclusion_boxes(
         np.ascontiguousarray(sizes, dtype=np.float64),
     )
     return _points(result["points"]), int(result["removed_count"])
+
+
+def pzs100_self_filter_available() -> tuple[bool, str]:
+    """Return whether the installed native extension exposes the PZS100 API."""
+    try:
+        core = _core()
+    except ImportError as error:
+        return False, f"native blockpose._core unavailable ({error})"
+    required = ("Pzs100SelfFilterParameters", "filter_pzs100_gripper")
+    missing = [name for name in required if not hasattr(core, name)]
+    if missing:
+        return False, "native blockpose._core lacks " + ", ".join(missing)
+    return True, ""
+
+
+def filter_pzs100_gripper(
+    points: np.ndarray,
+    parent_positions: np.ndarray,
+    rail_positions: np.ndarray,
+    parent_rotations: np.ndarray,
+    outward_axes_parent: np.ndarray,
+    params: Pzs100SelfFilterParams,
+) -> tuple[np.ndarray, int, dict[str, np.ndarray]]:
+    """Apply the native rail-box self-filter and return its diagnostic boxes."""
+    available, reason = pzs100_self_filter_available()
+    if not available:
+        raise ImportError(reason)
+    core = _core()
+    native = core.Pzs100SelfFilterParameters()
+    for name, value in vars(params).items():
+        setattr(native, name, value)
+    result = core.filter_pzs100_gripper(
+        np.ascontiguousarray(points, dtype=np.float64),
+        np.ascontiguousarray(parent_positions, dtype=np.float64),
+        np.ascontiguousarray(rail_positions, dtype=np.float64),
+        np.ascontiguousarray(parent_rotations, dtype=np.float64),
+        np.ascontiguousarray(outward_axes_parent, dtype=np.float64),
+        native,
+    )
+    boxes = {
+        name: np.asarray(result[name], dtype=np.float64)
+        for name in ("centers", "rotations", "sizes", "rail_starts", "rail_ends", "outward_normals")
+    }
+    return _points(result["points"]), int(result["removed_count"]), boxes
