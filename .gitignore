@@ -8,7 +8,8 @@ __pycache__/
 dist/
 
 # CMake/C++ build output
-/build/
+build/
+.build/
 /install/
 /log/
 /out/
@@ -18,6 +19,9 @@ cmake_install.cmake
 compile_commands.json
 Testing/
 *.so
+
+# Local archives
+*.zip
 
 # Tests, analysis, and local caches
 .cache/

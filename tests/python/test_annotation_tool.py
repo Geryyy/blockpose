@@ -225,6 +225,67 @@ def test_abort_retracts_new_manual_draft_but_restores_existing_prior() -> None:
     assert controller.target.review_status == "pending"
 
 
+def test_adopt_candidate_creates_unique_pending_target_as_one_undoable_change() -> None:
+    controller = AnnotationController(_document())
+    rotation = Rotation.from_euler("xyz", [0, 0, 30], degrees=True).as_matrix()
+    first_id = controller.adopt_candidate("fit-a", np.ones(3), rotation, BLOCK_DIMS)
+    second_id = controller.adopt_candidate(
+        "fit-b", np.full(3, 2.0), rotation, BLOCK_DIMS
+    )
+    assert (first_id, second_id) == ("auto_0", "auto_1")
+    assert controller.target is not None
+    assert controller.target.review_status == "pending"
+    assert controller.target.provenance == "auto_fit:fit-b"
+    assert controller.adopted_candidate_ids == {"fit-a", "fit-b"}
+    assert controller.undo()
+    assert [target.id for target in controller.document.targets] == ["prior", "auto_0"]
+    assert controller.adopted_candidate_ids == {"fit-a"}
+
+
+def test_adopt_candidate_rejects_invalid_pose_without_changing_document() -> None:
+    controller = AnnotationController(_document())
+    with np.testing.assert_raises_regex(ValueError, "finite rigid transform"):
+        controller.adopt_candidate("fit-a", np.ones(3), np.zeros((3, 3)), BLOCK_DIMS)
+    assert [target.id for target in controller.document.targets] == ["prior"]
+
+
+def test_adopted_candidate_availability_tracks_undo_delete_and_discard() -> None:
+    controller = AnnotationController(_document())
+    pose = (np.ones(3), np.eye(3), BLOCK_DIMS)
+
+    controller.adopt_candidate("fit-a", *pose)
+    assert controller.adopted_candidate_ids == {"fit-a"}
+    assert controller.undo()
+    assert controller.adopted_candidate_ids == set()
+    controller.adopt_candidate("fit-a", *pose)
+
+    assert controller.delete_selected()
+    assert controller.adopted_candidate_ids == set()
+    controller.adopt_candidate("fit-a", *pose)
+    controller.abort_selected()
+    assert controller.adopted_candidate_ids == set()
+    controller.adopt_candidate("fit-a", *pose)
+
+
+def test_adopted_candidate_identity_prevents_recompute_duplicate_and_round_trips(
+    tmp_path: Path,
+) -> None:
+    scene = tmp_path / "scene"
+    scene.mkdir()
+    manifest = scene / "annotations.yaml"
+    controller = AnnotationController(_document())
+    controller.document.snapshot = "scene"
+    controller.adopt_candidate("pcl:hypothesis-7", np.ones(3), np.eye(3), BLOCK_DIMS)
+    with np.testing.assert_raises_regex(ValueError, "already adopted"):
+        controller.adopt_candidate(
+            "pcl:hypothesis-7", np.full(3, 2.0), np.eye(3), BLOCK_DIMS
+        )
+
+    save_annotations_atomic(controller.document, manifest)
+    reloaded = AnnotationController(AnnotationDocument.load(manifest))
+    assert reloaded.adopted_candidate_ids == {"pcl:hypothesis-7"}
+
+
 def test_reset_returns_to_original_prior_not_previous_increment() -> None:
     controller = AnnotationController(_document())
     controller.set_review("approved")

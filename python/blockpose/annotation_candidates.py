@@ -426,7 +426,17 @@ def compute_candidate_sources(
 
     if have_rgb_context:
         assert rgb is not None and T_world_camera is not None and camera is not None
-        rgb_edge_prior = _rgb_edge_prior_candidates(raw_hypotheses, rgb, T_world_camera, camera)
+        # RGB vision is an optional native capability.  Keep this call behind
+        # the same per-source failure boundary as the DINO backends: a
+        # geometry-only build (or any failure while constructing/scoring the
+        # prior) must not discard the already-computed PCL candidates.
+        try:
+            rgb_edge_prior = _rgb_edge_prior_candidates(
+                raw_hypotheses, rgb, T_world_camera, camera
+            )
+        except Exception as error:  # noqa: BLE001 - optional backend boundary
+            rgb_edge_prior = ()
+            warnings.append(f"rgb_edge_prior unavailable: {error!r}")
     else:
         rgb_edge_prior = ()
         warnings.append("rgb_edge_prior unavailable: rgb/T_world_camera/camera not all provided")

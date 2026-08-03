@@ -97,6 +97,13 @@ CANDIDATE_SOURCE_COLORS = {
     "dino_proposer": (0.6, 0.2, 0.85, 1.0),
     "dino_verifier_reranked": (0.0, 0.65, 0.65, 1.0),
 }
+WORKFLOW_SECTION_TITLES = (
+    "1. Preprocess cloud",
+    "2. Auto-fit candidates",
+    "3. Add and adjust blocks",
+    "4. Visibility and details",
+    "5. Save snapshot",
+)
 SELECTED_BLOCK_POINTS_COLOR = (0.0, 0.9, 0.9)
 SELECTED_BLOCK_POINTS_BAND_M = 0.10
 BASE_POINT_SIZE = 3.5
@@ -192,6 +199,7 @@ class AnnotatorWindow:
         self.selected_rgb_points = np.empty((0, 3))
         self.selected_mask: np.ndarray | None = None
         self.candidate_sources_result = None
+        self.candidate_choices: list[tuple[str, int, object]] = []
         self._rotate_cycle_state: tuple[str, np.ndarray, int] | None = None
         self._rotate_cycle_last_applied: np.ndarray | None = None
         self.sam_backend = (
@@ -211,7 +219,11 @@ class AnnotatorWindow:
         self.scene.scene = rendering.Open3DScene(self.window.renderer)
         self.rgb_view = gui.ImageWidget()
         self.rgb_view.set_on_mouse(self._on_rgb_mouse)
-        self.panel = gui.Vert(6, gui.Margins(8, 8, 8, 8))
+        # The controls are intentionally one scrollable, top-to-bottom workflow.
+        # On smaller displays a plain Vert clipped the important delete/save
+        # actions below the window edge.
+        self.panel = gui.ScrollableVert(6, gui.Margins(8, 8, 8, 8))
+        self.save_footer = gui.Vert(4, gui.Margins(8, 4, 8, 8))
         self.status = gui.Label("")
         self.snapshot_combo = gui.Combobox()
         for item in self.snapshots:
@@ -252,7 +264,13 @@ class AnnotatorWindow:
         self.candidate_checks = {key: gui.Checkbox(label) for key, label in CANDIDATE_SOURCES}
         for checkbox in self.candidate_checks.values():
             checkbox.checked = False
-            checkbox.set_on_checked(lambda _checked: self._refresh_scene())
+            checkbox.set_on_checked(lambda _checked: self._candidate_sources_changed())
+        self.candidate_checks["pcl"].checked = True
+        self.candidate_combo = gui.Combobox()
+        self.adopt_candidate_button = self._button(
+            "Adopt selected suggestion as editable block", self._adopt_candidate
+        )
+        self.adopt_candidate_button.enabled = False
         self.candidate_status = gui.Label(
             "unavailable: annotation_candidates module not found"
             if compute_candidate_sources is None
@@ -273,12 +291,14 @@ class AnnotatorWindow:
         self.notes.placeholder_text = "snapshot notes"
         self.complete = gui.Checkbox("ROI exhaustively annotated")
         self.add_fields = [self._number() for _ in range(3)]
+        self.pose_step_buttons: list[gui.Button] = []
         self._build_panel()
         self.complete.set_on_checked(lambda _checked: self._mark_widget_dirty())
         self.notes.set_on_text_changed(lambda _text: self._mark_widget_dirty())
         self.window.add_child(self.scene)
         self.window.add_child(self.rgb_view)
         self.window.add_child(self.panel)
+        self.window.add_child(self.save_footer)
         self.window.set_on_layout(self._layout)
         self.window.set_on_close(self._on_close)
         self.scene.set_on_mouse(self._on_mouse)
@@ -298,14 +318,20 @@ class AnnotatorWindow:
         button.set_on_clicked(callback)
         return button
 
-    def _section(self, title: str) -> gui.CollapsableVert:
+    def _section(
+        self,
+        title: str,
+        *,
+        open_by_default: bool = True,
+        parent: gui.Widget | None = None,
+    ) -> gui.CollapsableVert:
         section = gui.CollapsableVert(title, 4, gui.Margins(4, 0, 0, 4))
-        section.set_is_open(True)
-        self.panel.add_child(section)
+        section.set_is_open(open_by_default)
+        (self.panel if parent is None else parent).add_child(section)
         return section
 
     def _build_panel(self) -> None:
-        snapshot_section = self._section("Snapshot")
+        snapshot_section = self._section("Snapshot", open_by_default=False)
         snapshot_section.add_child(self.snapshot_combo)
         nav_row = gui.Horiz(3)
         nav_row.add_child(self.prev_button)
@@ -313,9 +339,16 @@ class AnnotatorWindow:
         snapshot_section.add_child(nav_row)
         snapshot_section.add_child(self.rgb_toggle)
 
-        preprocessing_section = self._section("Preprocessing")
+        preprocessing_section = self._section(WORKFLOW_SECTION_TITLES[0])
+        preprocessing_section.add_child(
+            gui.Label("Choose which cloud points are used for fitting.")
+        )
         preprocessing_section.add_child(self.remove_ground_toggle)
-        preprocessing_section.add_child(self.workspace_toggle)
+        advanced_filters = gui.CollapsableVert(
+            "Advanced cloud filters", 4, gui.Margins(4, 0, 0, 4)
+        )
+        advanced_filters.set_is_open(False)
+        advanced_filters.add_child(self.workspace_toggle)
         workspace_grid = gui.VGrid(4, 3)
         for label, field in zip(
             ("min X", "min Y", "min Z", "max X", "max Y", "max Z"),
@@ -324,81 +357,125 @@ class AnnotatorWindow:
         ):
             workspace_grid.add_child(gui.Label(label))
             workspace_grid.add_child(field)
-        preprocessing_section.add_child(workspace_grid)
+        advanced_filters.add_child(workspace_grid)
         preprocessing_section.add_child(self.remove_background_toggle)
         range_row = gui.Horiz(3)
         range_row.add_child(gui.Label("max range (m)"))
         range_row.add_child(self.max_range_field)
         preprocessing_section.add_child(range_row)
-        preprocessing_section.add_child(self.self_filter_toggle)
-        preprocessing_section.add_child(self.self_filter_reason)
+        advanced_filters.add_child(self.self_filter_toggle)
+        advanced_filters.add_child(self.self_filter_reason)
+        preprocessing_section.add_child(advanced_filters)
 
-        candidates_section = self._section("Candidate sources")
+        candidates_section = self._section(WORKFLOW_SECTION_TITLES[1])
+        candidates_section.add_child(
+            gui.Label("Select fit methods, compute suggestions, then adopt the best fit.")
+        )
         for key, _label in CANDIDATE_SOURCES:
             candidates_section.add_child(self.candidate_checks[key])
-        candidates_section.add_child(self._button("Compute candidates", self._compute_candidates))
+        candidates_section.add_child(
+            self._button("Compute auto-fit suggestions", self._compute_candidates)
+        )
+        candidates_section.add_child(self.candidate_combo)
+        candidates_section.add_child(self.adopt_candidate_button)
+        candidates_section.add_child(
+            gui.Label("Adopted suggestions become pending blocks you can adjust below.")
+        )
         candidates_section.add_child(self.candidate_status)
 
-        blocks_section = self._section("Blocks")
-        blocks_section.add_child(gui.Label("Blocks: pending=yellow, approved=green, rejected=red"))
-        blocks_section.add_child(self.target_list)
+        edit_section = self._section(WORKFLOW_SECTION_TITLES[2])
+        edit_section.add_child(
+            gui.Label("Select a block below or Ctrl-click the cloud to add one.")
+        )
+        edit_section.add_child(gui.Label("pending=yellow · approved=green · excluded=red"))
+        edit_section.add_child(self.target_list)
 
-        pose_section = self._section("Pose")
-        pose_section.add_child(
+        edit_section.add_child(gui.Label("Add block at XYZ (metres)"))
+        add_row = gui.Horiz(3)
+        for field in self.add_fields:
+            add_row.add_child(field)
+        add_row.add_child(self._button("Add block", self._add_at_fields))
+        edit_section.add_child(add_row)
+
+        # Delete is deliberately adjacent to the block list, always visible in
+        # the main workflow, and guarded by the existing confirmation dialog.
+        self.delete_button = self._button("Delete selected block…", self._confirm_delete_selected)
+        edit_section.add_child(self.delete_button)
+
+        edit_section.add_child(
             gui.Label("Position XYZ (m), Euler XYZ (deg; canonical block frame)")
         )
-        pose_section.add_child(self.orientation_label)
+        edit_section.add_child(self.orientation_label)
         grid = gui.VGrid(2, 4)
         for label, field in zip(("X", "Y", "Z", "Roll", "Pitch", "Yaw"), self.fields, strict=True):
             grid.add_child(gui.Label(label))
             grid.add_child(field)
-        pose_section.add_child(grid)
+        edit_section.add_child(grid)
         steps = gui.Horiz(3)
         for axis, label in enumerate(("X", "Y", "Z")):
-            steps.add_child(self._button(f"{label}-", lambda a=axis: self._step(a, -1)))
-            steps.add_child(self._button(f"{label}+", lambda a=axis: self._step(a, 1)))
-        pose_section.add_child(steps)
+            minus = self._button(f"{label}-", lambda a=axis: self._step(a, -1))
+            plus = self._button(f"{label}+", lambda a=axis: self._step(a, 1))
+            self.pose_step_buttons.extend((minus, plus))
+            steps.add_child(minus)
+            steps.add_child(plus)
+        edit_section.add_child(steps)
         turns = gui.Horiz(3)
         for axis, label in enumerate(("R", "P", "Y"), start=3):
-            turns.add_child(self._button(f"{label}-", lambda a=axis: self._step(a, -1)))
-            turns.add_child(self._button(f"{label}+", lambda a=axis: self._step(a, 1)))
-        pose_section.add_child(turns)
-        pose_section.add_child(
-            self._button("Rotate 90° (alternative face labeling)", self._rotate_selected_90)
+            minus = self._button(f"{label}-", lambda a=axis: self._step(a, -1))
+            plus = self._button(f"{label}+", lambda a=axis: self._step(a, 1))
+            self.pose_step_buttons.extend((minus, plus))
+            turns.add_child(minus)
+            turns.add_child(plus)
+        edit_section.add_child(turns)
+        self.rotate_button = self._button(
+            "Rotate 90° (alternative face labeling)", self._rotate_selected_90
         )
-
-        review_section = self._section("Review")
-        review = gui.Horiz(4)
-        review.add_child(self._button("Approve", self._approve))
-        review.add_child(self._button("Reject", self._reject))
-        review.add_child(self._button("Abort edit", self._abort))
-        review.add_child(self._button("Reset", self._reset))
-        review_section.add_child(review)
-        review_section.add_child(gui.Label("Visibility / ignored target"))
-        review_section.add_child(self.visibility)
-        review_section.add_child(self.ignore_reason)
-
-        actions_section = self._section("Block actions")
-        actions_section.add_child(gui.Label("Add manual draft at XYZ (or Ctrl-click cloud)"))
-        add_row = gui.Horiz(3)
-        for field in self.add_fields:
-            add_row.add_child(field)
-        add_row.add_child(self._button("Add", self._add_at_fields))
-        actions_section.add_child(add_row)
-        actions_section.add_child(self._button("Delete selected…", self._confirm_delete_selected))
-        actions_section.add_child(self._button("Snap selected to cloud", self._snap_selected))
-
-        history_section = self._section("History")
+        edit_section.add_child(self.rotate_button)
+        self.snap_button = self._button("Snap selected block to cloud", self._snap_selected)
+        edit_section.add_child(self.snap_button)
         history = gui.Horiz(4)
         history.add_child(self._button("Undo", self._undo))
         history.add_child(self._button("Redo", self._redo))
         history.add_child(self._button("Reset camera", self._reset_camera))
-        history_section.add_child(history)
+        edit_section.add_child(history)
 
-        self.panel.add_child(self.complete)
-        self.panel.add_child(self.notes)
-        self.panel.add_child(self._button("Validate & Save", self._save))
-        self.panel.add_child(self.status)
+        details_section = self._section(WORKFLOW_SECTION_TITLES[3])
+        details_section.add_child(
+            gui.Label("Record visibility, exclusions, and the final review decision.")
+        )
+        details_section.add_child(gui.Label("Visibility"))
+        details_section.add_child(self.visibility)
+        details_section.add_child(gui.Label("Exclusion / review reason"))
+        details_section.add_child(self.ignore_reason)
+        review = gui.Horiz(4)
+        self.approve_button = self._button("Approve block", self._approve)
+        self.reject_button = self._button("Exclude (reason required)", self._reject)
+        review.add_child(self.approve_button)
+        review.add_child(self.reject_button)
+        details_section.add_child(review)
+        details_section.add_child(
+            gui.Label("Exclude keeps a detected non-target for audit; Delete removes the block.")
+        )
+
+        restore = gui.Horiz(4)
+        self.abort_button = self._button("Discard draft / restore prior", self._abort)
+        self.reset_button = self._button("Reset pose to saved", self._reset)
+        restore.add_child(self.abort_button)
+        restore.add_child(self.reset_button)
+        details_section.add_child(restore)
+        details_section.add_child(
+            gui.Label(
+                "Discard removes a new draft or restores an imported prior to pending; "
+                "Reset changes only its pose."
+            )
+        )
+
+        save_section = self._section(WORKFLOW_SECTION_TITLES[4], parent=self.save_footer)
+        save_section.add_child(self.complete)
+        save_section.add_child(gui.Label("Snapshot notes"))
+        save_section.add_child(self.notes)
+        save_section.add_child(self._button("Validate and save snapshot", self._save))
+        save_section.add_child(self.status)
 
     def _layout(self, context) -> None:
         rect = self.window.content_rect
@@ -410,7 +487,10 @@ class AnnotatorWindow:
             rect.x + scene_width, rect.y, view_width - scene_width, rect.height
         )
         self.panel.frame = gui.Rect(
-            rect.get_right() - panel_width, rect.y, panel_width, rect.height
+            rect.get_right() - panel_width, rect.y, panel_width, max(1, rect.height - 210)
+        )
+        self.save_footer.frame = gui.Rect(
+            rect.get_right() - panel_width, rect.get_bottom() - 210, panel_width, 210
         )
 
     def _load_snapshot(self, snapshot: Path) -> None:
@@ -450,6 +530,9 @@ class AnnotatorWindow:
         self.camera = None
         self.candidate_masks = {}
         self.candidate_sources_result = None
+        self.candidate_choices = []
+        self.candidate_combo.clear_items()
+        self.adopt_candidate_button.enabled = False
         self.candidate_status.text = (
             "unavailable: annotation_candidates module not found"
             if compute_candidate_sources is None
@@ -545,6 +628,9 @@ class AnnotatorWindow:
         self.selected_rgb_points = np.empty((0, 3))
         self.selected_mask = None
         self.candidate_sources_result = None
+        self.candidate_choices = []
+        self.candidate_combo.clear_items()
+        self.adopt_candidate_button.enabled = False
         if self.camera is not None and self.rgb is not None:
             try:
                 self.rgb_colors, _ = colorize_world_points(
@@ -586,6 +672,7 @@ class AnnotatorWindow:
 
     def _load_target_widgets(self) -> None:
         target = self.controller.target
+        self._update_selection_actions(target is not None)
         if target is None:
             self.orientation_label.text = "No block selected"
             return
@@ -596,6 +683,23 @@ class AnnotatorWindow:
         self.ignore_reason.text_value = target.ignore_reason or ""
         self.orientation_label.text = orientation_summary(target.rotation)
         self._loading_widgets = False
+
+    def _update_selection_actions(self, has_selection: bool) -> None:
+        """Keep actions that require a block honest about their availability."""
+        for widget in (
+            self.delete_button,
+            self.rotate_button,
+            self.snap_button,
+            self.approve_button,
+            self.reject_button,
+            self.abort_button,
+            self.reset_button,
+            self.visibility,
+            self.ignore_reason,
+            *self.fields,
+            *self.pose_step_buttons,
+        ):
+            widget.enabled = has_selection
 
     def _refresh_scene(self, reset_camera: bool = False) -> None:
         self.scene.scene.clear_geometry()
@@ -659,6 +763,8 @@ class AnnotatorWindow:
             candidates = getattr(self.candidate_sources_result, key, ())
             color = CANDIDATE_SOURCE_COLORS[key]
             for candidate_index, candidate in enumerate(candidates):
+                if candidate.id in self.controller.adopted_candidate_ids:
+                    continue
                 pose = candidate.pose
                 box = o3d.geometry.OrientedBoundingBox(pose.position, pose.rotation, pose.dims)
                 lines = o3d.geometry.LineSet.create_from_oriented_bounding_box(box)
@@ -689,11 +795,56 @@ class AnnotatorWindow:
             self._refresh_scene()
             return
         self.candidate_sources_result = result
+        self._refresh_candidate_choices()
         message = f"Computed candidates for {self.snapshot.name}."
         if result.warnings:
             message += " " + " ".join(result.warnings)
         self.candidate_status.text = message
         self._refresh_scene()
+
+    def _candidate_sources_changed(self) -> None:
+        self._refresh_candidate_choices()
+        self._refresh_scene()
+
+    def _refresh_candidate_choices(self) -> None:
+        """List accepted, visible suggestions once, preferring refined sources."""
+        self.candidate_combo.clear_items()
+        self.candidate_choices = []
+        if self.candidate_sources_result is None:
+            self.adopt_candidate_button.enabled = False
+            return
+        unique: dict[str, tuple[str, int, object]] = {}
+        for key, _label in CANDIDATE_SOURCES:
+            if not self.candidate_checks[key].checked:
+                continue
+            for index, candidate in enumerate(getattr(self.candidate_sources_result, key, ())):
+                if candidate.accepted and candidate.id not in self.controller.adopted_candidate_ids:
+                    # Later/refined sources replace the raw view of the same detector ID.
+                    unique[candidate.id] = (key, index, candidate)
+        self.candidate_choices = list(unique.values())
+        labels = dict(CANDIDATE_SOURCES)
+        for key, _index, candidate in self.candidate_choices:
+            self.candidate_combo.add_item(
+                f"{labels[key]} · {candidate.id} · score {candidate.score:.3f}"
+            )
+        self.adopt_candidate_button.enabled = bool(self.candidate_choices)
+
+    def _adopt_candidate(self) -> None:
+        index = self.candidate_combo.selected_index
+        if index < 0 or index >= len(self.candidate_choices):
+            self.status.text = "Compute and select an accepted auto-fit suggestion first."
+            return
+        _source, _source_index, candidate = self.candidate_choices[index]
+        target_id = self.controller.adopt_candidate(
+            candidate.id, candidate.pose.position, candidate.pose.rotation, candidate.pose.dims
+        )
+        self._refresh_candidate_choices()
+        self._load_document_widgets()
+        self._refresh_scene()
+        self.status.text = (
+            f"Adopted {candidate.id!r} as pending {target_id!r}. "
+            "Adjust its pose and visibility, then approve it."
+        )
 
     def _refresh_rgb(self) -> None:
         if self.rgb is None:
@@ -841,7 +992,7 @@ class AnnotatorWindow:
     def _mark_widget_dirty(self) -> None:
         if not self._loading_widgets:
             self.controller.dirty = True
-            self.status.text = "Unsaved changes — press Ctrl+S or Validate & Save."
+            self.status.text = "Unsaved changes — press Ctrl+S or Validate and save snapshot."
 
     def _step(self, axis: int, sign: int) -> None:
         step = 0.01 if axis < 3 else 1.0
@@ -894,7 +1045,7 @@ class AnnotatorWindow:
     def _reject(self) -> None:
         reason = self.ignore_reason.text_value.strip()
         if not reason:
-            self.status.text = "Enter a reason before rejecting."
+            self.status.text = "Enter an exclusion reason before excluding this block."
             return
         self.controller.set_review("rejected", reason)
         self._load_document_widgets()
@@ -902,6 +1053,7 @@ class AnnotatorWindow:
 
     def _abort(self) -> None:
         self.controller.abort_selected()
+        self._refresh_candidate_choices()
         self._load_document_widgets()
         self._refresh_scene()
 
@@ -921,7 +1073,7 @@ class AnnotatorWindow:
         layout.add_child(
             gui.Label(
                 f"Delete {target_id!r} [{target_status}]?\n"
-                "This affects only the in-memory draft until Validate & Save."
+                "This affects only the in-memory draft until you save the snapshot."
             )
         )
         buttons = gui.Horiz(6)
@@ -944,11 +1096,12 @@ class AnnotatorWindow:
         if not deleted:
             self.status.text = "Selection changed; nothing was deleted."
             return
+        self._refresh_candidate_choices()
         self._load_document_widgets()
         self._refresh_scene()
         self.status.text = (
             f"Deleted {target_id!r} [{target_status}] from the draft. "
-            "Undo is available; use Validate & Save to persist."
+            "Undo is available; save the snapshot to persist."
         )
 
     def _snap_selected(self, seed: np.ndarray | None = None) -> bool:
@@ -981,11 +1134,13 @@ class AnnotatorWindow:
 
     def _undo(self) -> None:
         if self.controller.undo():
+            self._refresh_candidate_choices()
             self._load_document_widgets()
             self._refresh_scene()
 
     def _redo(self) -> None:
         if self.controller.redo():
+            self._refresh_candidate_choices()
             self._load_document_widgets()
             self._refresh_scene()
 

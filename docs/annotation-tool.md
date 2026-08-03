@@ -8,10 +8,13 @@ python tools/annotate_snapshot.py data/registration_snapshots/<snapshot-name>
 ```
 
 The window shows the interactive point cloud and RGB image side by side. The
-right-hand panel is grouped into collapsible sections: **Snapshot**,
-**Candidate sources**, **Blocks**, **Pose**, **Review**, **Block actions**,
-and **History**, followed by the completion checkbox, notes, and Validate &
-Save.
+right-hand panel is scrollable and follows the annotation workflow from top to
+bottom: **1. Preprocess cloud**, **2. Auto-fit candidates**, **3. Add and adjust
+blocks**, **4. Visibility and details**, and **5. Save snapshot**. Snapshot
+navigation stays above those stages, and undo/redo remains available alongside
+the block-adjustment controls. The first four stages scroll independently while
+the save stage remains pinned at the bottom of the panel. Snapshot navigation
+and advanced cloud filters start collapsed to keep the primary workflow compact.
 
 Click a block in RGB to use an existing candidate mask as a 3D selection. To
 use SAM 2.1 point-prompt segmentation instead, install the optional
@@ -36,18 +39,23 @@ away from a snapshot with unsaved changes prompts to save, discard, or cancel,
 exactly as changing the combobox always has. Prev/Next never wrap; they
 disable at the first and last snapshot in `--root`.
 
-## Candidate sources
+## Auto-fit candidates
 
-The **Candidate sources** section compares up to four independent block
+The **Auto-fit candidates** stage compares up to four independent block
 detectors for the current snapshot: **PCL geometry** (raw geometric
 hypotheses), **+ RGB edge prior** (the classical edge-based re-score), **+
 DINO proposer**, and **+ DINO verifier (reranked)** (a learned reranking of
 the geometry hypotheses). Check the sources you want to see, then press
-**Compute candidates** — this never runs automatically on snapshot load or
+**Compute auto-fit suggestions** — this never runs automatically on snapshot load or
 Prev/Next, so navigating stays fast. Each checked source renders as its own
 set of thin wireframe boxes in the 3D view (gray/orange/purple/teal
-respectively) and is purely a read-only comparison overlay: clicking one
-never creates or selects an editable target. The status label reports
+respectively). Choose an accepted fit from the suggestion list and press
+**Adopt selected suggestion as editable block** to create a pending, undoable
+annotation. The adopted overlay disappears, preventing it from being confused
+with the editable block; the remaining suggestions stay available so multiple
+blocks can be adopted from one run. Duplicate detector IDs are listed once,
+preferring the refined source, and adopted IDs cannot be adopted twice. The
+status label reports
 per-source warnings (e.g. a DINO source unavailable because no checkpoint was
 given) instead of silently dropping them.
 
@@ -63,7 +71,8 @@ simply skipped) and are independent of each other and of `--sam-model`.
 RGB masks are dilated slightly for calibration error, then filtered by camera
 depth and 3D connectivity to reject background bleed. Selected LiDAR points are
 highlighted magenta and the fitted box is created as **pending**. Correct it with
-the existing pose controls and explicitly approve it, or use **Abort edit**. If
+the existing pose controls and explicitly approve it, or use **Discard draft /
+restore prior**. If
 SAM is disabled or inference fails, clicking a checked-in candidate mask still
 works. A failed selection or fit never changes the annotation document.
 
@@ -110,13 +119,16 @@ rotation) without moving the box in the world. Like any pose edit it goes
 through the normal undo-tracked path — `Undo` steps back one alternative at a
 time — and leaves review status untouched, so still approve or reject as usual.
 
-`Approve` is the only action that makes a block evaluation ground truth. `Reject`
-requires a reason. `Abort edit` restores the selected prior and returns it to
-pending; `Reset` restores its last recorded state without changing review status.
-An approved block may carry an ignore reason, which keeps it out of scored targets.
-The **Review** section keeps Approve/Reject/Abort/Reset directly above the
-visibility and ignore-reason controls; block-editing actions (add manual draft,
-delete, snap to cloud) live in their own **Block actions** section below it.
+**Approve block** is the only action that makes a block evaluation ground truth.
+**Exclude (reason required)** records a detected non-target for audit and shows it
+in red; it is distinct from **Delete selected block…**, which removes the block
+after confirmation. Delete sits directly below the block list and is disabled
+until a block is selected. **Discard draft / restore prior** removes a new manual
+draft, or restores an imported prior and returns it to pending. **Reset pose to
+saved** changes only the selected block's pose back to its last saved/imported
+pose; it does not change visibility or review status. An approved block may carry
+an exclusion reason, which keeps it out of scored targets. Controls that require
+a selected block are disabled when the selection is empty.
 
 The annotation ROI is always the full captured cloud — there is no manual ROI
 editor. Mark a snapshot complete only after resolving all pending priors; save
@@ -124,4 +136,4 @@ validates that rule, writes schema v2 atomically, and first copies the
 previous manifest to a timestamped `annotations.yaml.backup-*` file.
 Navigation and window close prompt before discarding unsaved changes.
 Approving or editing marks the document unsaved; persist it with `Ctrl`+`S` or
-the **Validate & Save** button.
+the **Validate and save snapshot** button.

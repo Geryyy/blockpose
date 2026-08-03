@@ -15,6 +15,8 @@
     "source=${localWorkspaceFolder}/data,target=/data,type=bind,consistency=cached",
     // Open3D / matplotlib GUI windows
     "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind",
+    // X11 authentication for the mounted display socket.
+    "source=${localEnv:HOME}/.Xauthority,target=/home/ubuntu/.Xauthority,type=bind,readonly",
     // Persistent model and package caches
     "source=blockpose-huggingface-cache,target=/home/ubuntu/.cache/huggingface,type=volume",
     "source=blockpose-torch-cache,target=/home/ubuntu/.cache/torch,type=volume",
@@ -24,6 +26,7 @@
     "BLOCKPOSE_DATASET": "/data",
     // X11/Open3D
     "DISPLAY": "${localEnv:DISPLAY}",
+    "XAUTHORITY": "/home/ubuntu/.Xauthority",
     "QT_X11_NO_MITSHM": "1",
     "XDG_SESSION_TYPE": "x11",
     "GDK_BACKEND": "x11",

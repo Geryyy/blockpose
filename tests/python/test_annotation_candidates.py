@@ -107,6 +107,11 @@ def test_missing_sensor_origin_warns_and_changes_pcl_scores() -> None:
 
 
 def test_rgb_edge_prior_populates_when_rgb_camera_and_tf_are_given() -> None:
+    from blockpose import _core
+
+    if not getattr(_core, "vision_enabled", False):
+        pytest.skip("blockpose._core was built without optional RGB vision support")
+
     sample, params = _scene()
     camera, T_world_camera, rgb = _camera_and_rgb(sample, params, np.random.default_rng(3))
 
@@ -120,7 +125,28 @@ def test_rgb_edge_prior_populates_when_rgb_camera_and_tf_are_given() -> None:
     assert result.dino_verifier_reranked == ()
 
 
+def test_unavailable_rgb_edge_prior_does_not_discard_pcl_candidates(monkeypatch) -> None:
+    """A geometry-only native build must still support PCL annotation."""
+    from blockpose import _core
+
+    sample, params = _scene()
+    camera, T_world_camera, rgb = _camera_and_rgb(sample, params, np.random.default_rng(31))
+    monkeypatch.setattr(_core, "vision_enabled", False)
+
+    result = compute_candidate_sources(sample.points, rgb, T_world_camera, camera)
+
+    assert len(result.pcl) > 0
+    assert result.rgb_edge_prior == ()
+    assert any(
+        "rgb_edge_prior unavailable" in warning
+        and "not enabled" in warning
+        for warning in result.warnings
+    )
+
+
 def test_dino_sources_report_a_clear_warning_without_crashing_when_no_checkpoint_given() -> None:
+    from blockpose import _core
+
     sample, params = _scene()
     camera, T_world_camera, rgb = _camera_and_rgb(sample, params, np.random.default_rng(4))
 
@@ -140,7 +166,11 @@ def test_dino_sources_report_a_clear_warning_without_crashing_when_no_checkpoint
     # Every other source still computed -- one missing optional source never
     # blanks out the rest.
     assert len(result.pcl) > 0
-    assert len(result.rgb_edge_prior) == len(result.pcl)
+    if getattr(_core, "vision_enabled", False):
+        assert len(result.rgb_edge_prior) == len(result.pcl)
+    else:
+        assert result.rgb_edge_prior == ()
+        assert any("rgb_edge_prior unavailable" in warning for warning in result.warnings)
     assert len(result.dino_verifier_geometry_only) == len(result.pcl)
 
 

@@ -25,6 +25,7 @@ from blockpose.annotations import AnnotationTarget, load_annotations
 from blockpose.pose import BLOCK_DIMS, frame_alignments, rotmat_to_quat_xyzw, symmetry_equivalents
 
 VISIBILITIES = ("unknown", "full", "partial", "heavy_occlusion")
+AUTO_FIT_PROVENANCE_PREFIX = "auto_fit:"
 
 
 def full_workspace_roi(points: np.ndarray, margin_m: float = 0.05) -> tuple[np.ndarray, np.ndarray]:
@@ -271,6 +272,15 @@ class AnnotationController:
             return None
         return self.document.targets[self.selected]
 
+    @property
+    def adopted_candidate_ids(self) -> set[str]:
+        """Candidate identities currently represented by undoable document state."""
+        return {
+            target.provenance.removeprefix(AUTO_FIT_PROVENANCE_PREFIX)
+            for target in self.document.targets
+            if target.provenance.startswith(AUTO_FIT_PROVENANCE_PREFIX)
+        }
+
     def _change(self, operation: Callable[[], None]) -> None:
         self._undo.append((copy.deepcopy(self.document), self.selected))
         self._redo.clear()
@@ -453,6 +463,53 @@ class AnnotationController:
         self._change(lambda: self.document.targets.append(target))
         self._baselines[target.id] = copy.deepcopy(target)
         self.selected = len(self.document.targets) - 1
+
+    def adopt_candidate(
+        self,
+        candidate_id: str,
+        position: np.ndarray,
+        rotation: np.ndarray,
+        dimensions: tuple[float, float, float],
+    ) -> str:
+        """Promote an auto-fit suggestion to one undoable pending target."""
+        candidate_id = str(candidate_id).strip()
+        if not candidate_id:
+            raise ValueError("candidate_id must be non-empty")
+        if candidate_id in self.adopted_candidate_ids:
+            raise ValueError(f"candidate {candidate_id!r} is already adopted")
+        position = np.asarray(position, dtype=float)
+        rotation = np.asarray(rotation, dtype=float)
+        dims = tuple(float(value) for value in dimensions)
+        valid = (
+            position.shape == (3,)
+            and rotation.shape == (3, 3)
+            and len(dims) == 3
+            and np.all(np.isfinite(position))
+            and np.all(np.isfinite(rotation))
+            and np.all(np.isfinite(dims))
+            and np.all(np.asarray(dims) > 0)
+            and np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-5)
+            and np.linalg.det(rotation) > 0.0
+        )
+        if not valid:
+            raise ValueError("candidate pose must contain a finite rigid transform and dimensions")
+        used = {target.id for target in self.document.targets}
+        index = 0
+        while f"auto_{index}" in used:
+            index += 1
+        target_id = f"auto_{index}"
+        target = EditableTarget(
+            target_id,
+            position.copy(),
+            canonicalize_block_frame(rotation, dims),
+            dimensions=BLOCK_DIMS,
+            review_status="pending",
+            provenance=f"{AUTO_FIT_PROVENANCE_PREFIX}{candidate_id}",
+        )
+        self._change(lambda: self.document.targets.append(target))
+        self._baselines[target.id] = copy.deepcopy(target)
+        self.selected = len(self.document.targets) - 1
+        return target_id
 
 
 def pick_oriented_box(
