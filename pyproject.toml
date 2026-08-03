@@ -26,6 +26,7 @@ dev = [
     "ipykernel",
     "jupyterlab",
     "plotly>=5.20",
+    "nanobind>=2.13.0",
 ]
 sam = [
     "torch==2.10.0",

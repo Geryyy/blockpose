@@ -71,9 +71,32 @@ nb::dict result_to_dict(const blockpose::core::DetectionResult & detection)
   counts["downsampled_points"] = detection.counts.downsampled_points;
   counts["above_support_points"] = detection.counts.above_support_points;
   counts["proposal_components"] = detection.counts.proposal_components;
+  counts["plane_regions"] = detection.counts.plane_regions;
+  counts["plane_fit_calls"] = detection.counts.plane_fit_calls;
+  counts["plane_search_points"] = detection.counts.plane_search_points;
+  counts["plane_full_points_scored"] = detection.counts.plane_full_points_scored;
+  counts["plane_trials_evaluated"] = detection.counts.plane_trials_evaluated;
+  counts["plane_valid_trials"] = detection.counts.plane_valid_trials;
   counts["raw_hypotheses"] = detection.counts.raw_hypotheses;
+  counts["refinement_candidates"] = detection.counts.refinement_candidates;
   counts["selected_hypotheses"] = detection.counts.selected_hypotheses;
   result["counts"] = std::move(counts);
+
+  nb::list refined_candidate_trace;
+  for (const auto & entry : detection.refined_candidate_trace) {
+    nb::dict trace;
+    trace["id"] = entry.id;
+    trace["source"] = entry.source;
+    trace["lineage_id"] = entry.lineage_id;
+    trace["pose"] = pose_to_dict(entry.pose);
+    trace["score"] = entry.evidence.score;
+    trace["support_points"] = entry.evidence.support_points;
+    trace["selection_score"] = entry.selection_score;
+    trace["stage"] = entry.stage;
+    trace["fate"] = entry.fate;
+    refined_candidate_trace.append(std::move(trace));
+  }
+  result["refined_candidate_trace"] = std::move(refined_candidate_trace);
   return result;
 }
 

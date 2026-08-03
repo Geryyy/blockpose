@@ -69,6 +69,7 @@ endif()
 # core has no Python/nanobind dependency.
 option(BLOCKPOSE_CORE_BUILD_PYTHON "Build the optional nanobind Python extension" OFF)
 if(BLOCKPOSE_CORE_BUILD_PYTHON)
+  find_package(Python COMPONENTS Interpreter Development REQUIRED)
   find_package(nanobind CONFIG REQUIRED)
 
   nanobind_add_module(blockpose_python_core bindings/blockpose_core_module.cpp)
