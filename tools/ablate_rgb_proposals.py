@@ -28,7 +28,8 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "python"))
 
-from blockpose.detection import DetectionParams, SensorContext, detect_blocks_detailed  # noqa: E402
+from blockpose.core_bridge import detect_blocks_detailed_cpp  # noqa: E402
+from blockpose.core_types import DetectionParameters, SensorContext  # noqa: E402
 from blockpose.evaluate import evaluate  # noqa: E402
 from blockpose.io import (  # noqa: E402
     CameraModel,
@@ -140,8 +141,10 @@ def _run_geometry(points: np.ndarray, origin: np.ndarray) -> tuple[list, float, 
         return [], 0.0, "too_few_points"
     started = perf_counter()
     try:
-        result = detect_blocks_detailed(
-            points, DetectionParams(), sensor_context=SensorContext.from_points(origin, points)
+        result = detect_blocks_detailed_cpp(
+            points,
+            params=DetectionParameters(),
+            sensor_context=SensorContext.from_points(origin, points),
         )
     except (RuntimeError, ValueError) as error:
         return [], (perf_counter() - started) * 1000.0, str(error)

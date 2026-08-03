@@ -17,7 +17,14 @@ from typing import Any
 import numpy as np
 import pytest
 from blockpose.core_bridge import detect_blocks_detailed_cpp
-from blockpose.detection import DetectionResult, InferenceTrace, TraceHypothesis
+from blockpose.core_types import (
+    DetectionParameters,
+    DetectionResult,
+    InferenceTrace,
+    Observability,
+    SensorContext,
+    TraceHypothesis,
+)
 from blockpose.pose import BlockPose
 
 _FIXTURE_POSE: dict[str, Any] = {
@@ -84,6 +91,22 @@ _FIXTURE_RESULT: dict[str, Any] = {
             "fate": "post_refinement_nms_rejected",
         },
     ],
+    "timings_ms": {"total": 12.5, "refinement": 3.0},
+    "diagnostics": [{
+        "evidence": {
+            "support_points": 55, "top_height_error_m": 0.02, "score": 0.42,
+            "expected_visible_faces": 2, "covered_visible_faces": 2,
+            "free_space_violations": 0, "supported_rays": 4,
+            "observed_geometry_faces": 2, "incident_rays": 5,
+        },
+        "features": {
+            "support": 0.1375, "height_consistency": 0.9,
+            "visible_face_coverage": 1.0, "free_space_consistency": 1.0,
+            "surface_explained": 0.8,
+        },
+        "observability": "partial", "calibrated_confidence": None,
+        "proposal_scale_m": None, "support_height_m": 0.02,
+    }],
 }
 
 
@@ -139,9 +162,11 @@ def test_detect_blocks_detailed_cpp_default_source_label(fake_core: _FakeCore) -
 def test_detect_blocks_detailed_cpp_stage_counts(fake_core: _FakeCore) -> None:
     result = detect_blocks_detailed_cpp(_points())
     assert result.stage_counts == _FIXTURE_RESULT["counts"]
-    # Deliberately empty gaps, not fabricated data.
-    assert result.diagnostics == []
-    assert result.stage_timings_ms == {}
+    # C++ timings and diagnostics pass through without bridge-side calculation.
+    assert result.diagnostics[0].observability is Observability.PARTIAL
+    assert result.diagnostics[0].features["surface_explained"] == pytest.approx(0.8)
+    assert result.diagnostics[0].calibrated_confidence is None
+    assert result.stage_timings_ms == _FIXTURE_RESULT["timings_ms"]
 
 
 def test_detect_blocks_detailed_cpp_trace_hypotheses(fake_core: _FakeCore) -> None:
@@ -233,6 +258,54 @@ def test_detect_blocks_detailed_cpp_rejects_complex_points(fake_core: _FakeCore)
         detect_blocks_detailed_cpp(bad_points)
 
 
+def test_detect_blocks_detailed_cpp_maps_shared_params_and_rejects_python_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NativeParameters:
+        pass
+
+    calls: list[tuple[object, ...]] = []
+    module = types.ModuleType("blockpose._core")
+    module.DetectionParameters = NativeParameters  # type: ignore[attr-defined]
+    module.discover = lambda *args: (calls.append(args) or _FIXTURE_RESULT)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "blockpose._core", module)
+
+    detect_blocks_detailed_cpp(_points(), params=DetectionParameters(min_score=0.25))
+    assert len(calls[0]) == 2
+    assert calls[0][1].min_score == pytest.approx(0.25)
+
+    with pytest.raises(ValueError, match="multiscale_proposals"):
+        detect_blocks_detailed_cpp(_points(), params={"multiscale_proposals": True})
+    with pytest.raises(ValueError, match="ransac_search_max_points"):
+        detect_blocks_detailed_cpp(_points(), params={"ransac_search_max_points": None})
+
+
+def test_detect_blocks_detailed_cpp_converts_sensor_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NativeParameters:
+        pass
+
+    class NativeContext:
+        @staticmethod
+        def from_arrays(*arrays: object) -> tuple[str, tuple[object, ...]]:
+            return ("native_context", arrays)
+
+    calls: list[tuple[object, ...]] = []
+    module = types.ModuleType("blockpose._core")
+    module.DetectionParameters = NativeParameters  # type: ignore[attr-defined]
+    module.SensorContext = NativeContext  # type: ignore[attr-defined]
+    module.discover = lambda *args: (calls.append(args) or _FIXTURE_RESULT)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "blockpose._core", module)
+    context = SensorContext(
+        origin=np.zeros(3), ray_directions=np.array([[0.0, 0.0, 1.0]]), ranges=np.array([1.0])
+    )
+
+    detect_blocks_detailed_cpp(_points(), sensor_context=context)
+    assert len(calls[0]) == 3
+    assert calls[0][2][0] == "native_context"
+
+
 def test_detect_blocks_detailed_cpp_live_round_trip() -> None:
     """Live round-trip against the real compiled extension, if available.
 
@@ -248,8 +321,22 @@ def test_detect_blocks_detailed_cpp_live_round_trip() -> None:
     result = detect_blocks_detailed_cpp(scene.points, source_label="cpp_core_live")
 
     assert isinstance(result, DetectionResult)
-    assert result.diagnostics == []
-    assert result.stage_timings_ms == {}
+    assert len(result.diagnostics) == len(result.poses)
+    assert all(diagnostic.calibrated_confidence is None for diagnostic in result.diagnostics)
+    assert set(result.stage_timings_ms) == {
+        "voxel_downsample",
+        "ground_model",
+        "proposals",
+        "region_split",
+        "plane_search",
+        "plane_full_score_refit",
+        "hypothesis_generation_evidence",
+        "plane_hypotheses",
+        "selection",
+        "refinement",
+        "total",
+    }
+    assert all(value >= 0.0 for value in result.stage_timings_ms.values())
     assert isinstance(result.stage_counts, dict)
     for pose in result.poses:
         assert isinstance(pose, BlockPose)
@@ -262,3 +349,25 @@ def test_detect_blocks_detailed_cpp_live_round_trip() -> None:
         for hypothesis in result.trace.raw_hypotheses:
             assert isinstance(hypothesis, TraceHypothesis)
             assert isinstance(hypothesis.pose, BlockPose)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("ground_normal_min_z", 1.01, "ground_normal_min_z"),
+        ("local_ground_clearance", -0.01, "local_ground_clearance"),
+        ("cluster_max_size", 1, "invalid zero or non-finite threshold"),
+        ("cluster_max_extent_xy", 0.1, "invalid zero or non-finite threshold"),
+        ("top_plane_angle_deg", 91.0, "plane angles"),
+        ("fk_seed_min_evidence_gain", -0.01, "invalid zero or non-finite threshold"),
+        ("proposal_max_components", 0, "invalid zero or non-finite threshold"),
+    ],
+)
+def test_native_detection_parameters_reject_invalid_scalar_domains(
+    field: str, value: object, message: str,
+) -> None:
+    core = pytest.importorskip("blockpose._core")
+    params = core.DetectionParameters()
+    setattr(params, field, value)
+    with pytest.raises(ValueError, match=message):
+        core.discover(np.empty((0, 3), dtype=np.float64), params)

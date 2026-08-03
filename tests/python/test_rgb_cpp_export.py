@@ -1,8 +1,11 @@
 """Focused contracts for production-trace RGB candidate exports."""
 
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -11,6 +14,10 @@ from blockpose.annotations import AnnotationTarget
 from blockpose.io import CameraModel
 from blockpose.pose import BlockPose
 from PIL import Image
+
+REPO_ROOT = Path(__file__).parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from experiments.rgb_candidate_prior import gates, render
 from experiments.rgb_candidate_prior.candidates import CandidateSetParams

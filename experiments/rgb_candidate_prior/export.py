@@ -27,11 +27,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "python"))
 
 from blockpose.annotations import load_annotations  # noqa: E402
-from blockpose.detection import (  # noqa: E402
-    DetectionParams,
-    SensorContext,
-    detect_blocks_detailed,
-)
+from blockpose.core_bridge import detect_blocks_detailed_cpp  # noqa: E402
+from blockpose.core_types import DetectionParameters, SensorContext  # noqa: E402
 from blockpose.io import (  # noqa: E402
     load_camera_model,
     load_rgb,
@@ -62,11 +59,10 @@ def _evaluation_targets(snapshot: Path):
 
 def _raw_candidates(snapshot: Path, T_world_cloud: np.ndarray) -> list[tuple[str, object]]:
     points, _ = load_snapshot(snapshot, T_world_cloud=T_world_cloud)
-    result = detect_blocks_detailed(
+    result = detect_blocks_detailed_cpp(
         points,
-        DetectionParams(),
+        params=DetectionParameters(),
         sensor_context=SensorContext.from_points(T_world_cloud[:3, 3], points),
-        collect_trace=True,
     )
     assert result.trace is not None
     return [(h.id, h.pose) for h in result.trace.raw_hypotheses]

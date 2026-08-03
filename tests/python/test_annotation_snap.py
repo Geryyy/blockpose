@@ -190,3 +190,15 @@ def test_invalid_snap_parameters_fail_without_computation() -> None:
         result = snap_block_to_cloud(points, np.ones(3), params)
         assert not result.success
         assert "must" in result.reason
+
+
+def test_snap_discards_nonfinite_depth_outliers() -> None:
+    center = np.array([2.1, -0.7, 0.8])
+    points, _ = _cuboid_surface(center, (0.9, 0.6, 0.6), 27.0)
+    contaminated = np.vstack(
+        [points, np.array([[np.nan, 0.0, 0.0], [np.inf, 0.0, 0.0]])]
+    )
+    result = snap_block_to_cloud(contaminated, points[20])
+    assert result.success, result.reason
+    assert result.position is not None
+    assert np.linalg.norm(result.position - center) < 0.045

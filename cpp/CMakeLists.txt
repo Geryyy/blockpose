@@ -52,7 +52,7 @@ if(BLOCKPOSE_CORE_BUILD_TESTING)
   target_link_libraries(blockpose_core_smoke_test PRIVATE blockpose::core)
   add_test(NAME blockpose_core_smoke_test COMMAND blockpose_core_smoke_test)
 
-  foreach(name geometry proposals pipeline refine evidence gripper_self_filter)
+  foreach(name geometry proposals pipeline refine evidence gripper_self_filter annotation_snap)
     add_blockpose_core_test(blockpose_core_${name}_test)
   endforeach()
 
@@ -74,6 +74,10 @@ if(BLOCKPOSE_CORE_BUILD_PYTHON)
 
   nanobind_add_module(blockpose_python_core bindings/blockpose_core_module.cpp)
   target_link_libraries(blockpose_python_core PRIVATE blockpose::core)
+  if(BLOCKPOSE_VISION_ENABLED)
+    target_link_libraries(blockpose_python_core PRIVATE blockpose::vision)
+    target_compile_definitions(blockpose_python_core PRIVATE BLOCKPOSE_CORE_WITH_VISION=1)
+  endif()
   target_compile_definitions(blockpose_python_core PRIVATE
     BLOCKPOSE_CORE_VERSION="${PROJECT_VERSION}")
   set_target_properties(blockpose_python_core PROPERTIES OUTPUT_NAME "_core")

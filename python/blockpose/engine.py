@@ -3,21 +3,15 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import Enum
 
 import numpy as np
 
-from blockpose.detection import DetectionParams, SensorContext, detect_blocks_detailed
+from blockpose.core_bridge import detect_blocks_detailed_cpp
+from blockpose.core_types import DetectionParameters, SensorContext
 from blockpose.frames import FrameBurst, PointFrame
-from blockpose.plan_prior import detect_with_plan
 from blockpose.pose import BlockPose
-from blockpose.verify_placed import (
-    PlacedObservability,
-    PlacedStatus,
-    VerifyPlacedParams,
-    verify_placed_blocks,
-)
 
 
 class QueryStatus(str, Enum):
@@ -42,6 +36,7 @@ class QueryErrorCode(str, Enum):
     EMPTY_ROI = "empty_roi"
     TIMEOUT = "timeout"
     INSUFFICIENT_OBSERVABILITY = "insufficient_observability"
+    UNSUPPORTED_MODE = "unsupported_mode"
 
 
 @dataclass(frozen=True)
@@ -77,16 +72,16 @@ FrameInput = PointFrame | FrameBurst | np.ndarray
 
 
 class HybridBlockDetector:
-    """Stable facade over the current blind and plan-prior Python prototypes."""
+    """Stable facade over C++ free discovery; placed modes await C++ ports."""
 
     def __init__(
         self,
-        params: DetectionParams | None = None,
+        params: DetectionParameters | None = None,
         *,
         timeout_ms: float = 500.0,
         verify_placed_v1: bool = False,
     ):
-        self.params = params or DetectionParams(min_score=0.4)
+        self.params = params or DetectionParameters(min_score=0.4)
         self.timeout_ms = float(timeout_ms)
         if not np.isfinite(self.timeout_ms) or self.timeout_ms <= 0:
             raise ValueError("timeout_ms must be positive and finite")
@@ -238,7 +233,7 @@ class HybridBlockDetector:
         if not len(points):
             return self._failure(started, QueryErrorCode.EMPTY_ROI, "no points in workspace ROI")
         context = self._sensor_context(points, origin, misses, ray_origins, miss_origins)
-        result = detect_blocks_detailed(points, self.params, sensor_context=context)
+        result = detect_blocks_detailed_cpp(points, params=self.params, sensor_context=context)
         blocks = []
         for pose, diag in zip(result.poses, result.diagnostics, strict=True):
             obs = {
@@ -264,147 +259,20 @@ class HybridBlockDetector:
 
     def verify_placed(self, source: FrameInput, expected_blocks: list[BlockPose]) -> QueryResult:
         started = time.perf_counter()
-        try:
-            points, unavailable, origin, misses, ray_origins, miss_origins = self._points(
-                source, deadline_s=started + self.timeout_ms / 1000.0
-            )
-        except TimeoutError as exc:
-            return self._failure(started, QueryErrorCode.TIMEOUT, str(exc))
-        except ValueError as exc:
-            code = (
-                QueryErrorCode.UNAVAILABLE_TRANSFORM
-                if isinstance(source, (PointFrame, FrameBurst))
-                else QueryErrorCode.INVALID_INPUT
-            )
-            return self._failure(started, code, str(exc))
-        if not expected_blocks:
-            return self._finish(started, [], unavailable)
-        try:
-            self._validate_poses(expected_blocks)
-        except ValueError as exc:
-            return self._failure(started, QueryErrorCode.INVALID_INPUT, str(exc))
-        context = self._sensor_context(points, origin, misses, ray_origins, miss_origins)
-        if self.verify_placed_v1:
-            verified = verify_placed_blocks(
-                points,
-                expected_blocks,
-                sensor_context=context,
-                params=VerifyPlacedParams(
-                    max_translation_m=0.10,
-                    max_rotation_deg=10.0,
-                    min_support_points=self.params.refine_min_points,
-                ),
-            )
-            status_map = {
-                PlacedStatus.CONFIRMED: QueryStatus.CONFIRMED,
-                PlacedStatus.DEVIATED: QueryStatus.DEVIATED,
-                PlacedStatus.MISSING: QueryStatus.MISSING,
-                PlacedStatus.NOT_OBSERVABLE: QueryStatus.NOT_OBSERVABLE,
-            }
-            observability_map = {
-                PlacedObservability.WELL_CONSTRAINED: ResultObservability.WELL_CONSTRAINED,
-                PlacedObservability.PARTIALLY_CONSTRAINED: (
-                    ResultObservability.PARTIALLY_CONSTRAINED
-                ),
-                PlacedObservability.SYMMETRY_AMBIGUOUS: (ResultObservability.SYMMETRY_AMBIGUOUS),
-                PlacedObservability.LAYOUT_INFERRED: ResultObservability.LAYOUT_INFERRED,
-                PlacedObservability.UNOBSERVABLE: ResultObservability.UNOBSERVABLE,
-            }
-            blocks = [
-                BlockResult(
-                    result.pose,
-                    result.pose.dims,
-                    result.covariance,
-                    None,
-                    observability_map[result.observability],
-                    result.unconstrained_directions,
-                    "verify_placed_v1",
-                    {
-                        "support_points": float(result.support_points),
-                        "free_space_rays": float(result.free_space_rays),
-                        **(
-                            {"residual_rms_m": float(result.residual_rms_m)}
-                            if result.residual_rms_m is not None
-                            else {}
-                        ),
-                    },
-                    status_map[result.status],
-                    result.translation_from_plan_m,
-                    {
-                        **result.diagnostics,
-                        "rotation_from_plan_deg": result.rotation_from_plan_deg,
-                        "visible_faces": result.visible_faces,
-                        "occluded_faces": result.occluded_faces,
-                    },
-                )
-                for result in verified
-            ]
-            return self._finish(started, blocks, unavailable)
-        results = detect_with_plan(points, expected_blocks, self.params, sensor_context=context)
-        blocks = []
-        for result in results:
-            observable = (
-                result.refined
-                and result.support_points >= self.params.refine_min_points
-                and result.score >= self.params.min_score
-            )
-            status = QueryStatus.NOT_OBSERVABLE
-            observability = ResultObservability.UNOBSERVABLE
-            if observable:
-                status = (
-                    QueryStatus.CONFIRMED
-                    if result.translation_from_plan <= 0.05
-                    else QueryStatus.DEVIATED
-                )
-                observability = ResultObservability.PARTIALLY_CONSTRAINED
-            elif (
-                context is not None
-                and result.support_points == 0
-                and result.incident_rays > 0
-                and result.free_space_violations > 0
-            ):
-                status = QueryStatus.MISSING
-            blocks.append(
-                BlockResult(
-                    result.pose,
-                    result.pose.dims,
-                    None,
-                    None,
-                    observability,
-                    () if observable else ("x", "y", "z", "roll", "pitch", "yaw"),
-                    "plan_prior",
-                    result.features,
-                    status,
-                    result.translation_from_plan,
-                    {
-                        "support_points": result.support_points,
-                        "refined": result.refined,
-                        "raw_score": result.score,
-                        "incident_rays": result.incident_rays,
-                    },
-                )
-            )
-        return self._finish(started, blocks, unavailable)
-
-    def estimate_gripped(self, source: FrameInput, grasp_prior: BlockPose) -> QueryResult:
-        result = self.verify_placed(source, [grasp_prior])
-        if not result.blocks:
-            return result
-        block = result.blocks[0]
-        # Gripper geometry is not yet modelled. Be explicit: an unsupported prior
-        # is not a measurement, and a refined pose remains only partially constrained.
-        block = replace(
-            block,
-            source="grasp_prior",
-            status=(
-                QueryStatus.DEVIATED
-                if block.status == QueryStatus.DEVIATED
-                else QueryStatus.CONFIRMED
-                if block.status == QueryStatus.CONFIRMED
-                else QueryStatus.NOT_OBSERVABLE
-            ),
+        # Placed verification and wall-plan priors were Python prototypes. They
+        # are intentionally unavailable until their native C++ equivalents land.
+        return self._failure(
+            started,
+            QueryErrorCode.UNSUPPORTED_MODE,
+            "verify_placed is unavailable: its Python implementation was removed; "
+            "use detect_free until the C++ placed-verification API is available",
         )
-        return replace(result, blocks=(block,))
+    def estimate_gripped(self, source: FrameInput, grasp_prior: BlockPose) -> QueryResult:
+        return self._failure(
+            time.perf_counter(),
+            QueryErrorCode.UNSUPPORTED_MODE,
+            "estimate_gripped is unavailable until the C++ placed/gripper API is available",
+        )
 
     def _finish(
         self, started: float, blocks: list[BlockResult], unavailable: tuple[str, ...]

@@ -31,15 +31,10 @@ from pathlib import Path
 
 import numpy as np
 
-from blockpose.detection import (
-    DetectionParams,
-    SensorContext,
-    TraceHypothesis,
-    detect_blocks_detailed,
-)
+from blockpose.core_bridge import detect_blocks_detailed_cpp
+from blockpose.core_types import DetectionParameters, SensorContext, TraceHypothesis
 from blockpose.io import CameraModel
 from blockpose.pose import BlockPose
-from blockpose.rgb_edge_prior import build_edge_map, score_projected_cuboid
 from blockpose.rgb_proposals import (
     DinoRegionProposalProvider,
     MaskAssociationParams,
@@ -85,7 +80,7 @@ def _run_detection(
     `sensor_origin` (the LiDAR's world position, `tf.T_world_cloud[:3, 3]`)
     builds a real `SensorContext` exactly like `tools/ablate_rgb_*.py` does,
     so free-space/visible-face/ray-explained-surface evidence terms (0.60 of
-    the total score weight, see `detection.py::_SCORE_WEIGHTS`) are actually
+    the total score weight, formerly in `detection.py::_SCORE_WEIGHTS`) are
     computed instead of hard-zeroed. Falls back to `sensor_context=None` only
     when no origin is available at all -- callers should always pass one.
     """
@@ -95,8 +90,8 @@ def _run_detection(
         SensorContext.from_points(sensor_origin, points) if sensor_origin is not None else None
     )
     try:
-        result = detect_blocks_detailed(
-            points, DetectionParams(), sensor_context=sensor_context, collect_trace=True
+        result = detect_blocks_detailed_cpp(
+            points, params=DetectionParameters(), sensor_context=sensor_context
         )
     except (RuntimeError, ValueError):
         return ()
@@ -117,11 +112,27 @@ def _rgb_edge_prior_candidates(
     T_world_camera: np.ndarray,
     camera: CameraModel,
 ) -> tuple[SourceCandidate, ...]:
-    edge_map = build_edge_map(rgb)
+    from blockpose import _core
+    if not getattr(_core, "vision_enabled", False):
+        raise RuntimeError("C++ RGB edge prior is not enabled in blockpose._core")
+    gray = np.ascontiguousarray(
+        np.mean(np.asarray(rgb, dtype=np.float64)[..., :3], axis=2).clip(0, 255), dtype=np.uint8
+    )
+    scorer = _core.RgbEdgePrior(
+        gray, np.ascontiguousarray(camera.K, dtype=np.float64),
+        np.ascontiguousarray(camera.D, dtype=np.float64),
+        np.ascontiguousarray(T_world_camera, dtype=np.float64),
+    )
     candidates = []
     for h in raw_hypotheses:
-        score = score_projected_cuboid(edge_map, h.pose, T_world_camera, camera)
-        candidates.append(SourceCandidate(h.id, h.pose, score.score, score.evidence, score.reason))
+        score = scorer.score(
+            np.ascontiguousarray(h.pose.position, dtype=np.float64),
+            np.ascontiguousarray(h.pose.rotation, dtype=np.float64),
+            np.ascontiguousarray(h.pose.dims, dtype=np.float64),
+        )
+        candidates.append(
+            SourceCandidate(h.id, h.pose, score["score"], score["available"], "native_rgb")
+        )
     return tuple(candidates)
 
 

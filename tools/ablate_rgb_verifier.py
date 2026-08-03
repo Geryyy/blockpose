@@ -22,14 +22,9 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "python"))
 sys.path.insert(0, str(REPO_ROOT))  # so `experiments.rgb_candidate_prior.render` resolves too
-sys.path.insert(0, str(REPO_ROOT / "tools"))  # so `ablate_rgb_edge_prior` resolves too
-
-from ablate_rgb_edge_prior import _first_correct_rank, _load_targets  # noqa: E402
-from blockpose.detection import (  # noqa: E402
-    DetectionParams,
-    SensorContext,
-    detect_blocks_detailed,
-)
+from blockpose.annotations import load_annotations  # noqa: E402
+from blockpose.core_bridge import detect_blocks_detailed_cpp  # noqa: E402
+from blockpose.core_types import DetectionParameters, SensorContext  # noqa: E402
 from blockpose.evaluate import rotation_error_deg, translation_error  # noqa: E402
 from blockpose.io import (  # noqa: E402
     CameraModel,
@@ -59,6 +54,18 @@ DEFAULT_SNAPSHOTS = REPO_ROOT / "data" / "registration_snapshots"
 DEFAULT_CALIBRATION = REPO_ROOT / "config" / "calibration" / "calib_blackfly_to_seyond.yaml"
 CROP_MARGIN_FRAC = 0.2
 CROP_OUT_SIZE = 224
+
+
+def _load_targets(snapshot: Path):
+    """Load approved annotation targets after inference-only tooling setup."""
+    path = snapshot / "annotations.yaml"
+    if not path.exists():
+        return ()
+    return tuple(target for target in load_annotations(path).targets if target.is_evaluation_target)
+
+
+def _first_correct_rank(candidates: list[dict]) -> int | None:
+    return next((index for index, candidate in enumerate(candidates) if candidate["correct"]), None)
 
 
 def _rank(
@@ -108,11 +115,10 @@ def evaluate_snapshot(
         return {"snapshot": snapshot.name, "status": "skipped_no_complete_annotations"}
     tf = load_tf_snapshot(snapshot / "tf.yaml")
     points, _ = load_snapshot(snapshot, T_world_cloud=tf.T_world_cloud)
-    result = detect_blocks_detailed(
+    result = detect_blocks_detailed_cpp(
         points,
-        DetectionParams(),
+        params=DetectionParameters(),
         sensor_context=SensorContext.from_points(tf.T_world_cloud[:3, 3], points),
-        collect_trace=True,
     )
     assert result.trace is not None
     rgb = load_rgb(snapshot / "rgb.png")

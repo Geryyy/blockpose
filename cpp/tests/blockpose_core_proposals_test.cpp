@@ -14,4 +14,21 @@ TEST(DetectorCoreProposals, SatNmsKeepsTouchingAndRejectsInterpenetration) {Pose
 
 TEST(DetectorCoreProposals, SpatialGridHandlesBoundedDenseStressDeterministically) {Points cloud; for(int group=0;group<80;++group) for(int x=0;x<8;++x) for(int y=0;y<5;++y) cloud.emplace_back(group*.25+x*.008,y*.008,.3+(x%2)*.008); DetectionParameters params;params.dbscan_eps=.025;params.dbscan_min_points=4;params.cluster_min_size=10;params.cluster_max_size=100;params.cluster_min_extent_xy=.02;params.region_max_extent_xy=.2;params.cluster_min_extent_z=.001;params.cluster_max_extent_z=.1;params.proposal_max_components=80;const auto first=dbscan_proposals(cloud,params);auto reversed=cloud;std::reverse(reversed.begin(),reversed.end());const auto second=dbscan_proposals(reversed,params);ASSERT_EQ(first.size(),80U);ASSERT_EQ(second.size(),first.size());for(std::size_t i=0;i<first.size();++i){EXPECT_EQ(first[i].size(),40U);EXPECT_EQ(first[i],second[i]);}}
 
+TEST(DetectorCoreProposals, SensorRangeScalesProposalAndPlaneThresholds) {
+  DetectionParameters params;
+  params.cluster_min_size = 50U;
+  params.min_inliers = 50U;
+  params.cluster_max_size = 100U;
+  Points far_component;
+  for (int x = 0; x < 4; ++x) for (int y = 0; y < 3; ++y) {
+    far_component.emplace_back(20.0 + x * .1, y * .1, .3);
+  }
+  SensorContext context; context.origin = Point::Zero();
+  const auto local = density_scaled_parameters(params, far_component, &context);
+  // 50 * .25 = 12.5: NumPy's round uses ties-to-even, so this is 12.
+  EXPECT_EQ(local.cluster_min_size, 12U);
+  EXPECT_EQ(local.min_inliers, 12U);
+  EXPECT_EQ(density_scaled_parameters(params, far_component, nullptr).min_inliers, 50U);
+}
+
 }}  // namespace blockpose::core

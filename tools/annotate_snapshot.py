@@ -40,20 +40,17 @@ from blockpose.annotation_tool import (  # noqa: E402
     save_annotations_atomic,
     snapshot_selection_index,
 )
-from blockpose.detection import DetectionParams, remove_ground  # noqa: E402
 from blockpose.io import (  # noqa: E402
     load_camera_model,
     load_rgb,
     load_snapshot,
     load_tf_snapshot,
 )
-from blockpose.pose import BlockPose  # noqa: E402
 from blockpose.projection import (  # noqa: E402
     colorize_world_points,
     project_points,
     world_to_camera,
 )
-from blockpose.refine import assign_points  # noqa: E402
 from blockpose.rgb_annotation import (  # noqa: E402
     AsyncSegmentationWorker,
     MaskSelectionParams,
@@ -127,11 +124,16 @@ def discover_snapshot_dirs(root: Path) -> list[Path]:
 
 
 def cuboid_corners(position: np.ndarray, rotation: np.ndarray, dimensions) -> np.ndarray:
-    return np.asarray(position, dtype=float) + (BOX_SIGNS * (np.asarray(dimensions) / 2.0)) @ np.asarray(rotation, dtype=float).T
+    offsets = BOX_SIGNS * (np.asarray(dimensions) / 2.0)
+    return np.asarray(position, dtype=float) + offsets @ np.asarray(rotation, dtype=float).T
 
 
 def draw_projected_edges(
-    image: np.ndarray, corners_world: np.ndarray, T_world_camera: np.ndarray, camera, color: np.ndarray
+    image: np.ndarray,
+    corners_world: np.ndarray,
+    T_world_camera: np.ndarray,
+    camera,
+    color: np.ndarray,
 ) -> None:
     """Draw in-frame edges of a world-frame cuboid without another GUI dependency."""
     camera_points = world_to_camera(corners_world, T_world_camera)
@@ -141,7 +143,13 @@ def draw_projected_edges(
         if not (in_front[first] and in_front[second]):
             continue
         start, end = uv[first], uv[second]
-        if max(start[0], end[0]) < 0 or min(start[0], end[0]) >= width or max(start[1], end[1]) < 0 or min(start[1], end[1]) >= height:
+        outside_image = (
+            max(start[0], end[0]) < 0
+            or min(start[0], end[0]) >= width
+            or max(start[1], end[1]) < 0
+            or min(start[1], end[1]) >= height
+        )
+        if outside_image:
             continue
         start = np.clip(np.rint(start).astype(int), [0, 0], [width - 1, height - 1])
         end = np.clip(np.rint(end).astype(int), [0, 0], [width - 1, height - 1])
@@ -214,7 +222,10 @@ class AnnotatorWindow:
         self.rgb_toggle.checked = True
         self.rgb_toggle.set_on_checked(lambda _checked: self._refresh_scene())
         self.remove_ground_toggle = gui.Checkbox("Remove ground")
-        self.remove_ground_toggle.checked = True
+        # Ground removal was a deleted Python detector stage. Keep the UI
+        # control visibly unavailable until the native preprocessing API lands.
+        self.remove_ground_toggle.checked = False
+        self.remove_ground_toggle.enabled = False
         self.remove_ground_toggle.set_on_checked(lambda _checked: self._on_point_filters_changed())
         self.remove_background_toggle = gui.Checkbox("Remove background (range cutoff)")
         self.remove_background_toggle.checked = True
@@ -451,8 +462,6 @@ class AnnotatorWindow:
         `_load_snapshot`), independent of these display/candidate filters.
         """
         points = self.raw_points
-        if self.remove_ground_toggle.checked and len(points) >= 3:
-            points, _ = remove_ground(points, DetectionParams())
         if self.remove_background_toggle.checked and self.T_world_cloud is not None:
             points = remove_background_by_range(
                 points, self.T_world_cloud[:3, 3], self.max_range_field.double_value
@@ -531,23 +540,6 @@ class AnnotatorWindow:
             selected_material.shader = "defaultUnlit"
             selected_material.point_size = 6.0
             self.scene.scene.add_geometry("rgb-mask-points", selected, selected_material)
-        selected_target = self.controller.target
-        if selected_target is not None:
-            selected_pose = BlockPose(
-                position=selected_target.position,
-                rotation=selected_target.rotation,
-                dims=selected_target.dimensions,
-            )
-            assigned = assign_points(
-                [selected_pose], self.points, None, band=SELECTED_BLOCK_POINTS_BAND_M
-            )[0]
-            if len(assigned):
-                block_points = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(assigned))
-                block_points.paint_uniform_color(SELECTED_BLOCK_POINTS_COLOR)
-                block_material = rendering.MaterialRecord()
-                block_material.shader = "defaultUnlit"
-                block_material.point_size = 5.0
-                self.scene.scene.add_geometry("selected-block-points", block_points, block_material)
         for index, target in enumerate(self.controller.document.targets):
             box = o3d.geometry.OrientedBoundingBox(
                 target.position, target.rotation, target.dimensions

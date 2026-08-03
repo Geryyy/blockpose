@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <chrono>
 #include <limits>
 #include <map>
 #include <random>
@@ -20,7 +21,12 @@ namespace blockpose::core
 using Point = Eigen::Vector3d;
 using Points = std::vector<Point>;
 
-struct PlaneFitDiagnostics {std::size_t input_points{0}, search_points{0}, trials_evaluated{0}, valid_trials{0};};
+struct PlaneFitDiagnostics {
+  std::size_t input_points{0}, search_points{0}, trials_evaluated{0}, valid_trials{0};
+  // Search includes canonicalization/subsampling and RANSAC trial scoring;
+  // full_score_refit covers only the all-point consensus and least-squares pass.
+  double search_ms{0.0}, full_score_refit_ms{0.0};
+};
 struct PlaneModel {Point normal{Point::UnitZ()}; double offset{0.0};};
 struct PlaneFitResult {PlaneModel plane; std::vector<std::size_t> inlier_indices; PlaneFitDiagnostics diagnostics;};
 struct RansacParameters {double distance_threshold{0.02}; std::size_t num_iterations{1000}; std::uint64_t seed{0}; double confidence{0.9999}; std::size_t max_search_points{0};};
@@ -123,6 +129,7 @@ inline PlaneFitResult segment_plane(const Points & input, const RansacParameters
   if (input.size() < 3U) {throw std::invalid_argument("plane fitting needs at least 3 points");}
   if (!std::isfinite(params.distance_threshold) || params.distance_threshold <= 0.0 || params.num_iterations == 0U) {throw std::invalid_argument("invalid RANSAC parameters");}
   if (!std::isfinite(params.confidence) || params.confidence <= 0.0 || params.confidence >= 1.0) {throw std::invalid_argument("confidence must be in (0,1)");}
+  const auto search_started = std::chrono::steady_clock::now();
   const Points points = canonical_order(input); Points search = points;
   if (params.max_search_points >= 3U && points.size() > params.max_search_points) {
     search.clear(); search.reserve(params.max_search_points);
@@ -146,6 +153,8 @@ inline PlaneFitResult segment_plane(const Points & input, const RansacParameters
       if (denominator < 0.0) {required = std::min(params.num_iterations, trial + 1U + static_cast<std::size_t>(std::ceil(std::log1p(-params.confidence) / denominator)));}
     }
   }
+  result.diagnostics.search_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - search_started).count();
+  const auto full_score_refit_started = std::chrono::steady_clock::now();
   if (best_count < 3U) {throw std::runtime_error("RANSAC found no plane");}
   for (std::size_t i = 0; i < points.size(); ++i) {if (std::abs(result.plane.normal.dot(points[i]) + result.plane.offset) <= params.distance_threshold) {result.inlier_indices.push_back(i);}}
   if (result.inlier_indices.size() < 3U) {throw std::runtime_error("RANSAC full score has fewer than 3 inliers");}
@@ -154,7 +163,9 @@ inline PlaneFitResult segment_plane(const Points & input, const RansacParameters
   Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(covariance); if (solver.info() != Eigen::Success) {throw std::runtime_error("least-squares plane refit failed");}
   Point normal = solver.eigenvectors().col(0); if (normal.dot(result.plane.normal) < 0.0) {normal = -normal;} const PlaneModel refit{normal, -normal.dot(centroid)};
   std::vector<std::size_t> refined; for (std::size_t i = 0; i < points.size(); ++i) {if (std::abs(refit.normal.dot(points[i]) + refit.offset) <= params.distance_threshold) {refined.push_back(i);}}
-  if (refined.size() >= result.inlier_indices.size()) {result.plane = refit; result.inlier_indices = std::move(refined);} return result;
+  if (refined.size() >= result.inlier_indices.size()) {result.plane = refit; result.inlier_indices = std::move(refined);}
+  result.diagnostics.full_score_refit_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - full_score_refit_started).count();
+  return result;
 }
 
 inline LocalGroundModel make_local_ground_model(const Points & points, const GroundPlane & plane, const GroundParameters & params)
@@ -176,6 +187,8 @@ inline GroundRemovalResult remove_ground(
   const Points & points, const GroundParameters & params,
   const Points * fitting_points = nullptr)
 {
+  if (!std::isfinite(params.local_cell_size) || params.local_cell_size <= 0.0) {throw std::invalid_argument("local_cell_size must be positive");}
+  if (!std::isfinite(params.local_clearance) || params.local_clearance < 0.0) {throw std::invalid_argument("local_clearance must be non-negative");}
   if (points.empty()) {return {};}
   std::vector<double> zs; for (const auto & p : points) {zs.push_back(p.z());}
   const auto fallback = [&]() {GroundRemovalResult output; output.ground.normal = Point::UnitZ(); output.ground.offset = -percentile_linear(zs, params.z_percentile); output.ground.source = "percentile"; output.ground.cell_size = params.local_cell_size; for (const auto & p : points) {if (output.ground.height(p) >= params.thickness) {output.above_ground.push_back(p);}} return output;};

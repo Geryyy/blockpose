@@ -33,6 +33,41 @@ struct DetectionParameters
   bool refine_preserve_top_axis_if_gravity_worsens{false};
   double min_score{0.0}, fk_seed_min_evidence_gain{0.15}; bool fit_wide_proposals{false}; std::size_t conflict_alternatives{1}, proposal_max_components{8};
 };
+
+// Match the prototype's range-density allowance.  A sparse far-range return
+// must not be rejected solely because it has fewer samples than the same
+// object at the reference 5 m range.  Keep this beside DetectionParameters so
+// both proposal gating and downstream plane fitting use the exact same values.
+inline DetectionParameters density_scaled_parameters(
+  const DetectionParameters & params, const Points & points,
+  const SensorContext * sensor_context)
+{
+  if (sensor_context == nullptr || points.empty()) {return params;}
+  std::vector<double> ranges;
+  ranges.reserve(points.size());
+  for (const auto & point : points) {ranges.push_back((point - sensor_context->origin).norm());}
+  std::sort(ranges.begin(), ranges.end());
+  const std::size_t middle = ranges.size() / 2U;
+  const double median_range = ranges.size() % 2U == 0U
+    ? (ranges[middle - 1U] + ranges[middle]) * .5 : ranges[middle];
+  const double density_scale = std::clamp(
+    std::pow(5.0 / std::max(median_range, 1.0), 2.0), 0.25, 1.0);
+  const auto scaled_count = [density_scale](std::size_t value) {
+    // Python/NumPy round is ties-to-even, unlike std::round's ties-away-from-
+    // zero behavior. Implement it directly so ambient floating-point rounding
+    // mode cannot alter the detector contract.
+    const double scaled = static_cast<double>(value) * density_scale;
+    const double lower = std::floor(scaled);
+    const double fraction = scaled - lower;
+    const double rounded = fraction < .5 ? lower : fraction > .5 ? lower + 1.0 :
+      (static_cast<std::size_t>(lower) % 2U == 0U ? lower : lower + 1.0);
+    return std::max<std::size_t>(12U, static_cast<std::size_t>(rounded));
+  };
+  DetectionParameters scaled = params;
+  scaled.min_inliers = scaled_count(params.min_inliers);
+  scaled.cluster_min_size = scaled_count(params.cluster_min_size);
+  return scaled;
+}
 struct PlanePatch {Point normal{Point::UnitZ()}; Point centroid{Point::Zero()}; Points points; double residual_mad{0.0};};
 struct Pose {Point position{Point::Zero()}; Eigen::Matrix3d rotation{Eigen::Matrix3d::Identity()}; std::array<double, 3> dims{{0.9, 0.6, 0.6}}; double confidence{1.0};};
 struct HypothesisEvidence {std::size_t support_points{0}; double top_height_error_m{0.0}, score{0.0}; std::size_t expected_visible_faces{0}, covered_visible_faces{0}, free_space_violations{0}, supported_rays{0}, observed_geometry_faces{0}, incident_rays{0};};
@@ -126,7 +161,11 @@ struct CuboidHypothesis {
 // one of "ransac_exception", "ransac_below_min_inliers", "max_planes_reached",
 // "remaining_below_min_inliers" (region never had min_inliers points to begin
 // a search), or the sentinel "not_run" if fit_planes itself was never called.
-struct PlaneFitCounts {std::size_t calls{0}, search_points{0}, full_points_scored{0}, trials_evaluated{0}, valid_trials{0}, leftover_points{0}; std::string stop_reason{"not_run"};};
+struct PlaneFitCounts {
+  std::size_t calls{0}, search_points{0}, full_points_scored{0}, trials_evaluated{0}, valid_trials{0}, leftover_points{0};
+  double search_ms{0.0}, full_score_refit_ms{0.0};
+  std::string stop_reason{"not_run"};
+};
 
 // Swapped horizontal dimensions describe the same physical cuboid; rotate its
 // local frame into the package's canonical 0.9 x 0.6 x 0.6 convention before
@@ -220,14 +259,16 @@ inline std::vector<Points> dbscan_label_components(const Points & input, const D
 
 inline std::vector<Points> dbscan_proposals(
   const Points & input, const DetectionParameters & params, const GroundPlane * ground = nullptr,
-  std::vector<ProposalComponentDiagnostics> * diagnostics_out = nullptr)
+  std::vector<ProposalComponentDiagnostics> * diagnostics_out = nullptr,
+  const SensorContext * sensor_context = nullptr)
 {
   std::vector<Points> components = dbscan_label_components(input, params);
   if (diagnostics_out != nullptr) {diagnostics_out->clear(); diagnostics_out->reserve(components.size());}
   std::vector<Points> accepted; std::vector<std::size_t> accepted_labels;
   for (std::size_t component_label = 0; component_label < components.size(); ++component_label) {
     auto & proposal = components[component_label]; const auto e = extent(proposal);
-    const bool size_ok = proposal.size() >= params.cluster_min_size && proposal.size() <= params.cluster_max_size;
+    const DetectionParameters local_params = density_scaled_parameters(params, proposal, sensor_context);
+    const bool size_ok = proposal.size() >= local_params.cluster_min_size && proposal.size() <= params.cluster_max_size;
     const bool extent_xy_ok = e[0] >= params.cluster_min_extent_xy && e[0] <= params.region_max_extent_xy && e[1] >= params.cluster_min_extent_xy && e[1] <= params.region_max_extent_xy;
     const bool extent_z_ok = e[2] >= params.cluster_min_extent_z && e[2] <= params.cluster_max_extent_z;
     const bool valid = size_ok && extent_xy_ok && extent_z_ok;
@@ -262,7 +303,7 @@ inline std::vector<PlanePatch> split_plane_patch(const PlanePatch & patch, const
 inline std::pair<std::vector<PlanePatch>, PlaneFitCounts> fit_planes(const Points & region, const DetectionParameters & params)
 {
   Points remaining = canonical_order(region); std::vector<PlanePatch> output; PlaneFitCounts counts; std::size_t plane_index = 0;
-  for (; plane_index < params.max_planes && remaining.size() >= params.min_inliers; ++plane_index) {RansacParameters config; config.distance_threshold = params.ransac_distance; config.num_iterations = params.ransac_iterations; config.seed = params.ransac_seed + plane_index; config.max_search_points = params.ransac_search_max_points; PlaneFitResult fitted; try {fitted = segment_plane(remaining, config);} catch (const std::exception &) {counts.stop_reason = "ransac_exception"; break;} ++counts.calls; counts.search_points += fitted.diagnostics.search_points; counts.full_points_scored += fitted.diagnostics.input_points; counts.trials_evaluated += fitted.diagnostics.trials_evaluated; counts.valid_trials += fitted.diagnostics.valid_trials; if (fitted.inlier_indices.size() < params.min_inliers) {counts.stop_reason = "ransac_below_min_inliers"; break;} Points inliers; std::vector<bool> retained(remaining.size(), true); for (const auto i : fitted.inlier_indices) {inliers.push_back(remaining[i]); retained[i] = false;} const Point normal = fitted.plane.normal.normalized(), center = centroid(inliers); std::vector<double> residuals; for (const auto & point : inliers) {residuals.push_back((point - center).dot(normal));} const double middle = median(residuals); for (auto & value : residuals) {value = std::abs(value - middle);} const auto split = split_plane_patch({normal, center, inliers, median(std::move(residuals))}, params); output.insert(output.end(), split.begin(), split.end()); Points next; for (std::size_t i = 0; i < remaining.size(); ++i) {if (retained[i]) {next.push_back(remaining[i]);}} remaining = std::move(next);}
+  for (; plane_index < params.max_planes && remaining.size() >= params.min_inliers; ++plane_index) {RansacParameters config; config.distance_threshold = params.ransac_distance; config.num_iterations = params.ransac_iterations; config.seed = params.ransac_seed + plane_index; config.max_search_points = params.ransac_search_max_points; PlaneFitResult fitted; try {fitted = segment_plane(remaining, config);} catch (const std::exception &) {counts.stop_reason = "ransac_exception"; break;} ++counts.calls; counts.search_points += fitted.diagnostics.search_points; counts.full_points_scored += fitted.diagnostics.input_points; counts.trials_evaluated += fitted.diagnostics.trials_evaluated; counts.valid_trials += fitted.diagnostics.valid_trials; counts.search_ms += fitted.diagnostics.search_ms; counts.full_score_refit_ms += fitted.diagnostics.full_score_refit_ms; if (fitted.inlier_indices.size() < params.min_inliers) {counts.stop_reason = "ransac_below_min_inliers"; break;} Points inliers; std::vector<bool> retained(remaining.size(), true); for (const auto i : fitted.inlier_indices) {inliers.push_back(remaining[i]); retained[i] = false;} const Point normal = fitted.plane.normal.normalized(), center = centroid(inliers); std::vector<double> residuals; for (const auto & point : inliers) {residuals.push_back((point - center).dot(normal));} const double middle = median(residuals); for (auto & value : residuals) {value = std::abs(value - middle);} const auto split = split_plane_patch({normal, center, inliers, median(std::move(residuals))}, params); output.insert(output.end(), split.begin(), split.end()); Points next; for (std::size_t i = 0; i < remaining.size(); ++i) {if (retained[i]) {next.push_back(remaining[i]);}} remaining = std::move(next);}
   // Diagnostic only, below: the loop above already decided why it stopped;
   // this just names that decision. Natural loop exit (no explicit break above
   // already set stop_reason) means either max_planes was reached or the

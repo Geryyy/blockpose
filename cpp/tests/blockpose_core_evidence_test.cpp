@@ -1,4 +1,4 @@
-#include <blockpose/core/proposals.hpp>
+#include <blockpose/core/pipeline.hpp>
 
 #include <gtest/gtest.h>
 
@@ -8,5 +8,7 @@ TEST(Evidence, SupportsVisibleFaceAndRejectsThroughVolumeReturn) {SensorContext 
 TEST(Evidence, MissRayCrossingVolumeIsConclusive) {SensorContext c;c.origin=Point(-2,0,0);c.miss_directions={Point(1,0,0)};EXPECT_EQ(free_space_violations_from_misses(Point::Zero(),Eigen::Matrix3d::Identity(),{{.9,.6,.6}},c),1U);}
 TEST(Evidence, NoContextHypothesisRetainsPythonZeroRayFeatureBehavior) {Pose pose;pose.position.z()=.3;GroundPlane ground;const auto h=make_hypothesis(pose,200U,ground,1U);EXPECT_EQ(h.evidence.expected_visible_faces,0U);EXPECT_EQ(h.evidence.supported_rays,0U);EXPECT_NEAR(h.evidence.score,.25*.5+.15,1e-12);}
 TEST(Evidence, ContextPopulatesAllEvidenceAndScoreFeatures) {Pose pose;pose.position.z()=.3;GroundPlane ground;SensorContext c;c.origin=Point(-2,0,.3);c.ray_directions={Point(1,0,0)};c.ranges={1.55};const auto h=make_hypothesis(pose,400U,ground,1U,&c);EXPECT_EQ(h.evidence.expected_visible_faces,1U);EXPECT_EQ(h.evidence.covered_visible_faces,1U);EXPECT_EQ(h.evidence.supported_rays,1U);EXPECT_EQ(h.evidence.incident_rays,1U);EXPECT_NEAR(h.evidence.score,1.,1e-12);}
+TEST(Evidence, NativeDiagnosticsMatchObservabilityContract) {CuboidHypothesis hypothesis; hypothesis.evidence.support_points=200U; hypothesis.evidence.top_height_error_m=.02; hypothesis.evidence.expected_visible_faces=3U; hypothesis.evidence.covered_visible_faces=3U; hypothesis.evidence.observed_geometry_faces=2U; hypothesis.evidence.supported_rays=49U; hypothesis.evidence.free_space_violations=1U; hypothesis.evidence.incident_rays=70U; hypothesis.support_height_m=.02; const auto diagnostic=diagnostics_for(hypothesis); EXPECT_EQ(diagnostic.observability,"full"); EXPECT_NEAR(diagnostic.features[0],.5,1e-12); EXPECT_NEAR(diagnostic.features[1],.9,1e-12); EXPECT_NEAR(diagnostic.features[3],.98,1e-12); EXPECT_NEAR(diagnostic.features[4],.7,1e-12);}
+TEST(Evidence, NativeDiagnosticsRemainAlignedWithFinalHypotheses) {DetectionResult result; result.hypotheses.resize(2U); result.hypotheses[0].evidence.observed_geometry_faces=1U; result.hypotheses[1].evidence.observed_geometry_faces=2U; result.hypotheses[1].evidence.supported_rays=9U; result.hypotheses[1].evidence.free_space_violations=1U; populate_diagnostics(result); ASSERT_EQ(result.diagnostics.size(),2U); EXPECT_EQ(result.diagnostics[0].observability,"limited"); EXPECT_EQ(result.diagnostics[1].observability,"partial");}
 
 }}  // namespace

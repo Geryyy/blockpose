@@ -7,6 +7,7 @@
 
 #include <map>
 #include <set>
+#include <chrono>
 
 namespace blockpose::core
 {
@@ -17,6 +18,15 @@ struct PipelineCounts
   std::size_t plane_search_points{0}, plane_full_points_scored{0};
   std::size_t plane_trials_evaluated{0}, plane_valid_trials{0};
   std::size_t raw_hypotheses{0}, refinement_candidates{0}, selected_hypotheses{0};
+};
+// Milliseconds spent in the public pipeline stages.  Kept as fixed fields so
+// native consumers do not need to depend on Python dictionary conventions.
+struct PipelineTimings
+{
+  double voxel_downsample{0.0}, ground_model{0.0}, proposals{0.0}, region_split{0.0};
+  double plane_search{0.0}, plane_full_score_refit{0.0};
+  double hypothesis_generation_evidence{0.0}, plane_hypotheses{0.0};
+  double selection{0.0}, refinement{0.0}, total{0.0};
 };
 // One record for every refined candidate that reaches the final NMS input.
 // This intentionally mirrors contributions already used by
@@ -40,8 +50,20 @@ struct RefinedCandidateTrace
   // "final", "pre_refinement_selection_rejected", or "post_refinement_nms_rejected".
   std::string fate;
 };
+// Final-pose evidence in the stable public diagnostic contract. Calibration is
+// deliberately unavailable until a native calibration artifact is introduced.
+struct DetectionDiagnostics
+{
+  HypothesisEvidence evidence;
+  std::array<double, 5> features{};  // support, height, coverage, free-space, surface
+  std::string observability{"limited"};
+  std::optional<double> proposal_scale_m;
+  double support_height_m{0.0};
+};
 struct DetectionResult {
   std::vector<Pose> poses; std::vector<CuboidHypothesis> hypotheses; PipelineCounts counts;
+  PipelineTimings timings;
+  std::vector<DetectionDiagnostics> diagnostics;
   LocalGroundModel ground; Points above_support_points; std::vector<RawHypothesisLineage> raw_lineage;
   std::vector<RefinedCandidateTrace> refined_candidate_trace;
   // Diagnostic only, populated below alongside raw_lineage and consumed by
@@ -53,6 +75,37 @@ struct DetectionResult {
   std::vector<PlanePatchDiagnostics> plane_patch_diagnostics;
   std::vector<RegionPairingDiagnostics> pairing_diagnostics;
 };
+
+inline DetectionDiagnostics diagnostics_for(const CuboidHypothesis & hypothesis)
+{
+  DetectionDiagnostics out;
+  out.evidence = hypothesis.evidence;
+  const auto & e = out.evidence;
+  const double total_rays = static_cast<double>(e.supported_rays + e.free_space_violations);
+  out.features = {{
+    std::min(static_cast<double>(e.support_points) / 400.0, 1.0),
+    std::max(0.0, 1.0 - e.top_height_error_m / 0.2),
+    e.expected_visible_faces ? static_cast<double>(e.covered_visible_faces) / e.expected_visible_faces : 0.0,
+    total_rays ? static_cast<double>(e.supported_rays) / total_rays : 0.0,
+    e.incident_rays ? static_cast<double>(e.supported_rays) / e.incident_rays : 0.0,
+  }};
+  const std::size_t observed_faces = std::max(e.covered_visible_faces, e.observed_geometry_faces);
+  const double clean = out.features[3];
+  out.observability = observed_faces >= 3U && clean >= .98 ? "full" :
+    (observed_faces >= 2U && clean >= .90 ? "partial" : "limited");
+  out.proposal_scale_m = hypothesis.proposal_scale_m;
+  out.support_height_m = hypothesis.support_height_m;
+  return out;
+}
+
+inline void populate_diagnostics(DetectionResult & result)
+{
+  result.diagnostics.clear();
+  result.diagnostics.reserve(result.hypotheses.size());
+  for (const auto & hypothesis : result.hypotheses) {
+    result.diagnostics.push_back(diagnostics_for(hypothesis));
+  }
+}
 
 // Average points in floor-indexed voxels. Canonical ordering makes this
 // independent of input ordering and preserves stable downstream processing.
@@ -150,10 +203,18 @@ inline DetectionResult detect_without_refinement(
   // discard it.
   std::vector<CuboidHypothesis> * thresholded_out = nullptr)
 {
+  const auto started = std::chrono::steady_clock::now();
   DetectionResult result; result.counts.input_points = input.size();
-  if (input.size() < 3U) {return result;}
-  const Points downsampled = voxel_downsample(input, params.voxel_size); result.counts.downsampled_points = downsampled.size();
-  if (downsampled.size() < 3U) {return result;}
+  const auto finish = [&]() {
+      populate_diagnostics(result);
+      result.timings.total = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+      return result;
+    };
+  if (input.size() < 3U) {return finish();}
+  auto stage_started = std::chrono::steady_clock::now();
+  const Points downsampled = voxel_downsample(input, params.voxel_size); result.timings.voxel_downsample = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - stage_started).count(); result.counts.downsampled_points = downsampled.size();
+  if (downsampled.size() < 3U) {return finish();}
   GroundParameters ground_params;
   ground_params.thickness = params.ground_thickness;
   ground_params.ransac_distance = params.ground_ransac_distance;
@@ -162,9 +223,10 @@ inline DetectionResult detect_without_refinement(
   ground_params.normal_min_z = params.ground_normal_min_z;
   ground_params.local_cell_size = params.local_ground_cell_size;
   ground_params.local_clearance = params.local_ground_clearance;
+  stage_started = std::chrono::steady_clock::now();
   const Points coarse_ground = voxel_downsample(downsampled, .1);
-  const GroundRemovalResult removed = remove_ground(downsampled, ground_params, &coarse_ground); result.ground = removed.ground; result.above_support_points = removed.above_ground; result.counts.above_support_points = removed.above_ground.size();
-  if (removed.above_ground.empty()) {return result;}
+  const GroundRemovalResult removed = remove_ground(downsampled, ground_params, &coarse_ground); result.timings.ground_model = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - stage_started).count(); result.ground = removed.ground; result.above_support_points = removed.above_ground; result.counts.above_support_points = removed.above_ground.size();
+  if (removed.above_ground.empty()) {return finish();}
   // Keep the low-clearance cloud for cuboid refinement, but do not let
   // ground-adjacent returns seed DBSCAN components. Mixing the two causes
   // cluttered blocks to choose a different side plane.
@@ -175,12 +237,20 @@ inline DetectionResult detect_without_refinement(
       proposal_seed.push_back(point);
     }
   }
-  const auto proposals = dbscan_proposals(proposal_seed, params, &result.ground, &result.proposal_diagnostics);
+  stage_started = std::chrono::steady_clock::now();
+  const auto proposals = dbscan_proposals(
+    proposal_seed, params, &result.ground, &result.proposal_diagnostics, sensor_context);
+  result.timings.proposals = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - stage_started).count();
   result.counts.proposal_components = proposals.size();
+  stage_started = std::chrono::steady_clock::now();
   std::vector<CuboidHypothesis> raw;
   for (std::size_t proposal_index = 0; proposal_index < proposals.size(); ++proposal_index) {
     const auto & proposal = proposals[proposal_index];
-    const auto regions = split_connected_row(proposal, params);
+    const DetectionParameters local_params = density_scaled_parameters(
+      params, proposal, sensor_context);
+    const auto split_started = std::chrono::steady_clock::now();
+    const auto regions = split_connected_row(proposal, local_params);
+    result.timings.region_split += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - split_started).count();
     const auto proposal_extent = extent(proposal);
     // Match _detect_blocks_impl: a connected region wider than a single block
     // is only admissible when the density-valley splitter supplied observable
@@ -197,14 +267,15 @@ inline DetectionResult detect_without_refinement(
     }
     for (std::size_t region_index = 0; region_index < regions.size(); ++region_index) {
       const auto & region = regions[region_index];
-      ++result.counts.plane_regions; const auto [planes, counts] = fit_planes(region, params);
-      result.counts.plane_fit_calls += counts.calls; result.counts.plane_search_points += counts.search_points; result.counts.plane_full_points_scored += counts.full_points_scored; result.counts.plane_trials_evaluated += counts.trials_evaluated; result.counts.plane_valid_trials += counts.valid_trials;
+      ++result.counts.plane_regions; const auto [planes, counts] = fit_planes(region, local_params);
+      result.counts.plane_fit_calls += counts.calls; result.counts.plane_search_points += counts.search_points; result.counts.plane_full_points_scored += counts.full_points_scored; result.counts.plane_trials_evaluated += counts.trials_evaluated; result.counts.plane_valid_trials += counts.valid_trials; result.timings.plane_search += counts.search_ms; result.timings.plane_full_score_refit += counts.full_score_refit_ms;
       // Diagnostic only, these two blocks: fit_planes/the patches it returned
       // are unchanged above; this just records what they were for the stages
       // before hypothesis synthesis (RawHypothesisLineage starts too late to
       // see a component/region that never produced a raw hypothesis at all).
       {PlaneRegionDiagnostics region_diag; region_diag.proposal_component = proposal_index; region_diag.region = region_index; region_diag.plane_count = planes.size(); region_diag.leftover_points = counts.leftover_points; region_diag.stop_reason = counts.stop_reason; result.plane_region_diagnostics.push_back(std::move(region_diag));}
       for (std::size_t plane_index = 0; plane_index < planes.size(); ++plane_index) {const auto & patch = planes[plane_index]; PlanePatchDiagnostics patch_diag; patch_diag.proposal_component = proposal_index; patch_diag.region = region_index; patch_diag.plane_index = plane_index; patch_diag.point_count = patch.points.size(); patch_diag.normal = patch.normal; patch_diag.centroid = patch.centroid; patch_diag.residual_mad = patch.residual_mad; result.plane_patch_diagnostics.push_back(std::move(patch_diag));}
+      const auto hypothesis_started = std::chrono::steady_clock::now();
       const auto dims_values = candidate_dims(params);
       for (std::size_t dims_index = 0; dims_index < dims_values.size(); ++dims_index) {const auto & dims = dims_values[dims_index];
       RegionPairingDiagnostics region_pairing; region_pairing.proposal_component = proposal_index; region_pairing.region = region_index; region_pairing.dims_index = dims_index;
@@ -238,9 +309,11 @@ inline DetectionResult detect_without_refinement(
           raw.push_back(std::move(hypothesis));
         }
       }}
+      result.timings.hypothesis_generation_evidence += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - hypothesis_started).count();
     }
   }
-  result.counts.raw_hypotheses = raw.size(); std::vector<CuboidHypothesis> thresholded; for (const auto & hypothesis : raw) {if (hypothesis.evidence.score >= params.min_score) {thresholded.push_back(hypothesis); if (hypothesis.lineage_index) {auto & lineage = result.raw_lineage[*hypothesis.lineage_index]; lineage.passed_score_threshold = true; lineage.fate = "score_passed";}} else if (hypothesis.lineage_index) {result.raw_lineage[*hypothesis.lineage_index].fate = "score_rejected";}}
+  result.timings.plane_hypotheses = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - stage_started).count();
+  result.counts.raw_hypotheses = raw.size(); stage_started = std::chrono::steady_clock::now(); std::vector<CuboidHypothesis> thresholded; for (const auto & hypothesis : raw) {if (hypothesis.evidence.score >= params.min_score) {thresholded.push_back(hypothesis); if (hypothesis.lineage_index) {auto & lineage = result.raw_lineage[*hypothesis.lineage_index]; lineage.passed_score_threshold = true; lineage.fate = "score_passed";}} else if (hypothesis.lineage_index) {result.raw_lineage[*hypothesis.lineage_index].fate = "score_rejected";}}
   if (visual_scorer != nullptr) {for (auto & hypothesis : thresholded) {hypothesis.visual_evidence = (*visual_scorer)(hypothesis.pose);}}
   // Refinement is optional in an ablation. Preserve its exact alternative-
   // selection input as a separately labelled trace instead of pretending the
@@ -253,7 +326,7 @@ inline DetectionResult detect_without_refinement(
   result.counts.refinement_candidates = result.hypotheses.size();
   result.hypotheses.erase(std::remove_if(result.hypotheses.begin(), result.hypotheses.end(), [&result, &params](const auto & hypothesis) {const bool rejected = result.ground.height(hypothesis.pose.position) < 0.0 || result.ground.height(hypothesis.pose.position) > params.cluster_max_center_z; if (rejected && hypothesis.lineage_index) {result.raw_lineage[*hypothesis.lineage_index].fate = "pre_refinement_bounds_rejected";} return rejected;}), result.hypotheses.end());
   if (thresholded_out == nullptr) {mark_candidate_trace_fate(result, "pre_refinement_selection_rejected", false);}
-  std::sort(result.hypotheses.begin(), result.hypotheses.end(), [](const auto & a, const auto & b) {return a.pose.position.z() > b.pose.position.z();}); for (const auto & hypothesis : result.hypotheses) {result.poses.push_back(hypothesis.pose);} result.counts.selected_hypotheses = result.hypotheses.size(); return result;
+  std::sort(result.hypotheses.begin(), result.hypotheses.end(), [](const auto & a, const auto & b) {return a.pose.position.z() > b.pose.position.z();}); for (const auto & hypothesis : result.hypotheses) {result.poses.push_back(hypothesis.pose);} result.counts.selected_hypotheses = result.hypotheses.size(); result.timings.selection = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - stage_started).count(); return finish();
 }
 
 inline Eigen::Matrix3d preserve_top_axis(
@@ -277,6 +350,7 @@ inline DetectionResult detect(
   const SensorContext * sensor_context = nullptr, const PosePriors * priors = nullptr,
   const VisualScorer * visual_scorer = nullptr)
 {
+  const auto started = std::chrono::steady_clock::now();
   // Deferred pre-refinement trace input (see detect_without_refinement's
   // thresholded_out): built into a trace only on the early-return path below,
   // never discarded on the (common) path that reaches refinement.
@@ -354,7 +428,7 @@ inline DetectionResult detect(
     // build exactly the trace detect_without_refinement would have.
     populate_candidate_trace(result, thresholded_before_refinement, "pre_refinement_pre_selection", false);
     mark_candidate_trace_fate(result, "pre_refinement_selection_rejected", false);
-    return result;
+    result.timings.total = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count(); return result;
   }
   std::vector<CuboidPose> initial;
   initial.reserve(result.hypotheses.size());
@@ -367,9 +441,11 @@ inline DetectionResult detect(
   refine_params.max_translation = params.refine_max_translation;
   refine_params.max_rotation_deg = params.refine_max_rotation_deg;
   refine_params.min_points = params.refine_min_points;
+  const auto refinement_started = std::chrono::steady_clock::now();
   const auto refined = refine_poses(
     initial, result.above_support_points, params.refine_band,
     params.refine_iterations, refine_params);
+  result.timings.refinement = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - refinement_started).count();
   std::vector<CuboidHypothesis> rescored;
   rescored.reserve(result.hypotheses.size());
   for (std::size_t index = 0; index < result.hypotheses.size(); ++index) {
@@ -411,7 +487,7 @@ inline DetectionResult detect(
   });
   result.poses.clear();
   for (const auto & hypothesis : result.hypotheses) {result.poses.push_back(hypothesis.pose);}
-  result.counts.selected_hypotheses = result.hypotheses.size();
+  result.counts.selected_hypotheses = result.hypotheses.size(); populate_diagnostics(result); result.timings.total = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
   return result;
 }
 }  // namespace blockpose::core

@@ -22,8 +22,8 @@ hypothesis and the neighbour it agrees with must independently clear the PCL/ray
 evidence threshold below -- agreement between one confident and one weak/noisy
 hypothesis is not treated as agreement.
 
-PCL/ray evidence: ``detect_blocks_detailed``'s trace exposes exactly one scalar
-per hypothesis, ``TraceHypothesis.score`` (``blockpose/detection.py``), a
+PCL/ray evidence: the native discovery bridge's trace exposes exactly one scalar
+per hypothesis, ``TraceHypothesis.score`` (``blockpose.core_types``), a
 [0, 1] weighted blend of support-point count, height consistency, visible-face
 coverage, free-space consistency, and ray-explained-surface fraction
 (``_SCORE_WEIGHTS``). Its own docstring records the empirical split measured on
@@ -73,12 +73,8 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "python"))
 
-from blockpose.detection import (  # noqa: E402
-    DetectionParams,
-    SensorContext,
-    TraceHypothesis,
-    detect_blocks_detailed,
-)
+from blockpose.core_bridge import detect_blocks_detailed_cpp  # noqa: E402
+from blockpose.core_types import DetectionParameters, SensorContext, TraceHypothesis  # noqa: E402
 from blockpose.evaluate import rotation_error_deg, translation_error  # noqa: E402
 from blockpose.io import (  # noqa: E402
     CameraModel,
@@ -212,11 +208,10 @@ def _gate_and_detect(capture: Path, *, camera: CameraModel, sync_tolerance_s: fl
 
     pts_sensor = load_pcd(capture / "cloud.pcd")
     pts_world = apply_transform(pts_sensor, T_world_cloud)
-    result = detect_blocks_detailed(
+    result = detect_blocks_detailed_cpp(
         pts_world,
-        DetectionParams(),
+        params=DetectionParameters(),
         sensor_context=SensorContext.from_points(T_world_cloud[:3, 3], pts_world),
-        collect_trace=True,
     )
     assert result.trace is not None
 
