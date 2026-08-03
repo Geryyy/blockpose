@@ -22,7 +22,7 @@ import yaml
 from scipy.spatial.transform import Rotation
 
 from blockpose.annotations import AnnotationTarget, load_annotations
-from blockpose.pose import BLOCK_DIMS, frame_alignments, rotmat_to_quat_xyzw
+from blockpose.pose import BLOCK_DIMS, frame_alignments, rotmat_to_quat_xyzw, symmetry_equivalents
 
 VISIBILITIES = ("unknown", "full", "partial", "heavy_occlusion")
 
@@ -36,6 +36,36 @@ def full_workspace_roi(points: np.ndarray, margin_m: float = 0.05) -> tuple[np.n
         raise ValueError("ROI margin must be finite and non-negative")
     margin = np.full(3, float(margin_m))
     return cloud.min(axis=0) - margin, cloud.max(axis=0) + margin
+
+
+def remove_background_by_range(
+    points: np.ndarray, sensor_origin: np.ndarray, max_range_m: float
+) -> np.ndarray:
+    """Keep only points within `max_range_m` of `sensor_origin`.
+
+    Declutters far-range background (walls, containers) that sits well beyond
+    the workspace, without fitting any planes -- cheap and sufficient since
+    blocks are always well within the reachable workspace radius.
+    """
+    if not np.isfinite(max_range_m) or max_range_m <= 0.0:
+        raise ValueError("max_range_m must be finite and positive")
+    origin = np.asarray(sensor_origin, dtype=float).reshape(3)
+    cloud = np.asarray(points, dtype=float)
+    distances = np.linalg.norm(cloud - origin, axis=1)
+    return cloud[distances <= max_range_m]
+
+
+def default_max_range_m(points: np.ndarray, sensor_origin: np.ndarray) -> float:
+    """A mild starting range cutoff: the 95th percentile of point-to-sensor distance.
+
+    Not a fixed workspace constant -- no such config exists -- so this starts
+    as a light trim of the very-farthest returns that the annotator can tune
+    down further while watching the cloud shrink live.
+    """
+    origin = np.asarray(sensor_origin, dtype=float).reshape(3)
+    cloud = np.asarray(points, dtype=float)
+    distances = np.linalg.norm(cloud - origin, axis=1)
+    return float(np.percentile(distances, 95.0))
 
 
 def canonicalize_block_frame(
@@ -52,6 +82,24 @@ def canonicalize_block_frame(
     # first representative is deterministic; all alternatives are exact box
     # symmetries and therefore describe the same world-space OBB.
     return np.asarray(rotation, dtype=float) @ alignments[0]
+
+
+def next_symmetry_rotation(
+    base_rotation: np.ndarray,
+    cycle_index: int,
+    dimensions: tuple[float, float, float] = BLOCK_DIMS,
+) -> np.ndarray:
+    """Cycle through the alternative ways to label a symmetric box's faces.
+
+    `base_rotation` is the pose the cycle started from (typically the rotation
+    at the moment a target was selected, before any Rotate-90 presses).
+    `symmetry_equivalents` already enumerates every rotation describing the
+    same physical placement -- the 90 degree relabelings about the long axis
+    and the 180 degree end-for-end flips -- so this only indexes into it
+    rather than constructing any new rotation matrix.
+    """
+    alternatives = symmetry_equivalents(base_rotation, dimensions)
+    return alternatives[cycle_index % len(alternatives)]
 
 
 def orientation_summary(rotation: np.ndarray) -> str:
@@ -553,6 +601,16 @@ def snapshot_selection_index(snapshots: list[Path], current: Path) -> int:
         return snapshots.index(current)
     except ValueError as error:
         raise ValueError(f"current snapshot {current} is not in the snapshot list") from error
+
+
+def adjacent_snapshot(snapshots: list[Path], current: Path, step: int) -> Path | None:
+    """Return the snapshot `step` positions from `current`, or None past either end.
+
+    Never wraps: stepping before the first or past the last snapshot returns
+    None so Prev/Next buttons can clamp and disable at the ends.
+    """
+    index = snapshot_selection_index(snapshots, current) + step
+    return snapshots[index] if 0 <= index < len(snapshots) else None
 
 
 def save_annotations_atomic(

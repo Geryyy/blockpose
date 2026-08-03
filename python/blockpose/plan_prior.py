@@ -31,9 +31,9 @@ from blockpose.detection import (
     SensorContext,
     _evidence_features,
     _make_hypothesis,
-    _remove_ground,
     _validate_sensor_context,
     _voxel_downsample,
+    remove_ground,
 )
 from blockpose.pose import BlockPose
 from blockpose.refine import refine_pose
@@ -88,7 +88,7 @@ def detect_with_plan(
     # scoring is measured against the same reference.
     if len(points) >= 3:
         downsampled = _voxel_downsample(points, params.voxel_size)
-        object_points, ground = _remove_ground(downsampled, params)
+        object_points, ground = remove_ground(downsampled, params)
     else:
         object_points = points
         ground = GroundPlane(np.array([0.0, 0.0, 1.0]), 0.0, "empty")

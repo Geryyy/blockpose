@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 import open3d as o3d
 from open3d.visualization import gui, rendering
+from scipy.spatial.transform import Rotation
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "python"))
@@ -26,22 +27,33 @@ from blockpose.annotation_tool import (  # noqa: E402
     VISIBILITIES,
     AnnotationController,
     AnnotationDocument,
+    adjacent_snapshot,
     camera_ray,
+    default_max_range_m,
     full_workspace_roi,
     initial_camera_focus,
     nearest_point_to_ray_with_distance,
+    next_symmetry_rotation,
     orientation_summary,
     pick_oriented_box,
+    remove_background_by_range,
     save_annotations_atomic,
     snapshot_selection_index,
 )
+from blockpose.detection import DetectionParams, remove_ground  # noqa: E402
 from blockpose.io import (  # noqa: E402
     load_camera_model,
     load_rgb,
     load_snapshot,
     load_tf_snapshot,
 )
-from blockpose.projection import colorize_world_points, project_points, world_to_camera  # noqa: E402
+from blockpose.pose import BlockPose  # noqa: E402
+from blockpose.projection import (  # noqa: E402
+    colorize_world_points,
+    project_points,
+    world_to_camera,
+)
+from blockpose.refine import assign_points  # noqa: E402
 from blockpose.rgb_annotation import (  # noqa: E402
     AsyncSegmentationWorker,
     MaskSelectionParams,
@@ -54,6 +66,11 @@ from blockpose.rgb_annotation import (  # noqa: E402
 )
 from blockpose.snapshot_exclusions import load_snapshot_exclusions  # noqa: E402
 
+try:
+    from blockpose.annotation_candidates import compute_candidate_sources  # noqa: E402
+except ImportError:
+    compute_candidate_sources = None
+
 DEFAULT_ROOT = REPO_ROOT / "data" / "registration_snapshots"
 DEFAULT_CONFIG = REPO_ROOT / "config" / "transforms_pzs100_initial_pose_1.yaml"
 BOX_COLORS = {
@@ -61,11 +78,29 @@ BOX_COLORS = {
     "approved": (0.1, 0.9, 0.2, 1.0),
     "rejected": (0.9, 0.15, 0.15, 1.0),
 }
+# One comparison-overlay color per candidate source, distinct from BOX_COLORS and
+# from each other: thin gray for the raw geometric proposer, orange for the
+# accepted RGB-edge-prior refinement, purple for the DINO proposer, teal for the
+# reranked DINO verifier.
+CANDIDATE_SOURCES = (
+    ("pcl", "PCL geometry"),
+    ("rgb_edge_prior", "+ RGB edge prior"),
+    ("dino_proposer", "+ DINO proposer"),
+    ("dino_verifier_reranked", "+ DINO verifier (reranked)"),
+)
+CANDIDATE_SOURCE_COLORS = {
+    "pcl": (0.6, 0.6, 0.6, 1.0),
+    "rgb_edge_prior": (1.0, 0.55, 0.0, 1.0),
+    "dino_proposer": (0.6, 0.2, 0.85, 1.0),
+    "dino_verifier_reranked": (0.0, 0.65, 0.65, 1.0),
+}
+SELECTED_BLOCK_POINTS_COLOR = (0.0, 0.9, 0.9)
+SELECTED_BLOCK_POINTS_BAND_M = 0.10
+BASE_POINT_SIZE = 3.5
 INITIAL_EYE = np.array([0.0, 0.0, 0.0])
 INITIAL_UP = np.array([0.0, 0.0, 1.0])
 INITIAL_DIRECTION = np.array([-1.0, 0.0, 0.0])
 DEFAULT_PICK_RADIUS_M = 0.30
-ROI_COLOR = np.array([0, 220, 255], dtype=np.uint8)
 BOX_EDGES = tuple(
     (first, second)
     for first in range(8)
@@ -117,29 +152,23 @@ def draw_projected_edges(
 
 
 class AnnotatorWindow:
-    def __init__(
-        self,
-        root: Path,
-        initial: Path,
-        config: Path,
-        pick_radius: float,
-        sam_model: str | None = None,
-        sam_device: str = "auto",
-        sam_offline: bool = False,
-    ):
-        self.root = root
-        self.config = config
-        self.pick_radius = pick_radius
-        self.snapshots = discover_snapshot_dirs(root)
+    def __init__(self, args: argparse.Namespace, initial: Path):
+        self.args = args
+        self.root = args.root
+        self.config = args.config
+        self.pick_radius = args.pick_radius
+        self.snapshots = discover_snapshot_dirs(self.root)
         if not self.snapshots:
-            raise ValueError(f"No snapshots containing cloud.pcd under {root}")
+            raise ValueError(f"No snapshots containing cloud.pcd under {self.root}")
         if initial not in self.snapshots:
-            exclusion = load_snapshot_exclusions(root).get(initial.name)
+            exclusion = load_snapshot_exclusions(self.root).get(initial.name)
             detail = f": {exclusion.reason}" if exclusion is not None else ""
             raise ValueError(f"Snapshot {initial.name} is not annotatable{detail}")
         self.snapshot = initial
         self._changing_snapshot_combo = False
         self.points = np.empty((0, 3))
+        self.raw_points = np.empty((0, 3))
+        self.T_world_cloud: np.ndarray | None = None
         self.rgb_colors: np.ndarray | None = None
         self.T_world_camera: np.ndarray | None = None
         self.camera = None
@@ -150,10 +179,15 @@ class AnnotatorWindow:
         self.candidate_masks: dict[int, np.ndarray] = {}
         self.selected_rgb_points = np.empty((0, 3))
         self.selected_mask: np.ndarray | None = None
+        self.candidate_sources_result = None
+        self._rotate_cycle_state: tuple[str, np.ndarray, int] | None = None
+        self._rotate_cycle_last_applied: np.ndarray | None = None
         self.sam_backend = (
             None
-            if sam_model is None
-            else TransformersSam2Backend(sam_model, sam_device, local_files_only=sam_offline)
+            if args.sam_model is None
+            else TransformersSam2Backend(
+                args.sam_model, args.sam_device, local_files_only=args.sam_offline
+            )
         )
         self.sam_worker = (
             None if self.sam_backend is None else AsyncSegmentationWorker(self.sam_backend)
@@ -171,12 +205,35 @@ class AnnotatorWindow:
         for item in self.snapshots:
             self.snapshot_combo.add_item(item.name)
         self.snapshot_combo.set_on_selection_changed(self._on_snapshot_changed)
+        self.prev_button = self._button("◀ Prev", lambda: self._navigate(-1))
+        self.next_button = self._button("Next ▶", lambda: self._navigate(1))
         self.target_list = gui.ListView()
         self.target_list.set_max_visible_items(8)
         self.target_list.set_on_selection_changed(self._on_target_selected)
         self.rgb_toggle = gui.Checkbox("RGB-colored cloud")
         self.rgb_toggle.checked = True
         self.rgb_toggle.set_on_checked(lambda _checked: self._refresh_scene())
+        self.remove_ground_toggle = gui.Checkbox("Remove ground")
+        self.remove_ground_toggle.checked = True
+        self.remove_ground_toggle.set_on_checked(lambda _checked: self._on_point_filters_changed())
+        self.remove_background_toggle = gui.Checkbox("Remove background (range cutoff)")
+        self.remove_background_toggle.checked = True
+        self.remove_background_toggle.set_on_checked(
+            lambda _checked: self._on_point_filters_changed()
+        )
+        self.max_range_field = gui.NumberEdit(gui.NumberEdit.DOUBLE)
+        self.max_range_field.decimal_precision = 2
+        self.max_range_field.set_limits(0.1, 1000.0)
+        self.max_range_field.set_on_value_changed(lambda _value: self._on_point_filters_changed())
+        self.candidate_checks = {key: gui.Checkbox(label) for key, label in CANDIDATE_SOURCES}
+        for checkbox in self.candidate_checks.values():
+            checkbox.checked = False
+            checkbox.set_on_checked(lambda _checked: self._refresh_scene())
+        self.candidate_status = gui.Label(
+            "unavailable: annotation_candidates module not found"
+            if compute_candidate_sources is None
+            else ""
+        )
         self.fields = [self._number() for _ in range(6)]
         self.orientation_label = gui.Label("No block selected")
         for field in self.fields:
@@ -191,13 +248,10 @@ class AnnotatorWindow:
         self.notes = gui.TextEdit()
         self.notes.placeholder_text = "snapshot notes"
         self.complete = gui.Checkbox("ROI exhaustively annotated")
-        self.roi_fields = [self._number() for _ in range(6)]
         self.add_fields = [self._number() for _ in range(3)]
         self._build_panel()
         self.complete.set_on_checked(lambda _checked: self._mark_widget_dirty())
         self.notes.set_on_text_changed(lambda _text: self._mark_widget_dirty())
-        for field in self.roi_fields:
-            field.set_on_value_changed(lambda _value: self._roi_fields_changed())
         self.window.add_child(self.scene)
         self.window.add_child(self.rgb_view)
         self.window.add_child(self.panel)
@@ -220,58 +274,94 @@ class AnnotatorWindow:
         button.set_on_clicked(callback)
         return button
 
+    def _section(self, title: str) -> gui.CollapsableVert:
+        section = gui.CollapsableVert(title, 4, gui.Margins(4, 0, 0, 4))
+        section.set_is_open(True)
+        self.panel.add_child(section)
+        return section
+
     def _build_panel(self) -> None:
-        self.panel.add_child(gui.Label("Snapshot"))
-        self.panel.add_child(self.snapshot_combo)
-        self.panel.add_child(self.rgb_toggle)
-        self.panel.add_child(gui.Label("Blocks: pending=yellow, approved=green, rejected=red"))
-        self.panel.add_child(self.target_list)
-        self.panel.add_child(gui.Label("Position XYZ (m), Euler XYZ (deg; canonical block frame)"))
-        self.panel.add_child(self.orientation_label)
+        snapshot_section = self._section("Snapshot")
+        snapshot_section.add_child(self.snapshot_combo)
+        nav_row = gui.Horiz(3)
+        nav_row.add_child(self.prev_button)
+        nav_row.add_child(self.next_button)
+        snapshot_section.add_child(nav_row)
+        snapshot_section.add_child(self.rgb_toggle)
+
+        preprocessing_section = self._section("Preprocessing")
+        preprocessing_section.add_child(self.remove_ground_toggle)
+        preprocessing_section.add_child(self.remove_background_toggle)
+        range_row = gui.Horiz(3)
+        range_row.add_child(gui.Label("max range (m)"))
+        range_row.add_child(self.max_range_field)
+        preprocessing_section.add_child(range_row)
+
+        candidates_section = self._section("Candidate sources")
+        for key, _label in CANDIDATE_SOURCES:
+            candidates_section.add_child(self.candidate_checks[key])
+        candidates_section.add_child(self._button("Compute candidates", self._compute_candidates))
+        candidates_section.add_child(self.candidate_status)
+
+        blocks_section = self._section("Blocks")
+        blocks_section.add_child(
+            gui.Label("Blocks: pending=yellow, approved=green, rejected=red")
+        )
+        blocks_section.add_child(self.target_list)
+
+        pose_section = self._section("Pose")
+        pose_section.add_child(
+            gui.Label("Position XYZ (m), Euler XYZ (deg; canonical block frame)")
+        )
+        pose_section.add_child(self.orientation_label)
         grid = gui.VGrid(2, 4)
         for label, field in zip(("X", "Y", "Z", "Roll", "Pitch", "Yaw"), self.fields, strict=True):
             grid.add_child(gui.Label(label))
             grid.add_child(field)
-        self.panel.add_child(grid)
+        pose_section.add_child(grid)
         steps = gui.Horiz(3)
         for axis, label in enumerate(("X", "Y", "Z")):
             steps.add_child(self._button(f"{label}-", lambda a=axis: self._step(a, -1)))
             steps.add_child(self._button(f"{label}+", lambda a=axis: self._step(a, 1)))
-        self.panel.add_child(steps)
+        pose_section.add_child(steps)
         turns = gui.Horiz(3)
         for axis, label in enumerate(("R", "P", "Y"), start=3):
             turns.add_child(self._button(f"{label}-", lambda a=axis: self._step(a, -1)))
             turns.add_child(self._button(f"{label}+", lambda a=axis: self._step(a, 1)))
-        self.panel.add_child(turns)
+        pose_section.add_child(turns)
+        pose_section.add_child(
+            self._button("Rotate 90° (alternative face labeling)", self._rotate_selected_90)
+        )
+
+        review_section = self._section("Review")
         review = gui.Horiz(4)
         review.add_child(self._button("Approve", self._approve))
         review.add_child(self._button("Reject", self._reject))
         review.add_child(self._button("Abort edit", self._abort))
         review.add_child(self._button("Reset", self._reset))
-        self.panel.add_child(review)
-        self.panel.add_child(self._button("Delete selected…", self._confirm_delete_selected))
-        self.panel.add_child(self._button("Snap selected to cloud", self._snap_selected))
-        self.panel.add_child(gui.Label("Visibility / ignored target"))
-        self.panel.add_child(self.visibility)
-        self.panel.add_child(self.ignore_reason)
-        self.panel.add_child(gui.Label("Add manual draft at XYZ (or Ctrl-click cloud)"))
+        review_section.add_child(review)
+        review_section.add_child(gui.Label("Visibility / ignored target"))
+        review_section.add_child(self.visibility)
+        review_section.add_child(self.ignore_reason)
+
+        actions_section = self._section("Block actions")
+        actions_section.add_child(gui.Label("Add manual draft at XYZ (or Ctrl-click cloud)"))
         add_row = gui.Horiz(3)
         for field in self.add_fields:
             add_row.add_child(field)
         add_row.add_child(self._button("Add", self._add_at_fields))
-        self.panel.add_child(add_row)
+        actions_section.add_child(add_row)
+        actions_section.add_child(self._button("Delete selected…", self._confirm_delete_selected))
+        actions_section.add_child(self._button("Snap selected to cloud", self._snap_selected))
+
+        history_section = self._section("History")
         history = gui.Horiz(4)
         history.add_child(self._button("Undo", self._undo))
         history.add_child(self._button("Redo", self._redo))
         history.add_child(self._button("Reset camera", self._reset_camera))
-        self.panel.add_child(history)
+        history_section.add_child(history)
+
         self.panel.add_child(self.complete)
-        self.panel.add_child(gui.Label("Annotation ROI (defaults to full captured cloud)"))
-        roi_grid = gui.VGrid(3, 3)
-        for field in self.roi_fields:
-            roi_grid.add_child(field)
-        self.panel.add_child(roi_grid)
-        self.panel.add_child(self._button("Use full captured cloud", self._set_full_workspace_roi))
         self.panel.add_child(self.notes)
         self.panel.add_child(self._button("Validate & Save", self._save))
         self.panel.add_child(self.status)
@@ -296,48 +386,106 @@ class AnnotatorWindow:
             raise FileNotFoundError(f"Missing annotation manifest: {manifest}")
         self.controller = AnnotationController(AnnotationDocument.load(manifest))
         tf = load_tf_snapshot(snapshot / "tf.yaml")
-        self.points, _ = load_snapshot(
+        self.T_world_cloud = tf.T_world_cloud
+        self.raw_points, _ = load_snapshot(
             snapshot,
             self.config,
             T_world_cloud=tf.T_world_cloud,
             require_registrations=False,
         )
-        if self.controller.document.roi_min is None or self.controller.document.roi_max is None:
-            self.controller.document.roi_min, self.controller.document.roi_max = full_workspace_roi(self.points)
-        self.rgb_colors = None
+        # ROI is always the full captured cloud, independent of the optional
+        # ground/background preprocessing filters (see _apply_point_filters):
+        # there is no manual ROI UI, so this unconditionally satisfies
+        # AnnotationDocument.validate()'s ROI completeness requirement without
+        # the user ever touching it, and without the completeness region
+        # shrinking just because a display/candidate filter is toggled on.
+        self.controller.document.roi_min, self.controller.document.roi_max = full_workspace_roi(
+            self.raw_points
+        )
+        self.max_range_field.double_value = default_max_range_m(
+            self.raw_points, self.T_world_cloud[:3, 3]
+        )
         self.rgb = None
         self.T_world_camera = tf.T_world_camera
         self.camera = None
-        self.projection_cache = None
         self.candidate_masks = {}
-        self.selected_rgb_points = np.empty((0, 3))
-        self.selected_mask = None
+        self.candidate_sources_result = None
+        self.candidate_status.text = (
+            "unavailable: annotation_candidates module not found"
+            if compute_candidate_sources is None
+            else ""
+        )
+        self._rotate_cycle_state = None
+        self._rotate_cycle_last_applied = None
         if self.sam_worker is not None:
             self.sam_worker.invalidate()
         if (snapshot / "rgb.png").is_file():
             try:
                 self.rgb = load_rgb(snapshot / "rgb.png")
-                camera = load_camera_model()
-                self.camera = camera
-                self.rgb_colors, _ = colorize_world_points(
-                    self.points,
-                    tf.T_world_camera,
-                    camera,
-                    self.rgb,
-                )
-                self.projection_cache = build_projection_cache(
-                    self.points, tf.T_world_camera, camera
-                )
+                self.camera = load_camera_model()
                 self.candidate_masks = load_candidate_masks(snapshot, self.rgb.shape[:2])
-                self._refresh_rgb()
             except (ValueError, KeyError):
-                self.rgb_colors = None
+                self.rgb = None
                 self.camera = None
+        self._apply_point_filters()
+        if self.rgb is not None:
+            self._refresh_rgb()
         self._changing_snapshot_combo = True
         self.snapshot_combo.selected_index = snapshot_selection_index(self.snapshots, snapshot)
         self._changing_snapshot_combo = False
+        self._update_nav_buttons()
         self._load_document_widgets()
         self._refresh_scene(reset_camera=True)
+
+    def _on_point_filters_changed(self) -> None:
+        self._apply_point_filters()
+        self._refresh_scene()
+
+    def _apply_point_filters(self) -> None:
+        """Recompute the working cloud from `raw_points` under the current filter toggles.
+
+        One filtered cloud feeds rendering, Ctrl+click RANSAC snapping, and
+        candidate-source computation, so none of them can silently diverge
+        from what's displayed. The annotation ROI is deliberately NOT
+        recomputed here -- it always covers the full raw capture (see
+        `_load_snapshot`), independent of these display/candidate filters.
+        """
+        points = self.raw_points
+        if self.remove_ground_toggle.checked and len(points) >= 3:
+            points, _ = remove_ground(points, DetectionParams())
+        if self.remove_background_toggle.checked and self.T_world_cloud is not None:
+            points = remove_background_by_range(
+                points, self.T_world_cloud[:3, 3], self.max_range_field.double_value
+            )
+        self.points = points
+        self.selected_rgb_points = np.empty((0, 3))
+        self.selected_mask = None
+        self.candidate_sources_result = None
+        if self.camera is not None and self.rgb is not None:
+            try:
+                self.rgb_colors, _ = colorize_world_points(
+                    self.points, self.T_world_camera, self.camera, self.rgb
+                )
+                self.projection_cache = build_projection_cache(
+                    self.points, self.T_world_camera, self.camera
+                )
+            except (ValueError, KeyError):
+                self.rgb_colors = None
+                self.projection_cache = None
+                self.camera = None
+        else:
+            self.rgb_colors = None
+            self.projection_cache = None
+
+    def _update_nav_buttons(self) -> None:
+        self.prev_button.enabled = adjacent_snapshot(self.snapshots, self.snapshot, -1) is not None
+        self.next_button.enabled = adjacent_snapshot(self.snapshots, self.snapshot, 1) is not None
+
+    def _navigate(self, step: int) -> None:
+        chosen = adjacent_snapshot(self.snapshots, self.snapshot, step)
+        if chosen is None:
+            return
+        self._go_to_snapshot(chosen)
 
     def _load_document_widgets(self) -> None:
         self._loading_widgets = True
@@ -349,13 +497,6 @@ class AnnotatorWindow:
             self.target_list.selected_index = self.controller.selected
         self.complete.checked = document.annotation_complete
         self.notes.text_value = document.notes
-        values = (
-            [0.0] * 6
-            if document.roi_min is None or document.roi_max is None
-            else [*document.roi_min, *document.roi_max]
-        )
-        for field, value in zip(self.roi_fields, values, strict=True):
-            field.double_value = float(value)
         self._load_target_widgets()
         self._loading_widgets = False
 
@@ -381,17 +522,8 @@ class AnnotatorWindow:
             cloud.paint_uniform_color((0.55, 0.55, 0.55))
         material = rendering.MaterialRecord()
         material.shader = "defaultUnlit"
-        material.point_size = 2.0
+        material.point_size = BASE_POINT_SIZE
         self.scene.scene.add_geometry("cloud", cloud, material)
-        roi = self._active_roi()
-        if roi is not None:
-            roi_box = o3d.geometry.AxisAlignedBoundingBox(*roi)
-            roi_lines = o3d.geometry.LineSet.create_from_axis_aligned_bounding_box(roi_box)
-            roi_material = rendering.MaterialRecord()
-            roi_material.shader = "unlitLine"
-            roi_material.line_width = 3.0
-            roi_material.base_color = tuple(ROI_COLOR / 255.0) + (1.0,)
-            self.scene.scene.add_geometry("annotation-roi", roi_lines, roi_material)
         if len(self.selected_rgb_points):
             selected = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(self.selected_rgb_points))
             selected.paint_uniform_color((1.0, 0.1, 0.8))
@@ -399,6 +531,23 @@ class AnnotatorWindow:
             selected_material.shader = "defaultUnlit"
             selected_material.point_size = 6.0
             self.scene.scene.add_geometry("rgb-mask-points", selected, selected_material)
+        selected_target = self.controller.target
+        if selected_target is not None:
+            selected_pose = BlockPose(
+                position=selected_target.position,
+                rotation=selected_target.rotation,
+                dims=selected_target.dimensions,
+            )
+            assigned = assign_points(
+                [selected_pose], self.points, None, band=SELECTED_BLOCK_POINTS_BAND_M
+            )[0]
+            if len(assigned):
+                block_points = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(assigned))
+                block_points.paint_uniform_color(SELECTED_BLOCK_POINTS_COLOR)
+                block_material = rendering.MaterialRecord()
+                block_material.shader = "defaultUnlit"
+                block_material.point_size = 5.0
+                self.scene.scene.add_geometry("selected-block-points", block_points, block_material)
         for index, target in enumerate(self.controller.document.targets):
             box = o3d.geometry.OrientedBoundingBox(
                 target.position, target.rotation, target.dimensions
@@ -412,6 +561,7 @@ class AnnotatorWindow:
             line_material.line_width = 4.0 if index == self.controller.selected else 2.0
             line_material.base_color = color
             self.scene.scene.add_geometry(f"block-{index}", lines, line_material)
+        self._add_candidate_source_geometries()
         if reset_camera:
             bounds = self.scene.scene.bounding_box
             # Match visualize_snapshot.py's initial view exactly: place the
@@ -427,6 +577,59 @@ class AnnotatorWindow:
         self.scene.look_at(focus, INITIAL_EYE, INITIAL_UP)
         self.scene.force_redraw()
 
+    def _add_candidate_source_geometries(self) -> None:
+        """Draw read-only comparison boxes for each checked candidate source.
+
+        These are plain LineSet overlays, never EditableTargets: they are not
+        registered anywhere `pick_oriented_box` looks, so clicking them cannot
+        create or select an editable target.
+        """
+        if self.candidate_sources_result is None:
+            return
+        for key, _label in CANDIDATE_SOURCES:
+            if not self.candidate_checks[key].checked:
+                continue
+            candidates = getattr(self.candidate_sources_result, key, ())
+            color = CANDIDATE_SOURCE_COLORS[key]
+            for candidate_index, candidate in enumerate(candidates):
+                pose = candidate.pose
+                box = o3d.geometry.OrientedBoundingBox(pose.position, pose.rotation, pose.dims)
+                lines = o3d.geometry.LineSet.create_from_oriented_bounding_box(box)
+                material = rendering.MaterialRecord()
+                material.shader = "unlitLine"
+                material.line_width = 3.0 if candidate.accepted else 1.5
+                material.base_color = color
+                self.scene.scene.add_geometry(
+                    f"candidate-{key}-{candidate_index}", lines, material
+                )
+
+    def _compute_candidates(self) -> None:
+        if compute_candidate_sources is None:
+            self.candidate_status.text = "unavailable: annotation_candidates module not found"
+            return
+        self.candidate_status.text = "Computing candidates…"
+        try:
+            result = compute_candidate_sources(
+                self.points,
+                self.rgb,
+                self.T_world_camera,
+                self.camera,
+                T_world_cloud=self.T_world_cloud,
+                dino_proposer_checkpoint=self.args.dino_proposer_checkpoint,
+                dino_verifier_checkpoint=self.args.dino_verifier_checkpoint,
+            )
+        except Exception as error:  # noqa: BLE001 - surface any backend failure in the status bar
+            self.candidate_sources_result = None
+            self.candidate_status.text = f"Candidate computation failed: {error}"
+            self._refresh_scene()
+            return
+        self.candidate_sources_result = result
+        message = f"Computed candidates for {self.snapshot.name}."
+        if result.warnings:
+            message += " " + " ".join(result.warnings)
+        self.candidate_status.text = message
+        self._refresh_scene()
+
     def _refresh_rgb(self) -> None:
         if self.rgb is None:
             return
@@ -438,16 +641,6 @@ class AnnotatorWindow:
                 0.55 * shown[self.selected_mask] + 0.45 * overlay[self.selected_mask]
             ).astype(np.uint8)
         if self.camera is not None and self.T_world_camera is not None:
-            roi = self._active_roi()
-            if roi is not None:
-                low, high = roi
-                draw_projected_edges(
-                    shown,
-                    cuboid_corners((low + high) / 2.0, np.eye(3), high - low),
-                    self.T_world_camera,
-                    self.camera,
-                    ROI_COLOR,
-                )
             for index, target in enumerate(self.controller.document.targets):
                 color = np.asarray(BOX_COLORS[target.review_status][:3]) * 255.0
                 if index == self.controller.selected:
@@ -580,33 +773,6 @@ class AnnotatorWindow:
         if not self._loading_widgets:
             self.controller.set_ignore_reason(text)
 
-    def _active_roi(self) -> tuple[np.ndarray, np.ndarray] | None:
-        document = self.controller.document
-        if document.roi_min is None or document.roi_max is None:
-            return None
-        if np.any(document.roi_min >= document.roi_max):
-            return None
-        return document.roi_min, document.roi_max
-
-    def _set_full_workspace_roi(self) -> None:
-        self.controller.document.roi_min, self.controller.document.roi_max = full_workspace_roi(self.points)
-        self._load_document_widgets()
-        self._mark_widget_dirty()
-        self._refresh_scene()
-        self._refresh_rgb()
-
-    def _roi_fields_changed(self) -> None:
-        if self._loading_widgets:
-            return
-        values = np.array([field.double_value for field in self.roi_fields])
-        if not np.all(np.isfinite(values)) or np.any(values[:3] >= values[3:]):
-            self.status.text = "ROI needs finite min XYZ values strictly below max XYZ."
-            return
-        self.controller.document.roi_min, self.controller.document.roi_max = values[:3], values[3:]
-        self._mark_widget_dirty()
-        self._refresh_scene()
-        self._refresh_rgb()
-
     def _mark_widget_dirty(self) -> None:
         if not self._loading_widgets:
             self.controller.dirty = True
@@ -617,6 +783,41 @@ class AnnotatorWindow:
         self.fields[axis].double_value += sign * step
         self._pose_fields_changed()
         self._load_target_widgets()
+
+    def _rotate_selected_90(self) -> None:
+        """Cycle the selected target through alternative box-face labelings.
+
+        This is a pose edit like any manual field change: it goes through
+        `AnnotationController.set_pose`, so it is undoable and marks the
+        document dirty rather than silently rewriting the target in place.
+        """
+        target = self.controller.target
+        if target is None:
+            self.status.text = "Select a block before rotating."
+            return
+        state = self._rotate_cycle_state
+        continuing = (
+            state is not None
+            and state[0] == target.id
+            and self._rotate_cycle_last_applied is not None
+            and np.allclose(target.rotation, self._rotate_cycle_last_applied, atol=1e-9)
+        )
+        if continuing:
+            _, base, index = state
+        else:
+            base, index = target.rotation.copy(), 0
+        index += 1
+        rotation = next_symmetry_rotation(base, index, target.dimensions)
+        self._rotate_cycle_state = (target.id, base, index)
+        self._rotate_cycle_last_applied = rotation.copy()
+        euler = Rotation.from_matrix(rotation).as_euler("xyz", degrees=True)
+        self.controller.set_pose(target.position, euler)
+        self._load_document_widgets()
+        self._refresh_scene()
+        self.status.text = (
+            "Rotated to an alternative face labeling of the same box; "
+            "review and approve if this matches the physical block."
+        )
 
     def _approve(self) -> None:
         if self.controller.target is None:
@@ -848,14 +1049,11 @@ class AnnotatorWindow:
         return gui.Widget.EventCallbackResult.IGNORED
 
     def _commit_document_widgets(self) -> None:
+        # ROI is set unconditionally to the full workspace in _load_snapshot and
+        # is never edited from the UI, so only these two fields need committing.
         document = self.controller.document
         document.annotation_complete = self.complete.checked
         document.notes = self.notes.text_value
-        values = np.array([field.double_value for field in self.roi_fields])
-        if document.annotation_complete or document.roi_min is not None or np.any(values != 0):
-            document.roi_min, document.roi_max = values[:3], values[3:]
-        else:
-            document.roi_min = document.roi_max = None
 
     def _save(self) -> bool:
         self._commit_document_widgets()
@@ -899,7 +1097,10 @@ class AnnotatorWindow:
     def _on_snapshot_changed(self, _name: str, index: int) -> None:
         if self._changing_snapshot_combo:
             return
-        chosen = self.snapshots[index]
+        self._go_to_snapshot(self.snapshots[index])
+
+    def _go_to_snapshot(self, chosen: Path) -> None:
+        """Dirty-check-then-load path shared by the combobox and Prev/Next."""
         if chosen == self.snapshot:
             return
         if self.sam_worker is not None:
@@ -955,29 +1156,35 @@ def main() -> None:
         action="store_true",
         help="Use only locally cached SAM configuration and weights.",
     )
+    parser.add_argument(
+        "--dino-proposer-checkpoint",
+        type=Path,
+        default=None,
+        help="Checkpoint enabling the DINO candidate proposer source (default: unavailable).",
+    )
+    parser.add_argument(
+        "--dino-verifier-checkpoint",
+        type=Path,
+        default=None,
+        help="Checkpoint enabling the DINO candidate verifier/reranker source "
+        "(default: unavailable).",
+    )
     args = parser.parse_args()
     if not np.isfinite(args.pick_radius) or args.pick_radius <= 0:
         parser.error("--pick-radius must be a positive finite number")
-    root = args.root.resolve()
-    snapshots = discover_snapshot_dirs(root)
+    args.root = args.root.resolve()
+    args.config = args.config.resolve()
+    snapshots = discover_snapshot_dirs(args.root)
     if not snapshots:
-        raise ValueError(f"No annotatable snapshots under {root}")
+        raise ValueError(f"No annotatable snapshots under {args.root}")
     initial = (args.snapshot or snapshots[0]).resolve()
-    if initial.parent != root:
-        raise ValueError(f"Snapshot {initial} must be a direct child of {root}")
+    if initial.parent != args.root:
+        raise ValueError(f"Snapshot {initial} must be a direct child of {args.root}")
     gui.Application.instance.initialize()
     # Keep the Python owner alive for the entire GUI event loop. Discarding the
     # temporary AnnotatorWindow before run() can destroy Open3D's renderer and
     # GLX pbuffer while Filament still uses it (GLXBadPbuffer on startup/click).
-    annotator = AnnotatorWindow(
-        root,
-        initial,
-        args.config.resolve(),
-        args.pick_radius,
-        args.sam_model,
-        args.sam_device,
-        args.sam_offline,
-    )
+    annotator = AnnotatorWindow(args, initial)
     gui.Application.instance.run()
     del annotator
 

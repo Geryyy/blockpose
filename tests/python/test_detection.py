@@ -19,7 +19,6 @@ from blockpose.detection import (
     SensorContext,
     _make_hypothesis,
     _proposal_size_first_key,
-    _remove_ground,
     _select_conflict_alternatives,
     _select_hypotheses,
     _split_connected_region,
@@ -30,6 +29,7 @@ from blockpose.detection import (
     detect_blocks_detailed,
     detect_scene_sample,
     free_space_violations_from_misses,
+    remove_ground,
     visibility_evidence,
 )
 from blockpose.evaluate import evaluate, rotation_error_deg
@@ -202,7 +202,7 @@ def test_ground_removal_returns_local_sloped_ground_frame() -> None:
     ground_points = np.column_stack([xx.ravel(), yy.ravel(), zz.ravel()])
     object_points = ground_points[::8].copy()
     object_points[:, 2] += 0.6
-    above, ground = _remove_ground(
+    above, ground = remove_ground(
         np.vstack([ground_points, object_points]), DetectionParams(ground_ransac_iters=200)
     )
     assert ground.source == "ransac"
@@ -217,7 +217,7 @@ def test_local_ground_preserves_points_five_cm_above_support() -> None:
     ground = np.column_stack([xx.ravel(), yy.ravel(), 0.04 * xx.ravel()])
     raised = ground[::20].copy()
     raised[:, 2] += 0.06
-    above, model = _remove_ground(
+    above, model = remove_ground(
         np.vstack([ground, raised]),
         DetectionParams(local_ground_clearance=0.05, ground_ransac_iters=200),
     )
@@ -227,7 +227,7 @@ def test_local_ground_preserves_points_five_cm_above_support() -> None:
 
 def test_ground_removal_exact_three_point_cloud_is_safe() -> None:
     points = np.array([[0.0, 0.0, 0.0], [0.4, 0.0, 0.0], [0.0, 0.4, 0.0]])
-    above, ground = _remove_ground(points, DetectionParams())
+    above, ground = remove_ground(points, DetectionParams())
     assert above.shape == (0, 3)
     assert ground.normal.shape == (3,)
     assert detect_blocks(points) == []
@@ -237,7 +237,7 @@ def test_ground_removal_falls_back_when_coarse_voxels_collapse() -> None:
     # Distinct 4 cm detector voxels, but all points occupy fewer than three
     # voxels at the 10 cm ground-RANSAC resolution.
     points = np.array([[0.001, 0.001, 0.0], [0.045, 0.001, 0.0], [0.085, 0.001, 0.2]])
-    above, ground = _remove_ground(points, DetectionParams())
+    above, ground = remove_ground(points, DetectionParams())
     assert ground.source == "percentile"
     assert above.shape == (1, 3)
     assert detect_blocks(points) == []

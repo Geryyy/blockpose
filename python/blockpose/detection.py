@@ -491,7 +491,7 @@ def _voxel_downsample(pts: np.ndarray, voxel_size: float) -> np.ndarray:
     return result[np.lexsort((result[:, 2], result[:, 1], result[:, 0]))]
 
 
-def _remove_ground(
+def remove_ground(
     pts: np.ndarray, params: DetectionParams
 ) -> tuple[np.ndarray, GroundPlane | LocalGroundModel]:
     """Remove ground-level points using RANSAC plane fitting.
@@ -1436,7 +1436,7 @@ def _detect_blocks_impl(
 
     # Stage 2: Ground removal
     stage_started = perf_counter()
-    pts, ground = _remove_ground(pts, params)
+    pts, ground = remove_ground(pts, params)
     trace_above_support = pts.copy() if collect_trace else np.empty((0, 3))
     timings["ground_model"] = (perf_counter() - stage_started) * 1000.0
     counts["above_support_points"] = len(pts)

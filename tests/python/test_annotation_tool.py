@@ -9,17 +9,22 @@ from blockpose.annotation_tool import (
     AnnotationController,
     AnnotationDocument,
     EditableTarget,
+    adjacent_snapshot,
     camera_ray,
+    default_max_range_m,
     full_workspace_roi,
     initial_camera_focus,
     nearest_point_to_ray,
     nearest_point_to_ray_with_distance,
+    next_symmetry_rotation,
     orientation_summary,
     pick_oriented_box,
+    remove_background_by_range,
     save_annotations_atomic,
     snapshot_selection_index,
 )
 from blockpose.annotations import load_annotations
+from blockpose.pose import BLOCK_DIMS, symmetry_equivalents
 from scipy.spatial.transform import Rotation
 
 UTC = timezone.utc
@@ -253,6 +258,71 @@ def test_snapshot_selection_index_restores_loaded_snapshot() -> None:
         assert "not in the snapshot list" in str(error)
     else:
         raise AssertionError("missing current snapshot accepted")
+
+
+def test_adjacent_snapshot_clamps_without_wrapping() -> None:
+    snapshots = [Path("a"), Path("b"), Path("c")]
+    assert adjacent_snapshot(snapshots, Path("b"), -1) == Path("a")
+    assert adjacent_snapshot(snapshots, Path("b"), 1) == Path("c")
+    assert adjacent_snapshot(snapshots, Path("a"), -1) is None
+    assert adjacent_snapshot(snapshots, Path("c"), 1) is None
+
+
+def test_next_symmetry_rotation_cycles_through_box_symmetries() -> None:
+    base = Rotation.from_euler("xyz", [12, -34, 56], degrees=True).as_matrix()
+    alternatives = symmetry_equivalents(base, BLOCK_DIMS)
+    assert np.allclose(next_symmetry_rotation(base, 0, BLOCK_DIMS), base)
+    for index in range(len(alternatives)):
+        assert np.allclose(next_symmetry_rotation(base, index, BLOCK_DIMS), alternatives[index])
+    # Cycling all the way around returns to the starting orientation.
+    assert np.allclose(next_symmetry_rotation(base, len(alternatives), BLOCK_DIMS), base)
+    # Every alternative is still a genuine rotation matrix.
+    for index in range(len(alternatives)):
+        rotated = next_symmetry_rotation(base, index, BLOCK_DIMS)
+        assert np.allclose(rotated.T @ rotated, np.eye(3), atol=1e-9)
+        assert np.isclose(np.linalg.det(rotated), 1.0)
+
+
+def test_remove_background_by_range_keeps_only_points_within_radius() -> None:
+    origin = np.array([1.0, 2.0, 0.0])
+    points = np.array(
+        [
+            [1.0, 2.0, 0.0],  # at the origin: distance 0
+            [1.0, 2.0, 4.0],  # distance 4, inside
+            [1.0, 2.0, 6.0],  # distance 6, right on the boundary
+            [1.0, 2.0, 6.5],  # distance 6.5, outside
+        ]
+    )
+    kept = remove_background_by_range(points, origin, max_range_m=6.0)
+    assert kept.shape == (3, 3)
+    assert np.allclose(kept, points[:3])
+
+
+def test_remove_background_by_range_handles_empty_input() -> None:
+    kept = remove_background_by_range(np.empty((0, 3)), np.zeros(3), max_range_m=5.0)
+    assert kept.shape == (0, 3)
+
+
+def test_remove_background_by_range_rejects_non_positive_max_range() -> None:
+    points = np.zeros((1, 3))
+    try:
+        remove_background_by_range(points, np.zeros(3), max_range_m=0.0)
+    except ValueError as error:
+        assert "positive" in str(error)
+    else:
+        raise AssertionError("non-positive max_range_m accepted")
+
+
+def test_default_max_range_m_is_a_mild_trim_not_the_full_extent() -> None:
+    origin = np.zeros(3)
+    # 100 points spread from 1m to 10m, plus one far outlier at 50m.
+    near = np.column_stack([np.linspace(1.0, 10.0, 100), np.zeros(100), np.zeros(100)])
+    outlier = np.array([[50.0, 0.0, 0.0]])
+    points = np.vstack([near, outlier])
+    default = default_max_range_m(points, origin)
+    # A 95th-percentile trim should sit well below the outlier but still
+    # cover nearly all of the near-range cloud.
+    assert 9.0 < default < 50.0
 
 
 def test_ray_box_picking_chooses_nearest() -> None:
