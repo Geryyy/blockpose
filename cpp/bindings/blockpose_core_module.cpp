@@ -279,6 +279,120 @@ nb::dict filter_exclusion_boxes_from_numpy(
   nb::dict output; output["points"] = points_to_numpy(kept); output["input_count"] = points.size(); output["removed_count"] = removed; return output;
 }
 
+std::vector<blockpose::core::Pzs100RailPose> pzs100_rails_from_numpy(
+  const nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig> & parent_positions,
+  const nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig> & rail_positions,
+  const nb::ndarray<nb::numpy, double, nb::ndim<3>, nb::c_contig> & parent_rotations,
+  const nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig> & outward_axes_parent)
+{
+  const std::size_t count = parent_positions.shape(0);
+  if (parent_positions.shape(1) != 3 || rail_positions.shape(0) != count ||
+    rail_positions.shape(1) != 3 || parent_rotations.shape(0) != count ||
+    parent_rotations.shape(1) != 3 || parent_rotations.shape(2) != 3 ||
+    outward_axes_parent.shape(0) != count || outward_axes_parent.shape(1) != 3)
+  {
+    throw std::invalid_argument(
+            "PZS100 rails require parent_positions and rail_positions (N,3), "
+            "parent_rotations (N,3,3), and outward_axes_parent (N,3)");
+  }
+  std::vector<blockpose::core::Pzs100RailPose> rails;
+  rails.reserve(count);
+  for (std::size_t index = 0; index < count; ++index) {
+    blockpose::core::Pzs100RailPose rail;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      rail.parent_position(axis) = parent_positions(index, axis);
+      rail.rail_position(axis) = rail_positions(index, axis);
+      rail.outward_axis_parent(axis) = outward_axes_parent(index, axis);
+      for (std::size_t column = 0; column < 3; ++column) {
+        rail.world_from_parent_rotation(axis, column) = parent_rotations(index, axis, column);
+      }
+    }
+    rails.push_back(rail);
+  }
+  return rails;
+}
+
+nb::dict pzs100_filter_boxes_to_dict(
+  const std::vector<blockpose::core::Pzs100GripperFilterBox> & boxes)
+{
+  auto numpy = nb::module_::import_("numpy");
+  auto centers = nb::cast<nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig>>(
+    numpy.attr("empty")(nb::make_tuple(boxes.size(), 3), numpy.attr("float64")));
+  auto rotations = nb::cast<nb::ndarray<nb::numpy, double, nb::ndim<3>, nb::c_contig>>(
+    numpy.attr("empty")(nb::make_tuple(boxes.size(), 3, 3), numpy.attr("float64")));
+  auto sizes = nb::cast<nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig>>(
+    numpy.attr("empty")(nb::make_tuple(boxes.size(), 3), numpy.attr("float64")));
+  auto rail_starts = nb::cast<nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig>>(
+    numpy.attr("empty")(nb::make_tuple(boxes.size(), 3), numpy.attr("float64")));
+  auto rail_ends = nb::cast<nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig>>(
+    numpy.attr("empty")(nb::make_tuple(boxes.size(), 3), numpy.attr("float64")));
+  auto outward_normals = nb::cast<nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig>>(
+    numpy.attr("empty")(nb::make_tuple(boxes.size(), 3), numpy.attr("float64")));
+  for (std::size_t index = 0; index < boxes.size(); ++index) {
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      centers(index, axis) = boxes[index].box.center(axis);
+      sizes(index, axis) = boxes[index].box.size(axis);
+      rail_starts(index, axis) = boxes[index].rail_start(axis);
+      rail_ends(index, axis) = boxes[index].rail_end(axis);
+      outward_normals(index, axis) = boxes[index].outward_normal(axis);
+      for (std::size_t column = 0; column < 3; ++column) {
+        rotations(index, axis, column) = boxes[index].box.rotation(axis, column);
+      }
+    }
+  }
+  nb::dict output;
+  output["centers"] = centers;
+  output["rotations"] = rotations;
+  output["sizes"] = sizes;
+  output["rail_starts"] = rail_starts;
+  output["rail_ends"] = rail_ends;
+  output["outward_normals"] = outward_normals;
+  return output;
+}
+
+nb::dict pzs100_filter_boxes_from_numpy(
+  const nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig> & parent_positions,
+  const nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig> & rail_positions,
+  const nb::ndarray<nb::numpy, double, nb::ndim<3>, nb::c_contig> & parent_rotations,
+  const nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig> & outward_axes_parent,
+  const blockpose::core::Pzs100SelfFilterParameters & parameters)
+{
+  const auto rails = pzs100_rails_from_numpy(
+    parent_positions, rail_positions, parent_rotations, outward_axes_parent);
+  std::vector<blockpose::core::Pzs100GripperFilterBox> boxes;
+  {nb::gil_scoped_release release; boxes = blockpose::core::make_pzs100_gripper_filter_boxes(rails, parameters);}
+  return pzs100_filter_boxes_to_dict(boxes);
+}
+
+nb::dict filter_pzs100_gripper_from_numpy(
+  const nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig> & points,
+  const nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig> & parent_positions,
+  const nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig> & rail_positions,
+  const nb::ndarray<nb::numpy, double, nb::ndim<3>, nb::c_contig> & parent_rotations,
+  const nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig> & outward_axes_parent,
+  const blockpose::core::Pzs100SelfFilterParameters & parameters)
+{
+  const auto input = points_from_numpy(points);
+  const auto rails = pzs100_rails_from_numpy(
+    parent_positions, rail_positions, parent_rotations, outward_axes_parent);
+  std::vector<blockpose::core::Pzs100GripperFilterBox> detailed_boxes;
+  blockpose::core::Points kept;
+  std::size_t removed = 0U;
+  {
+    nb::gil_scoped_release release;
+    detailed_boxes = blockpose::core::make_pzs100_gripper_filter_boxes(rails, parameters);
+    std::vector<blockpose::core::OrientedBox> boxes;
+    boxes.reserve(detailed_boxes.size());
+    for (const auto & box : detailed_boxes) {boxes.push_back(box.box);}
+    kept = blockpose::core::remove_points_inside_oriented_boxes(input, boxes, &removed);
+  }
+  auto output = pzs100_filter_boxes_to_dict(detailed_boxes);
+  output["points"] = points_to_numpy(kept);
+  output["input_count"] = input.size();
+  output["removed_count"] = removed;
+  return output;
+}
+
 blockpose::core::SensorContext sensor_context_from_numpy(
   const nb::ndarray<nb::numpy, double, nb::ndim<1>, nb::c_contig> & origin,
   const nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig> & ray_directions,
@@ -726,6 +840,22 @@ NB_MODULE(_core, module)
     "Keep points inside an inclusive axis-aligned workspace ROI.");
   module.def("filter_exclusion_boxes", &filter_exclusion_boxes_from_numpy, nb::arg("points"), nb::arg("centers"), nb::arg("rotations"), nb::arg("sizes"),
     "Remove points inside explicit oriented exclusion boxes.");
+  auto pzs100_parameters = nb::class_<blockpose::core::Pzs100SelfFilterParameters>(
+    module, "Pzs100SelfFilterParameters");
+  pzs100_parameters.def(nb::init<>())
+    .def_rw("outboard_extent_m", &blockpose::core::Pzs100SelfFilterParameters::outboard_extent_m)
+    .def_rw("cross_rail_extent_m", &blockpose::core::Pzs100SelfFilterParameters::cross_rail_extent_m)
+    .def_rw("rail_end_margin_m", &blockpose::core::Pzs100SelfFilterParameters::rail_end_margin_m);
+  module.def("pzs100_filter_boxes", &pzs100_filter_boxes_from_numpy,
+    nb::arg("parent_positions"), nb::arg("rail_positions"), nb::arg("parent_rotations"),
+    nb::arg("outward_axes_parent"),
+    nb::arg("parameters") = blockpose::core::Pzs100SelfFilterParameters{},
+    "Build PZS100 K9/K11 to K10/K12 outward exclusion boxes from world-frame FK poses.");
+  module.def("filter_pzs100_gripper", &filter_pzs100_gripper_from_numpy,
+    nb::arg("points"), nb::arg("parent_positions"), nb::arg("rail_positions"),
+    nb::arg("parent_rotations"), nb::arg("outward_axes_parent"),
+    nb::arg("parameters") = blockpose::core::Pzs100SelfFilterParameters{},
+    "Build PZS100 rail boxes and remove points inside them; returns the filter diagnostics and boxes.");
 #ifdef BLOCKPOSE_CORE_WITH_VISION
   auto rgb_parameters = nb::class_<blockpose::vision::RgbEdgePriorParameters>(
     module, "RgbEdgePriorParameters");

@@ -1,0 +1,25 @@
+# PZS100 gripper point-cloud self-filter profile.
+#
+# The two FK rail segments (K9 -> K10_left_rail and K11 -> K12_right_rail)
+# define the inside faces of outward-facing exclusion boxes.  The C++ core
+# constructs and applies those boxes; an adapter supplies these frame names
+# and the corresponding world-frame TF poses for each snapshot.
+schema_version: 1
+model: pzs100
+
+enabled: true
+outboard_extent_m: 0.30
+cross_rail_extent_m: 0.90
+rail_end_margin_m: 0.00
+
+rails:
+  - name: left
+    parent_frame: elastic/K9
+    rail_frame: elastic/K10_left_rail
+    # K9 local +Z points outward, to the left of the gripper.
+    outward_axis_parent: [0.0, 0.0, 1.0]
+  - name: right
+    parent_frame: elastic/K11
+    rail_frame: elastic/K12_right_rail
+    # K11 local +Z points outward, to the right of the gripper.
+    outward_axis_parent: [0.0, 0.0, 1.0]

@@ -28,4 +28,33 @@ TEST(GripperSelfFilter, KeepsInclusiveAxisAlignedWorkspace)
   EXPECT_THROW(keep_points_inside_axis_aligned_box({}, Point::Ones(), Point::Zero()), std::invalid_argument);
 }
 
+TEST(GripperSelfFilter, BuildsPzs100OutboardBoxFromRailEndpoints)
+{
+  Pzs100RailPose rail;
+  rail.parent_position = Point(1.0, 2.0, 3.0);
+  rail.rail_position = Point(1.0, 2.0, 4.0);
+  rail.outward_axis_parent = Point::UnitX();
+  const Pzs100SelfFilterParameters parameters{0.4, 0.6, 0.1};
+
+  const auto result = make_pzs100_gripper_filter_box(rail, parameters);
+
+  EXPECT_TRUE(result.rail_start.isApprox(rail.parent_position));
+  EXPECT_TRUE(result.rail_end.isApprox(rail.rail_position));
+  EXPECT_TRUE(result.outward_normal.isApprox(Point::UnitX()));
+  EXPECT_TRUE(result.box.center.isApprox(Point(1.2, 2.0, 3.5)));
+  EXPECT_TRUE(result.box.size.isApprox(Point(1.2, 0.4, 0.6)));
+  EXPECT_TRUE(result.box.rotation.col(0).isApprox(Point::UnitZ()));
+  EXPECT_TRUE(result.box.rotation.col(1).isApprox(Point::UnitX()));
+  EXPECT_TRUE(result.box.rotation.col(2).isApprox(Point::UnitY()));
+}
+
+TEST(GripperSelfFilter, RejectsDegeneratePzs100Rail)
+{
+  Pzs100RailPose rail;
+  EXPECT_THROW(make_pzs100_gripper_filter_box(rail), std::invalid_argument);
+  rail.rail_position = Point::UnitX();
+  rail.outward_axis_parent = Point::UnitX();
+  EXPECT_THROW(make_pzs100_gripper_filter_box(rail), std::invalid_argument);
+}
+
 }}  // namespace blockpose::core

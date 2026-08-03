@@ -87,9 +87,16 @@ own build and replay tests in the source ROS workspace.
 ## Portable C++ core
 
 `cpp/` is the production algorithm: it contains the ROS-free filtering,
-geometry, priors, cuboid refinement, selection, and candidate tracing used by
-`concrete_block_detector`. Build and install it before configuring the ROS
-wrapper:
+including the PZS100 K9/K11 → K10/K12 outward rail-box self-filter, geometry,
+priors, cuboid refinement, selection, and candidate tracing used by
+`concrete_block_detector`. Adapters resolve their own TF names and pass the
+world-frame rail poses into this shared implementation. Build and install it
+before configuring the ROS wrapper:
+
+The standalone PZS100 profile is
+[`config/pzs100_gripper_filter.yaml`](config/pzs100_gripper_filter.yaml). It
+is intentionally ROS-free and can be used by snapshot/annotation adapters on
+the GPU machine.
 
 ```bash
 cmake -S cpp -B .build/blockpose-core -DBLOCKPOSE_CORE_BUILD_TESTING=ON

@@ -130,7 +130,7 @@ repo still runs the pure-Python implementation:
 | Classical RGB edge prior | **Both**, independently: `python/blockpose/rgb_edge_prior.py` **and** `cpp/src/rgb_edge_prior.cpp` (`blockpose::vision`, built behind `BLOCKPOSE_VISION_BUILD`) | **No** — `blockpose::vision` isn't in the nanobind bindings at all |
 | `Observability`/`calibrated_confidence` classification | `python/blockpose/detection.py::_diagnostics`, `confidence.py` | **No** |
 | Per-stage timing instrumentation | `python/blockpose/detection.py::_detect_blocks_impl` (11 named stages) | **No** — `pipeline.hpp` has zero timing code |
-| `gripper_self_filter.hpp` (`OrientedBox` exclusion) | C++ only, tested, **zero call sites anywhere** | N/A, and out of scope — see below |
+| PZS100 gripper self-filter | `gripper_self_filter.hpp`: rail endpoint poses → two outward-facing boxes → exclusion; used by the ROS adapter and snapshot runner | `pzs100_filter_boxes()` and `filter_pzs100_gripper()` accept world-frame FK poses; frame lookup remains adapter-specific |
 
 **Explicitly out of scope, correctly Python-only, no action needed:**
 `rgb_verifier.py`, `rgb_region_proposer.py`, `_dino_backbone.py`,
@@ -139,11 +139,11 @@ repo still runs the pure-Python implementation:
 `annotation_tool.py`, `annotation_candidates.py`, `annotation_snap.py`,
 `annotation_batch.py`, `annotation_roi.py`, `annotations.py`,
 `tools/annotate_snapshot.py` (annotation GUI); `synth.py`, `scenes.py`,
-`scenario_matrix.py` (synthetic scene generation for tests). The gripper
-self-filter is also out of scope for now: the gripper is articulated
-(boom/arm joints downstream of the sensor mount) and real `tf.yaml` snapshots
-never capture its pose, so there's no FK data to build a box filter from —
-revisit only if per-snapshot joint-state logging is ever added.
+`scenario_matrix.py` (synthetic scene generation for tests). The PZS100
+self-filter is intentionally not a TF reader: its portable API consumes
+world-frame parent/rail poses, while ROS and snapshot adapters resolve the
+configured frame names. This keeps the articulated robot model out of the
+detector core and makes the same filter available to standalone evaluation.
 
 **Eval/benchmark harnesses are a partial exception, worth a deliberate
 decision, not silent inertia:** `tools/eval_real_snapshots.py`,
