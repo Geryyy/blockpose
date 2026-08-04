@@ -425,9 +425,7 @@ blockpose::core::SensorContext sensor_context_from_numpy(
   const nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig> & ray_directions,
   const nb::ndarray<nb::numpy, double, nb::ndim<1>, nb::c_contig> & ranges,
   const nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig> & miss_directions,
-  const nb::object & ray_origins, const nb::object & miss_origins,
-  const nb::object & occluder_centers, const nb::object & occluder_rotations,
-  const nb::object & occluder_sizes)
+  const nb::object & ray_origins, const nb::object & miss_origins)
 {
   blockpose::core::SensorContext context;
   context.origin = point_from_numpy(origin, "origin");
@@ -438,26 +436,6 @@ blockpose::core::SensorContext sensor_context_from_numpy(
   context.miss_directions = points_from_numpy(miss_directions);
   if (!ray_origins.is_none()) {context.ray_origins = points_from_numpy(nb::cast<nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig>>(ray_origins));}
   if (!miss_origins.is_none()) {context.miss_origins = points_from_numpy(nb::cast<nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig>>(miss_origins));}
-  // Volumes known to stand between the sensor and the scene -- in practice the
-  // gripper, straight from FK. Supplied as the same centre/rotation/size triple
-  // `filter_pzs100_gripper` already returns, so a caller passes its diagnostics
-  // through without reshaping anything.
-  if (!occluder_centers.is_none()) {
-    const auto centers = nb::cast<nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig>>(occluder_centers);
-    const auto rotations = nb::cast<nb::ndarray<nb::numpy, double, nb::ndim<3>, nb::c_contig>>(occluder_rotations);
-    const auto sizes = nb::cast<nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig>>(occluder_sizes);
-    if (centers.shape(0) != rotations.shape(0) || centers.shape(0) != sizes.shape(0)) {
-      throw std::invalid_argument("occluder centers, rotations and sizes must have equal length");
-    }
-    for (std::size_t i = 0; i < centers.shape(0); ++i) {
-      blockpose::core::OrientedBox box;
-      box.center = blockpose::core::Point(centers(i, 0), centers(i, 1), centers(i, 2));
-      for (std::size_t r = 0; r < 3; ++r) for (std::size_t c = 0; c < 3; ++c) {box.rotation(r, c) = rotations(i, r, c);}
-      box.size = blockpose::core::Point(sizes(i, 0), sizes(i, 1), sizes(i, 2));
-      blockpose::core::validate_oriented_box(box);
-      context.occluders.push_back(box);
-    }
-  }
   return blockpose::core::validate_sensor_context(std::move(context));
 }
 
@@ -844,11 +822,7 @@ NB_MODULE(_core, module)
     .def_static("from_arrays", &sensor_context_from_numpy, nb::arg("origin"),
       nb::arg("ray_directions"), nb::arg("ranges"), nb::arg("miss_directions"),
       nb::arg("ray_origins") = nb::none(), nb::arg("miss_origins") = nb::none(),
-      nb::arg("occluder_centers") = nb::none(), nb::arg("occluder_rotations") = nb::none(),
-      nb::arg("occluder_sizes") = nb::none(),
-      "Build and validate ray/free-space evidence from contiguous float64 NumPy arrays. "
-      "Optional occluder boxes mark volumes known to block the sensor's view, so rays they "
-      "stop are not read as evidence against hypotheses behind them.");
+      "Build and validate ray/free-space evidence from contiguous float64 NumPy arrays.");
   module.def("discover", &discover<float>, nb::arg("points"), nb::arg("params") = blockpose::core::DetectionParameters{},
     "Run geometry-only scene discovery using typed C++ DetectionParameters.");
   module.def("discover", &discover<double>, nb::arg("points"), nb::arg("params") = blockpose::core::DetectionParameters{},

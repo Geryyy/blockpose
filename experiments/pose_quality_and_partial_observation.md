@@ -132,3 +132,60 @@ the missing extent falls inside a known shadow* is narrow, keeps the gate's
 protection everywhere else, and is the thing these measurements actually
 support. A global relaxation was already falsified: recall unchanged, precision
 down.
+
+## Two mechanisms built, measured, and reverted
+
+Both targeted a stage that is not where these blocks fail. Recording them so
+the next attempt does not repeat either.
+
+**Occluder-aware visibility evidence.** `SensorContext` carried known occluder
+volumes and `visibility_evidence` dropped rays a known occluder had stopped,
+instead of counting them incident-but-unsupported. Correct in principle and
+unit-tested. Supplying the FK gripper boxes across the annotated set:
+
+| gripper occluders | recall (centre) | recall (strict) | precision |
+| --- | ---: | ---: | ---: |
+| off | 44/59 = 75% | 42/59 = **71%** | 77% |
+| on | 44/59 = 75% | 38/59 = **64%** | 77% |
+
+No gain and a 7-point strict regression: dropping occluded rays removes their
+penalty but also their support, shrinking score denominators and making
+hypotheses less separable.
+
+**Shadow-aware relaxation of the minimum-extent gate.** A component under the
+0.30 m minimum was to be admitted when the missing extent lay inside a known
+shadow. Swept at 0.5/0.7/0.9 hidden-fraction thresholds: recall 44/59 at every
+one, identical to off. It never fires.
+
+### Why neither worked: the diagnosis was an artifact
+
+The evidence for "these blocks fail the extent gate" came from re-running the
+detector on clouds CROPPED to a single block. Cropping naturally produces short
+extents, so the gate failures were an artifact of the probe, not pipeline
+behaviour. On the whole cloud:
+
+| component containing a heavy_occlusion block | ext X | ext Y | ext Z | points |
+| --- | ---: | ---: | ---: | ---: |
+| median of 10 | 0.88 | 0.62 | 0.76 | 328 |
+
+**0 of 10 fail any proposal gate.** They pass comfortably, so a waiver on that
+gate can never fire, and evidence scoring cannot help either because 7 of the 10
+never produce a hypothesis at all.
+
+The failure is therefore downstream of clustering and upstream of scoring --
+region splitting, plane fitting, or top/side pairing. The audit's crop-level
+instrumentation is consistent with that (2 plane-classification, 2 top-height,
+1 support-consistency failures), and a top-plane requirement is exactly what a
+gripper standing over a block would defeat. But that is now a hypothesis, and
+the last two were also hypotheses that measured well on a probe and did nothing
+in the pipeline.
+
+### What the next attempt needs first
+
+`ProposalComponentDiagnostics` and the plane/pairing stage outcomes exist in
+C++ but are not exposed through the bindings, which is why every diagnosis here
+had to be reconstructed from an external probe -- and why two of them were
+wrong. Exposing the per-stage outcome for a whole-cloud run, so a block can be
+traced from component to rejection reason without a stand-in, is the
+prerequisite for targeting anything. It is also cheap next to building a third
+mechanism on a guess.

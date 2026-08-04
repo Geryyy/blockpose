@@ -74,83 +74,33 @@ _PYTHON_TO_CORE_PARAMETER = {
 }
 _SHARED_PARAMETER_NAMES = frozenset(
     {
-        "voxel_size",
-        "dbscan_eps",
-        "ground_thickness",
-        "ground_normal_min_z",
-        "ground_ransac_dist",
-        "ground_ransac_iters",
-        "local_ground_cell_size",
-        "local_ground_clearance",
-        "dbscan_min_points",
-        "cluster_min_size",
-        "cluster_max_size",
-        "cluster_min_extent_xy",
-        "cluster_max_extent_xy",
-        "region_max_extent_xy",
-        "cluster_min_extent_z",
-        "cluster_max_extent_z",
-        "cluster_max_center_z",
-        "ransac_dist_thresh",
-        "ransac_num_iterations",
-        "ransac_search_max_points",
-        "ransac_seed",
-        "max_planes",
-        "min_inliers",
-        "top_plane_angle_deg",
-        "side_plane_angle_deg",
-        "block_dims",
-        "candidate_dims",
-        "refine_band",
-        "refine_iterations",
-        "refine_min_points",
-        "refine_max_translation",
-        "refine_max_rotation_deg",
-        "min_score",
-        "proposal_max_components",
-        "conflict_alternatives",
+        "voxel_size", "dbscan_eps", "ground_thickness", "ground_normal_min_z",
+        "ground_ransac_dist", "ground_ransac_iters", "local_ground_cell_size",
+        "local_ground_clearance", "dbscan_min_points", "cluster_min_size",
+        "cluster_max_size", "cluster_min_extent_xy", "cluster_max_extent_xy",
+        "region_max_extent_xy", "cluster_min_extent_z", "cluster_max_extent_z",
+        "cluster_max_center_z", "ransac_dist_thresh", "ransac_num_iterations",
+        "ransac_search_max_points", "ransac_seed", "max_planes", "min_inliers",
+        "top_plane_angle_deg", "side_plane_angle_deg", "block_dims", "candidate_dims",
+        "refine_band", "refine_iterations", "refine_min_points",
+        "refine_max_translation", "refine_max_rotation_deg", "min_score",
+        "proposal_max_components", "conflict_alternatives",
     }
 )
 _CORE_PARAMETER_NAMES = frozenset(
     {
-        "voxel_size",
-        "dbscan_eps",
-        "ground_thickness",
-        "ground_ransac_distance",
-        "ground_ransac_iterations",
-        "ground_normal_min_z",
-        "local_ground_cell_size",
-        "local_ground_clearance",
-        "dbscan_min_points",
-        "cluster_min_size",
-        "cluster_max_size",
-        "cluster_min_extent_xy",
-        "cluster_max_extent_xy",
-        "region_max_extent_xy",
-        "cluster_min_extent_z",
-        "cluster_max_extent_z",
-        "cluster_max_center_z",
-        "ransac_distance",
-        "ransac_iterations",
-        "ransac_search_max_points",
-        "ransac_seed",
-        "max_planes",
-        "min_inliers",
-        "top_plane_angle_deg",
-        "side_plane_angle_deg",
-        "block_dims",
-        "candidate_dims",
-        "refine_band",
-        "refine_iterations",
-        "refine_min_points",
-        "refine_huber_scale",
-        "refine_max_translation",
-        "refine_max_rotation_deg",
-        "refine_preserve_top_axis_if_gravity_worsens",
-        "min_score",
-        "fk_seed_min_evidence_gain",
-        "fit_wide_proposals",
-        "conflict_alternatives",
+        "voxel_size", "dbscan_eps", "ground_thickness", "ground_ransac_distance",
+        "ground_ransac_iterations", "ground_normal_min_z", "local_ground_cell_size",
+        "local_ground_clearance", "dbscan_min_points", "cluster_min_size",
+        "cluster_max_size", "cluster_min_extent_xy", "cluster_max_extent_xy",
+        "region_max_extent_xy", "cluster_min_extent_z", "cluster_max_extent_z",
+        "cluster_max_center_z", "ransac_distance", "ransac_iterations",
+        "ransac_search_max_points", "ransac_seed", "max_planes", "min_inliers",
+        "top_plane_angle_deg", "side_plane_angle_deg", "block_dims", "candidate_dims",
+        "refine_band", "refine_iterations", "refine_min_points", "refine_huber_scale",
+        "refine_max_translation", "refine_max_rotation_deg",
+        "refine_preserve_top_axis_if_gravity_worsens", "min_score",
+        "fk_seed_min_evidence_gain", "fit_wide_proposals", "conflict_alternatives",
         "proposal_max_components",
     }
 )
@@ -169,11 +119,9 @@ def _as_core_parameters(core: Any, params: DetectionParameters | dict[str, Any] 
     if isinstance(params, core.DetectionParameters):
         return params
     defaults = DetectionParameters()
-    values = (
-        dict(params)
-        if isinstance(params, dict)
-        else {field.name: getattr(params, field.name) for field in fields(DetectionParameters)}
-    )
+    values = dict(params) if isinstance(params, dict) else {
+        field.name: getattr(params, field.name) for field in fields(DetectionParameters)
+    }
     unsupported = []
     for name, value in values.items():
         if name in _SHARED_PARAMETER_NAMES or name in _CORE_PARAMETER_NAMES:
@@ -213,8 +161,7 @@ def _diagnostics_from_dict(entry: dict[str, Any]) -> DetectionDiagnostics:
         observability=Observability(entry["observability"]),
         features={name: float(value) for name, value in entry["features"].items()},
         calibrated_confidence=(
-            None
-            if entry["calibrated_confidence"] is None
+            None if entry["calibrated_confidence"] is None
             else float(entry["calibrated_confidence"])
         ),
         proposal_scale_m=(
@@ -231,23 +178,19 @@ def _lineage_from_dict(entry: dict[str, Any], *, source: str) -> RawHypothesisLi
         return None if entry[name] is None else np.asarray(entry[name], dtype=np.float64)
 
     return RawHypothesisLineage(
-        id=entry["id"],
-        proposal_component=int(entry["proposal_component"]),
-        region=int(entry["region"]),
-        top_plane=int(entry["top_plane"]),
+        id=entry["id"], proposal_component=int(entry["proposal_component"]),
+        region=int(entry["region"]), top_plane=int(entry["top_plane"]),
         side_plane=None if entry["side_plane"] is None else int(entry["side_plane"]),
         top_normal=np.asarray(entry["top_normal"], dtype=np.float64),
         top_centroid=np.asarray(entry["top_centroid"], dtype=np.float64),
-        side_normal=optional_point("side_normal"),
-        side_centroid=optional_point("side_centroid"),
+        side_normal=optional_point("side_normal"), side_centroid=optional_point("side_centroid"),
         candidate_dims=tuple(float(v) for v in entry["candidate_dims"]),
         top_only=bool(entry["top_only"]),
         synthesized_pose=_pose_from_dict(entry["synthesized_pose"], source=source),
         evidence=_evidence_from_dict(entry["evidence"]),
         top_support_height_m=float(entry["top_support_height_m"]),
         accepted_to_raw=bool(entry["accepted_to_raw"]),
-        passed_score_threshold=bool(entry["passed_score_threshold"]),
-        fate=entry["fate"],
+        passed_score_threshold=bool(entry["passed_score_threshold"]), fate=entry["fate"],
     )
 
 
@@ -257,29 +200,14 @@ def _as_core_sensor_context(core: Any, context: SensorContext) -> Any:
     directions = np.ascontiguousarray(np.asarray(context.ray_directions, dtype=np.float64))
     ranges = np.ascontiguousarray(np.asarray(context.ranges, dtype=np.float64))
     misses = np.ascontiguousarray(np.asarray(context.miss_directions, dtype=np.float64))
-    ray_origins = (
-        None
-        if context.ray_origins is None
-        else np.ascontiguousarray(np.asarray(context.ray_origins, dtype=np.float64))
+    ray_origins = None if context.ray_origins is None else np.ascontiguousarray(
+        np.asarray(context.ray_origins, dtype=np.float64)
     )
-    miss_origins = (
-        None
-        if context.miss_origins is None
-        else np.ascontiguousarray(np.asarray(context.miss_origins, dtype=np.float64))
+    miss_origins = None if context.miss_origins is None else np.ascontiguousarray(
+        np.asarray(context.miss_origins, dtype=np.float64)
     )
-    # `filter_pzs100_gripper`'s diagnostics dict passes straight through: the
-    # jaw boxes are exactly the volumes standing between sensor and scene.
-    occ = context.occluders or {}
-    centers = occ.get("centers")
-    if centers is not None and len(np.asarray(centers)):
-        occluders = tuple(
-            np.ascontiguousarray(np.asarray(occ[key], dtype=np.float64))
-            for key in ("centers", "rotations", "sizes")
-        )
-    else:
-        occluders = (None, None, None)
     return core.SensorContext.from_arrays(
-        origin, directions, ranges, misses, ray_origins, miss_origins, *occluders
+        origin, directions, ranges, misses, ray_origins, miss_origins
     )
 
 
