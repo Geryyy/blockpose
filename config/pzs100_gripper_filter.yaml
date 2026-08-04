@@ -11,6 +11,17 @@ enabled: true
 outboard_extent_m: 0.30
 cross_rail_extent_m: 0.90
 rail_end_margin_m: 0.00
+# Each jaw box starts this far OUTBOARD of the rail centreline instead of
+# flush with it. The rail frame origin sits inboard of the jaw's contact
+# face, so a flush box reaches past the jaw and deletes points of the block
+# being gripped. Measured over the 59 approved blocks in
+# config/annotated_snapshots_seibersdorf.yaml: at 0.00 the filter removed
+# 6.3% of all block points (up to 55% on one block) and detector recall was
+# 34/59 = 58%; at 0.08 it removes 0.1% and recall is 37/59 = 63% with
+# precision also up, 81% -> 84%. The curve is flat from 0.08 to 0.10, so this
+# is the knee and not a tuned peak. Raising it only narrows the box from the
+# inside; the outer reach that actually masks the jaw is unchanged.
+inner_clearance_m: 0.08
 
 # Everything structurally above the jaws -- the jaw carrier, boom, and arm --
 # is NOT covered by the two outward-facing rail boxes above, which only

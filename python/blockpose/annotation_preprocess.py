@@ -36,6 +36,10 @@ class Pzs100SelfFilterParams:
     # callers that don't set them keep the pre-existing rail-only behaviour.
     above_exclusion_height_m: float = 0.00
     above_exclusion_margin_m: float = 0.00
+    # Distance outboard of the rail centreline at which each jaw box starts.
+    # The rail frame origin lies inboard of the jaw's contact face, so a box
+    # flush with the centreline reaches past the jaw into the gripped block.
+    inner_clearance_m: float = 0.00
 
 
 @dataclass(frozen=True)
@@ -82,6 +86,7 @@ def load_pzs100_self_filter_config(path: str | Path) -> Pzs100SelfFilterConfig:
         # 1 and predate this feature, and must keep loading unchanged.
         above_exclusion_height_m=float(payload.get("above_exclusion_height_m", 0.0)),
         above_exclusion_margin_m=float(payload.get("above_exclusion_margin_m", 0.0)),
+        inner_clearance_m=float(payload.get("inner_clearance_m", 0.0)),
     )
     if (
         not np.all(np.isfinite(tuple(vars(parameters).values())))
@@ -90,6 +95,7 @@ def load_pzs100_self_filter_config(path: str | Path) -> Pzs100SelfFilterConfig:
         or parameters.rail_end_margin_m < 0
         or parameters.above_exclusion_height_m < 0
         or parameters.above_exclusion_margin_m < 0
+        or not 0.0 <= parameters.inner_clearance_m < parameters.outboard_extent_m
     ):
         raise ValueError("PZS100 extents must be finite and positive (margin non-negative)")
     return Pzs100SelfFilterConfig(bool(payload.get("enabled", True)), parameters, tuple(rails))

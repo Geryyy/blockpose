@@ -874,7 +874,8 @@ NB_MODULE(_core, module)
     .def_rw("cross_rail_extent_m", &blockpose::core::Pzs100SelfFilterParameters::cross_rail_extent_m)
     .def_rw("rail_end_margin_m", &blockpose::core::Pzs100SelfFilterParameters::rail_end_margin_m)
     .def_rw("above_exclusion_height_m", &blockpose::core::Pzs100SelfFilterParameters::above_exclusion_height_m)
-    .def_rw("above_exclusion_margin_m", &blockpose::core::Pzs100SelfFilterParameters::above_exclusion_margin_m);
+    .def_rw("above_exclusion_margin_m", &blockpose::core::Pzs100SelfFilterParameters::above_exclusion_margin_m)
+    .def_rw("inner_clearance_m", &blockpose::core::Pzs100SelfFilterParameters::inner_clearance_m);
   module.def("filter_pzs100_gripper", &filter_pzs100_gripper_from_numpy,
     nb::arg("points"), nb::arg("parent_positions"), nb::arg("rail_positions"),
     nb::arg("parent_rotations"), nb::arg("outward_axes_parent"),

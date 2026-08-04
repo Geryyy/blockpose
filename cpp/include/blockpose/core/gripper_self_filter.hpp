@@ -48,6 +48,16 @@ struct Pzs100SelfFilterParameters
   // above-gripper geometry.
   double above_exclusion_height_m{0.0};
   double above_exclusion_margin_m{0.0};
+  // How far OUTBOARD of the rail centreline the box starts. The rail frame
+  // origin sits inboard of the jaw's actual contact face, so a box whose
+  // inner face lies exactly on the centreline reaches past the jaw and eats
+  // the gripped block: measured over 59 annotated blocks it removed 6.3% of
+  // all their points, up to 55% on a single block, and cost 5 points of
+  // detector recall outright. 100% of the wrongly removed points sat in the
+  // inner half of this axis. Defaults to 0.0 so existing profiles keep their
+  // current geometry; see config/pzs100_gripper_filter.yaml for the measured
+  // production value.
+  double inner_clearance_m{0.0};
 };
 
 struct Pzs100GripperFilterBox
@@ -74,6 +84,12 @@ inline void validate_pzs100_self_filter_parameters(const Pzs100SelfFilterParamet
   {
     throw std::invalid_argument(
       "PZS100 above-gripper exclusion height and margin must be finite and non-negative");
+  }
+  if (!std::isfinite(parameters.inner_clearance_m) || parameters.inner_clearance_m < 0.0 ||
+    parameters.inner_clearance_m >= parameters.outboard_extent_m)
+  {
+    throw std::invalid_argument(
+      "PZS100 inner clearance must be finite, non-negative, and smaller than the outboard extent");
   }
 }
 
@@ -109,16 +125,21 @@ inline Pzs100GripperFilterBox make_pzs100_gripper_filter_box(
   rotation.col(1) = outward;
   rotation.col(2) = rail_direction.cross(outward).normalized();
 
+  // The box spans from `inner_clearance_m` outboard of the rail centreline
+  // out to `outboard_extent_m`, so raising the clearance narrows it from the
+  // inside only -- the outer reach, which is what actually masks the jaw, is
+  // unchanged.
+  const double thickness = parameters.outboard_extent_m - parameters.inner_clearance_m;
   Pzs100GripperFilterBox result;
   result.rail_start = rail.parent_position;
   result.rail_end = rail.rail_position;
   result.outward_normal = outward;
   result.box.center = (rail.parent_position + rail.rail_position) * 0.5 +
-    outward * (parameters.outboard_extent_m * 0.5);
+    outward * (parameters.inner_clearance_m + thickness * 0.5);
   result.box.rotation = rotation;
   result.box.size = Point(
     rail_length + 2.0 * parameters.rail_end_margin_m,
-    parameters.outboard_extent_m, parameters.cross_rail_extent_m);
+    thickness, parameters.cross_rail_extent_m);
   return result;
 }
 

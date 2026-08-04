@@ -322,3 +322,62 @@ def test_payload_below_the_jaws_survives_any_rig_orientation(
 
     assert removed == 0, "the clamped payload must never be removed"
     np.testing.assert_allclose(kept, payload)
+
+
+def test_inner_clearance_narrows_the_jaw_box_from_the_inside_only() -> None:
+    """The jaw box must start outboard of the rail, not flush with it.
+
+    The rail frame origin sits inboard of the jaw's contact face, so a box
+    flush with the centreline reaches past the jaw and deletes points of the
+    block being gripped -- measured at 6.3% of all annotated block points, up
+    to 55% on a single block, costing 5 points of detector recall. Raising the
+    clearance must narrow the box from the INSIDE only: the outer reach is
+    what actually masks the jaw and has to stay put.
+    """
+    flush = Pzs100SelfFilterParams(
+        outboard_extent_m=0.30, cross_rail_extent_m=0.90, rail_end_margin_m=0.0
+    )
+    cleared = Pzs100SelfFilterParams(
+        outboard_extent_m=0.30,
+        cross_rail_extent_m=0.90,
+        rail_end_margin_m=0.0,
+        inner_clearance_m=0.08,
+    )
+    # A point 4 cm outboard of the left rail: inside the flush box, and inside
+    # the gripped block, so the clearance must spare it.
+    near_block = np.array([[0.5, 0.04, 0.0]])
+    # A point 20 cm outboard is jaw material and must stay masked either way.
+    on_jaw = np.array([[0.5, 0.20, 0.0]])
+    points = np.ascontiguousarray(np.vstack([near_block, on_jaw]))
+    common = dict(
+        parent_positions=_LEVEL_PARENT_POSITIONS,
+        rail_positions=_LEVEL_RAIL_POSITIONS,
+        parent_rotations=_LEVEL_PARENT_ROTATIONS,
+        outward_axes_parent=_LEVEL_OUTWARD_AXES,
+    )
+    kept_flush, _, _ = filter_pzs100_gripper(points, params=flush, **common)
+    kept_cleared, _, boxes = filter_pzs100_gripper(points, params=cleared, **common)
+
+    assert len(kept_flush) == 0, "flush box eats both, including the block point"
+    np.testing.assert_allclose(kept_cleared, near_block)
+    # Narrowed from the inside: thickness drops by the clearance, and the outer
+    # face stays at the same distance from the rail centreline.
+    np.testing.assert_allclose(boxes["sizes"][0][1], 0.30 - 0.08)
+
+
+def test_inner_clearance_must_be_smaller_than_the_outboard_extent() -> None:
+    with pytest.raises(ValueError):
+        filter_pzs100_gripper(
+            np.zeros((1, 3)),
+            parent_positions=_LEVEL_PARENT_POSITIONS,
+            rail_positions=_LEVEL_RAIL_POSITIONS,
+            parent_rotations=_LEVEL_PARENT_ROTATIONS,
+            outward_axes_parent=_LEVEL_OUTWARD_AXES,
+            params=Pzs100SelfFilterParams(outboard_extent_m=0.30, inner_clearance_m=0.30),
+        )
+
+
+def test_checked_in_profile_ships_the_measured_inner_clearance() -> None:
+    """Guard the production value: 0.0 here silently costs 5 points of recall."""
+    profile = load_pzs100_self_filter_config(Path("config/pzs100_gripper_filter.yaml"))
+    assert profile.parameters.inner_clearance_m == pytest.approx(0.08)

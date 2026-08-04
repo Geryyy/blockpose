@@ -66,6 +66,18 @@ to. Two keys in `config/pzs100_gripper_filter.yaml` control it:
 | --- | --- |
 | `above_exclusion_height_m` | how far above the jaws to exclude (`0.0` disables) |
 | `above_exclusion_margin_m` | lateral margin added to the rail-to-rail gap |
+| `inner_clearance_m` | how far outboard of the rail centreline each jaw box starts |
+
+`inner_clearance_m` exists because the rail frame origin sits *inboard* of the
+jaw's contact face. A jaw box flush with the centreline therefore reaches past
+the jaw and deletes points of the block being gripped. Measured over the 59
+approved blocks in `config/annotated_snapshots_seibersdorf.yaml`, a flush box
+removed **6.3%** of all block points (up to 55% on one block) and cost 5 points
+of detector recall (58% against 63% unfiltered). At the shipped `0.08` it
+removes 0.1% and recall returns to 63% with precision up from 81% to 84%. The
+curve is flat from 0.08 to 0.10, so it is the knee rather than a tuned peak.
+Raising it narrows the box from the inside only; the outer reach that actually
+masks the jaw is unchanged.
 
 The payload hangs *below* the jaws, so the volume only ever extrudes upward
 from the top of the jaw boxes and cannot reach the gripped block. "Up" is world
