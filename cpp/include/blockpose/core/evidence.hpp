@@ -8,6 +8,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -21,6 +22,12 @@ struct SensorContext
   Points miss_directions;
   Points ray_origins;
   Points miss_origins;
+  // Volumes KNOWN to stand between the sensor and the scene -- in practice the
+  // robot's own gripper, whose pose comes from FK, so this needs no inference.
+  // A ray that a known occluder stops carries no information about anything
+  // behind it, and must not be read as evidence against a hypothesis there.
+  // Empty (the default) reproduces the pre-existing behaviour exactly.
+  std::vector<OrientedBox> occluders;
 };
 struct VisibilityEvidence {std::size_t expected_faces{0}, covered_faces{0}, violations{0}, supported_rays{0}, incident_rays{0};};
 
@@ -33,6 +40,39 @@ inline SensorContext validate_sensor_context(SensorContext context)
   for (std::size_t i = 0; i < context.ray_directions.size(); ++i) {const double n = context.ray_directions[i].norm(); if (!context.ray_directions[i].allFinite() || !context.ray_origins[i].allFinite() || !std::isfinite(context.ranges[i]) || context.ranges[i] < 0.0 || n <= 1e-12) {throw std::invalid_argument("invalid SensorContext return ray");} context.ray_directions[i] /= n;}
   for (std::size_t i = 0; i < context.miss_directions.size(); ++i) {const double n = context.miss_directions[i].norm(); if (!context.miss_directions[i].allFinite() || !context.miss_origins[i].allFinite() || n <= 1e-12) {throw std::invalid_argument("invalid SensorContext miss ray");} context.miss_directions[i] /= n;}
   return context;
+}
+
+// Distance at which a ray first enters `box`, or infinity if it never does.
+// Used to decide whether a known occluder stands between the sensor and a
+// hypothesis surface, so the slab test is in the box's own frame.
+inline double ray_oriented_box_entry(const Point & origin, const Point & direction, const OrientedBox & box)
+{
+  const Point local_origin = box.rotation.transpose() * (origin - box.center);
+  const Point local_direction = box.rotation.transpose() * direction;
+  const Point half = box.size * 0.5;
+  double enter = -std::numeric_limits<double>::infinity(), leave = std::numeric_limits<double>::infinity();
+  for (int axis = 0; axis < 3; ++axis) {
+    if (std::abs(local_direction[axis]) <= 1e-12) {
+      if (local_origin[axis] < -half[axis] || local_origin[axis] > half[axis]) {return std::numeric_limits<double>::infinity();}
+      continue;
+    }
+    double low = (-half[axis] - local_origin[axis]) / local_direction[axis];
+    double high = (half[axis] - local_origin[axis]) / local_direction[axis];
+    if (low > high) {std::swap(low, high);}
+    enter = std::max(enter, low); leave = std::min(leave, high);
+  }
+  if (leave < std::max(enter, 0.0)) {return std::numeric_limits<double>::infinity();}
+  return std::max(enter, 0.0);
+}
+
+// True when a known occluder lies between the ray origin and a surface at
+// `distance` along the ray, i.e. the sensor could not have seen that surface.
+inline bool occluded_before(const SensorContext & context, std::size_t ray, double distance, double tolerance)
+{
+  for (const auto & box : context.occluders) {
+    if (ray_oriented_box_entry(context.ray_origins[ray], context.ray_directions[ray], box) < distance - tolerance) {return true;}
+  }
+  return false;
 }
 
 inline bool ray_box_interval(const Point & origin, const Point & direction, const Point & half, double * exit)
@@ -54,11 +94,19 @@ inline VisibilityEvidence visibility_evidence(const Point & position, const Eige
     const double face = sign * half[axis]; bool expected = false, covered = false;
     for (const auto i : relevant) {
       const Point origin = rotation.transpose() * (context.ray_origins[i] - position), direction = rotation.transpose() * context.ray_directions[i];
-      if (sign * (origin[axis] - face) <= 0.0 || std::abs(direction[axis]) <= 1e-9) {continue;} expected = true; const double distance = (face - origin[axis]) / direction[axis]; if (distance <= 0.0) {continue;} const Point hit = origin + distance * direction; bool rectangle = true; for (int other = 0; other < 3; ++other) if (other != axis && std::abs(hit[other]) > half[other] + tolerance) {rectangle = false;} if (!rectangle) {continue;} ++out.incident_rays; if (std::abs(context.ranges[i] - distance) <= tolerance) {++out.supported_rays; covered = true;}
+      if (sign * (origin[axis] - face) <= 0.0 || std::abs(direction[axis]) <= 1e-9) {continue;} const double distance = (face - origin[axis]) / direction[axis]; if (distance <= 0.0) {continue;} const Point hit = origin + distance * direction; bool rectangle = true; for (int other = 0; other < 3; ++other) if (other != axis && std::abs(hit[other]) > half[other] + tolerance) {rectangle = false;} if (!rectangle) {continue;}
+      // A ray a known occluder stopped short says nothing about this face. It
+      // must not mark the face expected-but-uncovered, nor count as incident:
+      // both would penalise the hypothesis for geometry the occluder is
+      // standing in front of, which is exactly backwards.
+      if (occluded_before(context, i, distance, tolerance)) {continue;}
+      expected = true; ++out.incident_rays; if (std::abs(context.ranges[i] - distance) <= tolerance) {++out.supported_rays; covered = true;}
     }
     if (expected) {++out.expected_faces;} if (covered) {++out.covered_faces;}
   }
-  const Point shrunk = (half.array() - tolerance).max(1e-3); for (const auto i : relevant) {double exit = 0.; if (ray_box_interval(rotation.transpose() * (context.ray_origins[i] - position), rotation.transpose() * context.ray_directions[i], shrunk, &exit) && context.ranges[i] > exit + tolerance) {++out.violations;}}
+  // Same reasoning for free-space violations: a return that an occluder
+  // produced tells us nothing about the volume behind it.
+  const Point shrunk = (half.array() - tolerance).max(1e-3); for (const auto i : relevant) {double exit = 0.; if (ray_box_interval(rotation.transpose() * (context.ray_origins[i] - position), rotation.transpose() * context.ray_directions[i], shrunk, &exit) && context.ranges[i] > exit + tolerance && !occluded_before(context, i, exit, tolerance)) {++out.violations;}}
   return out;
 }
 

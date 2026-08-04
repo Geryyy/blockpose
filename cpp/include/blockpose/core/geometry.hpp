@@ -85,6 +85,33 @@ struct GroundParameters
 };
 struct GroundRemovalResult {Points above_ground; LocalGroundModel ground;};
 
+// A generic oriented box. Lives here rather than in gripper_self_filter.hpp
+// because both the self-filter and the visibility evidence need it, and the
+// latter must not depend on the former.
+struct OrientedBox
+{
+  Point center{Point::Zero()};
+  Eigen::Matrix3d rotation{Eigen::Matrix3d::Identity()};
+  Point size{Point::Zero()};
+};
+
+inline void validate_oriented_box(const OrientedBox & box)
+{
+  if (!box.center.allFinite() || !box.rotation.allFinite() || !box.size.allFinite() ||
+    box.size.x() <= 0.0 || box.size.y() <= 0.0 || box.size.z() <= 0.0) {
+    throw std::invalid_argument("oriented box center, rotation, and positive size must be finite");
+  }
+  if (!box.rotation.transpose().isApprox(box.rotation.inverse(), 1e-6) ||
+    std::abs(box.rotation.determinant() - 1.0) > 1e-6) {
+    throw std::invalid_argument("oriented box rotation must be orthonormal");
+  }
+}
+inline bool point_inside_oriented_box(const Point & point, const OrientedBox & box)
+{
+  const Point local = box.rotation.transpose() * (point - box.center);
+  return (local.array().abs() <= (box.size * 0.5).array()).all();
+}
+
 inline bool canonical_less(const Point & a, const Point & b)
 {
   if (a.x() != b.x()) {return a.x() < b.x();}
