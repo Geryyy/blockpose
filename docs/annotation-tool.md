@@ -189,17 +189,25 @@ reject as usual.
 ## Creating a block from an RGB selection
 
 Clicking a block in the RGB pane projects the resulting mask onto the LiDAR
-cloud and highlights the selected points magenta. The tool first tries the
-native fitter; if that cannot find a supported placement — common on a
-partial or heavily occluded view — press **Create block from selection (N
-points)** in **3. Add and adjust blocks**. It places a canonical block at the
-selection's centroid, oriented by the selection's principal axes, as a normal
-pending block you then correct and approve.
+cloud, highlights the selected points magenta, and **always creates a pending
+block**. The tool tries the native fitter first; when that cannot find a
+supported placement it falls back to a canonical block at the selection's
+centroid, oriented by the selection's principal axes, for you to nudge.
 
-The button is enabled only while a selection exists, and its label shows the
-live point count. Blocks placed by the fallback carry provenance
-`rgb_mask_pca_fallback` (rather than `rgb_mask`) so an approximate placement
-can be told from a real fit later. Creating a block is a single undo step.
+The fallback is the normal path for a **gripped** block: the gripper occludes
+its top face, so the fitter never finds the top/side pair a canonical
+placement needs. Clicking a block is an unambiguous statement that there is
+one there, so it produces one either way -- an approximate placement you
+correct beats no placement at all.
+
+Blocks placed by the fallback carry provenance `rgb_mask_pca_fallback` rather
+than `rgb_mask`, so an approximate placement stays distinguishable from a real
+fit. Either way it is a single undo step.
+
+**Create block from selection (N points)** in **3. Add and adjust blocks** runs
+the same thing on demand against whatever selection is currently highlighted --
+useful after undoing, or to retry once you have adjusted the mask. It is
+enabled only while a selection exists and its label shows the live count.
 
 **Approve block** is the only action that makes a block evaluation ground truth.
 **Exclude (reason required)** records a detected non-target for audit and shows it

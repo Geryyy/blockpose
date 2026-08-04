@@ -1247,25 +1247,7 @@ class AnnotatorWindow:
         # The RGB mask provides explicit object identity, so a deterministic
         # best candidate is more useful than rejecting translational ambiguity.
         # It remains pending and visibly requires human validation.
-        snap = snap_block_to_cloud(result.points, seed, SnapParams(reject_ambiguous=False))
-        if not snap.success:
-            self.status.text = (
-                f"{source}: selected {len(result.points)} points, but fit failed: "
-                f"{snap.reason}. Use 'Create block from selection' below to place a "
-                "block at the selection and adjust it by hand instead."
-            )
-            return
-        assert snap.position is not None and snap.rotation is not None
-        assert snap.dimensions is not None
-        self.controller.add_manual_with_pose(
-            snap.position, snap.rotation, snap.dimensions, provenance="rgb_mask"
-        )
-        self._load_document_widgets()
-        self._refresh_views()
-        self.status.text = (
-            f"{source}: fitted pending block from {len(result.points)} selected points "
-            f"(score {snap.score:.2f}). Correct and approve, or abort."
-        )
+        self._block_from_selected_points(result.points, seed, source)
 
     def _update_create_from_selection_button(self) -> None:
         """Keep the button's label/enabled state honest about the live RGB/SAM selection.
@@ -1292,6 +1274,27 @@ class AnnotatorWindow:
             return
         centroid = points.mean(axis=0)
         seed = points[int(np.argmin(np.linalg.norm(points - centroid, axis=1)))]
+        self._block_from_selected_points(points, seed, "Selection")
+
+    def _block_from_selected_points(
+        self, points: np.ndarray, seed: np.ndarray, source: str
+    ) -> None:
+        """Create one pending block from a point selection, fitted if it can be.
+
+        Shared by the RGB click and the explicit button so the two cannot
+        diverge. They previously did: the click path bailed with an
+        instruction to press the button, which put a second action in front of
+        exactly the blocks that need annotating most. A gripped block is the
+        normal case here -- the gripper occludes its top face, so the native
+        fitter cannot find the top/side pair a canonical placement needs, and
+        the automatic path failed every time on precisely the blocks a human
+        clicked deliberately.
+
+        Clicking a block in the RGB view is an unambiguous statement that
+        there is a block there, so it always produces one. An approximate
+        placement the operator nudges beats no placement at all, and its
+        provenance records which of the two it was.
+        """
         snap = snap_block_to_cloud(points, seed, SnapParams(reject_ambiguous=False))
         if snap.success:
             assert snap.position is not None and snap.rotation is not None
@@ -1300,24 +1303,20 @@ class AnnotatorWindow:
                 snap.position, snap.rotation, snap.dimensions, provenance="rgb_mask"
             )
             self.status.text = (
-                f"Created pending block from {len(points)} selected points "
+                f"{source}: fitted pending block from {len(points)} selected points "
                 f"(score {snap.score:.2f}). Correct and approve, or abort."
             )
         else:
-            # No supported top/side placement exists (e.g. a partial or
-            # heavily occluded view) -- fall back to a canonical box centred
-            # on the selection, oriented by its principal axes, for the
-            # operator to correct by hand instead of a dead end. Provenance
-            # is distinct from a successful fit so this placement stays
-            # auditable.
+            # No supported top/side placement exists (a partial or occluded
+            # view) -- place a canonical box on the selection, oriented by its
+            # principal axes, for the operator to correct by hand.
             position, rotation = pca_oriented_block_pose(points)
             self.controller.add_manual_with_pose(
                 position, rotation, BLOCK_DIMS, provenance="rgb_mask_pca_fallback"
             )
             self.status.text = (
-                f"Fit failed ({snap.reason}); placed an approximate block from "
-                f"{len(points)} selected points instead. Correct its pose by hand, "
-                "then approve or discard."
+                f"{source}: no exact fit ({snap.reason}), so an approximate block was placed "
+                f"from {len(points)} selected points. Correct its pose, then approve or discard."
             )
         self._load_document_widgets()
         self._refresh_views()

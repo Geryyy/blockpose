@@ -75,6 +75,7 @@ _BOUND_METHODS = (
     "_add_candidate_source_geometries",
     "_active_candidate_sources",
     "_commit_pending_text_edits",
+    "_block_from_selected_points",
 )
 
 
@@ -405,7 +406,7 @@ def test_create_block_from_selection_uses_native_fit_when_it_succeeds() -> None:
     assert created.provenance == "rgb_mask"
     assert created.dimensions == BLOCK_DIMS
     assert np.linalg.norm(created.position - center) < 0.05
-    assert "Created pending block" in window.status.text
+    assert "fitted pending block" in window.status.text
 
     # One Undo must remove the whole created block, not leave an orphan.
     assert window.controller.undo()
@@ -434,19 +435,23 @@ def test_create_block_from_selection_falls_back_to_pca_as_one_undo_step() -> Non
     rotation = created.rotation
     np.testing.assert_allclose(rotation.T @ rotation, np.eye(3), atol=1e-6)
     assert np.linalg.det(rotation) > 0.0
-    assert "Fit failed" in window.status.text
+    assert "no exact fit" in window.status.text
 
     # One Undo must remove the whole created block, not leave an orphan.
     assert window.controller.undo()
     assert len(window.controller.document.targets) == before
 
 
-def test_apply_rgb_mask_failure_message_points_at_the_new_button(monkeypatch) -> None:
-    """The old dead-end message must now direct the operator at the fallback button.
+def test_apply_rgb_mask_places_a_block_even_when_the_native_fit_fails(monkeypatch) -> None:
+    """Clicking a block in RGB must always produce a block.
 
     Mask selection succeeds (so `_apply_rgb_mask` reaches the native-fit call)
-    but the selected cluster is too sparse for `snap_block_to_cloud` to fit a
-    canonical block, reproducing the exact dead end this task fixes.
+    but the cluster is too sparse for `snap_block_to_cloud` to fit a canonical
+    block. That is the ordinary case for a GRIPPED block, whose top face the
+    gripper occludes, so the fitter never finds the top/side pair it needs.
+    The click path used to bail here and tell the operator to press a button,
+    putting a second action in front of exactly the blocks a human had just
+    pointed at deliberately.
     """
     window = _gui_window(_document_with_pending_target())
     window._refresh_rgb = lambda: None
@@ -472,12 +477,16 @@ def test_apply_rgb_mask_failure_message_points_at_the_new_button(monkeypatch) ->
 
     annotator.AnnotatorWindow._apply_rgb_mask(window, np.ones((1, 1), dtype=bool), (50, 60), "SAM")
 
-    # A failed automatic fit must not create a block itself -- only report
-    # the failure and point at the manual fallback.
-    assert len(window.controller.document.targets) == before
-    assert "fit failed" in window.status.text
-    assert "Create block from selection" in window.status.text
+    # One new block, placed approximately, in a single undoable step.
+    assert len(window.controller.document.targets) == before + 1
+    created = window.controller.document.targets[-1]
+    assert created.provenance == "rgb_mask_pca_fallback", "the placement must stay auditable"
+    assert created.review_status == "pending"
+    assert "no exact fit" in window.status.text
     np.testing.assert_array_equal(window.selected_rgb_points, sparse_points)
+
+    annotator.AnnotatorWindow._undo(window)
+    assert len(window.controller.document.targets) == before, "must be one undo step"
 
 
 # --- notes/ignore-reason: coalesce keystrokes, never lose typed text -------
