@@ -59,7 +59,12 @@ from blockpose.annotation_candidates import _run_detection  # noqa: E402
 from blockpose.annotation_tool import AnnotationDocument, EditableTarget  # noqa: E402
 from blockpose.core_types import DetectionParameters  # noqa: E402
 from blockpose.evaluate import match_detections  # noqa: E402
-from blockpose.experiment_record import experiment_stamp  # noqa: E402
+from blockpose.experiment_record import (  # noqa: E402
+    DEFAULT_MAX_ROTATION_DEG,
+    DEFAULT_MIN_IOU,
+    experiment_stamp,
+    strict_match,
+)
 from blockpose.io import (  # noqa: E402
     CameraModel,
     load_camera_model,
@@ -78,7 +83,10 @@ from blockpose.rgb_annotation import (  # noqa: E402
 DEFAULT_DATASET_ROOT = REPO_ROOT / "data" / "seibersdorf_dataset"
 DEFAULT_MANIFEST = REPO_ROOT / "config" / "annotated_snapshots_seibersdorf.yaml"
 DEFAULT_TRANSFORM_CONFIG = REPO_ROOT / "config" / "transforms_pzs100_initial_pose_1.yaml"
-_ORACLE_RECALL = "90%"  # oracle ceiling from the crop-to-GT-box experiment; see module docstring
+# 55/62: 39 baseline detections plus the 16 seeded-fitter recoveries that also satisfy
+# the 0.30 m rule. An earlier "90%" counted 17 fitter successes, one of which lands
+# 0.3287 m from truth and so is not a detection under this report's own metric.
+_ORACLE_RECALL = "88.7%"
 
 
 # --------------------------------------------------------------------------
@@ -320,6 +328,12 @@ class SnapshotResult:
     pooled_matched_gt: set[int]
     baseline_matched_det: set[int]
     pooled_matched_det: set[int]
+    # Same pairs re-checked on symmetry-aware rotation and oriented-box IoU.
+    # Centre distance alone counts a box 88 degrees out of alignment as a hit;
+    # reporting both makes the difference between them visible instead of
+    # letting an inflated number stand unchallenged.
+    baseline_strict_gt: set[int]
+    pooled_strict_gt: set[int]
     sam_wall_time_s: float
     sam_diagnostics: dict
 
@@ -385,6 +399,13 @@ def evaluate_snapshot(
         [c.to_pose() for c in pooled_candidates], gt_poses, max_dist=match_dist
     )
 
+    def strict_pairs(pairs, candidates):
+        kept = set()
+        for di, gi in pairs:
+            if strict_match(candidates[di].to_pose(), gt_poses[gi])["strict_match"]:
+                kept.add(gi)
+        return kept
+
     return SnapshotResult(
         scene=scene,
         name=name,
@@ -396,6 +417,8 @@ def evaluate_snapshot(
         pooled_matched_gt={gi for _, gi in pooled_pairs},
         baseline_matched_det={di for di, _ in baseline_pairs},
         pooled_matched_det={di for di, _ in pooled_pairs},
+        baseline_strict_gt=strict_pairs(baseline_pairs, baseline_candidates),
+        pooled_strict_gt=strict_pairs(pooled_pairs, pooled_candidates),
         sam_wall_time_s=sam_wall_time_s,
         sam_diagnostics=sam_diag,
     )
@@ -415,6 +438,8 @@ def _rate(numerator: int, denominator: int) -> str:
 def _aggregate(results: list[SnapshotResult]) -> dict:
     gt_total = sum(len(r.gt) for r in results)
     baseline_det = sum(len(r.baseline_candidates) for r in results)
+    baseline_strict = sum(len(r.baseline_strict_gt) for r in results)
+    pooled_strict = sum(len(r.pooled_strict_gt) for r in results)
     baseline_matched = sum(len(r.baseline_matched_gt) for r in results)
     pooled_det = sum(len(r.pooled_candidates) for r in results)
     pooled_matched = sum(len(r.pooled_matched_gt) for r in results)
@@ -422,6 +447,8 @@ def _aggregate(results: list[SnapshotResult]) -> dict:
         "gt_total": gt_total,
         "baseline_det": baseline_det,
         "baseline_matched": baseline_matched,
+        "baseline_strict": baseline_strict,
+        "pooled_strict": pooled_strict,
         "pooled_det": pooled_det,
         "pooled_matched": pooled_matched,
     }
@@ -448,18 +475,31 @@ def build_report(results: list[SnapshotResult], args: argparse.Namespace) -> str
     lines.append("")
     lines.append("## Headline")
     lines.append("")
-    lines.append("| | Recall | Precision |")
-    lines.append("|---|---|---|")
+    lines.append("| | Recall (centre) | Precision (centre) | Recall (strict) |")
+    lines.append("|---|---|---|---|")
     lines.append(
         f"| Baseline (whole-cloud PCL) | {_rate(overall['baseline_matched'], overall['gt_total'])} "
-        f"| {_rate(overall['baseline_matched'], overall['baseline_det'])} |"
+        f"| {_rate(overall['baseline_matched'], overall['baseline_det'])} "
+        f"| {_rate(overall['baseline_strict'], overall['gt_total'])} |"
     )
     lines.append(
         f"| SAM2 region proposals + PCL, pooled | "
         f"{_rate(overall['pooled_matched'], overall['gt_total'])} "
-        f"| {_rate(overall['pooled_matched'], overall['pooled_det'])} |"
+        f"| {_rate(overall['pooled_matched'], overall['pooled_det'])} "
+        f"| {_rate(overall['pooled_strict'], overall['gt_total'])} |"
     )
-    lines.append(f"| Oracle ceiling (crop to GT box, same fitter) | {_ORACLE_RECALL} recall | -- |")
+    lines.append(
+        f"| Oracle ceiling (crop to GT box, same fitter) | {_ORACLE_RECALL} recall | -- | -- |"
+    )
+    lines.append("")
+    lines.append(
+        "**Strict** additionally requires symmetry-aware rotation error <= "
+        f"{DEFAULT_MAX_ROTATION_DEG:.0f} deg and oriented-box IoU >= {DEFAULT_MIN_IOU:.2f}. "
+        "Quote it, not the centre-only column: centre distance alone counts a box 88 degrees "
+        "out of alignment as a hit, and over the annotated set that inflated recall by two "
+        "blocks at every setting measured. A large centre/strict gap means boxes are landing "
+        "near blocks rather than on them."
+    )
     lines.append("")
 
     # Miss recovery / new-FP accounting.
