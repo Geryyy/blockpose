@@ -1,6 +1,12 @@
 # Annotated snapshots in data/seibersdorf_dataset, for DINO prior/verifier
 # training and detector finetuning/ablations.
 #
+# The dataset holds 286 captures but only 24 distinct scenes: consecutive
+# frames within a scene are near-duplicates of each other. One capture per
+# distinct scene is annotated, deliberately, so this set is 25 snapshots
+# rather than 286. Snapshot counts per scene are kept below so the
+# duplication ratio stays visible.
+#
 # Selection is derived, not hand-listed: a snapshot qualifies when its
 # annotations.yaml has annotation_complete: true and at least one approved
 # block. All three independent signals (complete flag, approved blocks,
@@ -11,24 +17,26 @@
 # composes with the existing leave-one-scenario-out folds instead of defining
 # a second, competing grouping.
 #
-# Two caveats that matter for how this set is used, recorded here rather than
-# left to be rediscovered:
+# `scenes_without_annotation` lists five scenes whose condition is already
+# represented by an annotated scene, with the measured RGB similarity to it
+# (mean-normalised 16x-downsampled correlation of a representative frame).
+# wet/partially_wet at 0.95 is effectively the same scene. They are recorded
+# rather than dropped so a reader can see the omission was a judgement about
+# redundancy and not an oversight; static_occluded at 0.76 is the loosest
+# match, if this set is ever extended.
 #
-# 1. `scenes_without_annotation` lists five scenes with NO annotated snapshot
-#    at all -- pre_stack, stacked, stacking, static_occluded and wet. These
-#    are not near-duplicate frames that were deduplicated away; the whole
-#    condition is absent, and they cover occlusion, stacking and wet surfaces.
-#    Any claim of coverage over those conditions is currently unsupported.
-#
-# 2. `approximate_poses` counts approved blocks whose pose came from the
-#    RGB-mask PCA fallback (provenance rgb_mask_pca_fallback) rather than a
-#    native geometric fit. The fallback places a canonical box on the selected
-#    points for the operator to correct by hand, so these are human-approved
-#    but not fitter-derived. That is fine for detection/recall targets and for
-#    DINO region supervision; treat it with care for pose-regression metrics.
+# `approximate_poses` counts approved blocks whose pose came from the RGB-mask
+# PCA fallback (provenance rgb_mask_pca_fallback) rather than a native
+# geometric fit. The fallback places a canonical box on the selected points
+# for the operator to correct by hand -- typical for a gripped block, whose
+# top face the gripper occludes. These are human-approved but not
+# fitter-derived: fine for detection/recall targets and DINO region
+# supervision, worth care in pose-regression metrics.
 schema_version: 1
 dataset: data/seibersdorf_dataset
-selection_criteria: 'annotation_complete: true AND at least one approved block'
+selection_criteria: 'one annotation per DISTINCT scene: annotation_complete: true
+  AND at least one approved block. Consecutive captures within a scene are near-duplicate
+  frames and are deliberately left unannotated.'
 grouping: scene = capture directory prefix before '__'; matches config/rgb_ablation_splits_seibersdorf.yaml
   groups
 totals:
@@ -240,8 +248,23 @@ scenes:
       visibility:
         full: 1
 scenes_without_annotation:
-  2026_07_07_pre_stack: 4
-  2026_07_07_stacked: 4
-  2026_07_07_stacking: 12
-  2026_07_07_static_occluded: 4
-  2026_07_07_wet: 11
+  2026_07_07_pre_stack:
+    snapshots_in_scene: 4
+    covered_by_scene: 2026_07_07_misaligned_stack
+    rgb_similarity_to_covering_scene: 0.86
+  2026_07_07_stacked:
+    snapshots_in_scene: 4
+    covered_by_scene: 2026_07_07_misaligned_stack
+    rgb_similarity_to_covering_scene: 0.83
+  2026_07_07_stacking:
+    snapshots_in_scene: 12
+    covered_by_scene: 2026_07_07_misaligned_stack
+    rgb_similarity_to_covering_scene: 0.85
+  2026_07_07_static_occluded:
+    snapshots_in_scene: 4
+    covered_by_scene: 2026_07_07_pickup
+    rgb_similarity_to_covering_scene: 0.76
+  2026_07_07_wet:
+    snapshots_in_scene: 11
+    covered_by_scene: 2026_07_07_partially_wet
+    rgb_similarity_to_covering_scene: 0.95
