@@ -189,3 +189,44 @@ wrong. Exposing the per-stage outcome for a whole-cloud run, so a block can be
 traced from component to rejection reason without a stand-in, is the
 prerequisite for targeting anything. It is also cheap next to building a third
 mechanism on a guess.
+
+## The stage diagnostics settle it, and retract the section above
+
+`ProposalComponentDiagnostics`, wide-proposal skips, plane-region, plane-patch
+and pairing records were already computed by the detector and simply never
+crossed the binding. They are now on `InferenceTrace`. No detector logic
+changed.
+
+Tracing each heavily occluded block through the REAL pipeline:
+
+| where the block is lost | count |
+| --- | ---: |
+| component rejected at the gate -- `extent_z` | 5 |
+| component rejected at the gate -- `size`, `extent_xy`, `extent_z` | 2 |
+| component rejected at the gate -- `extent_xy`, `extent_z` | 1 |
+| gate passed, but no plane patches fitted | 2 |
+
+**8 of 10 fail at the proposal gate, dominated by the Z extent.** The section
+above concluded "0 of 10 fail any proposal gate" from an sklearn DBSCAN
+stand-in; that stand-in does not reproduce the pipeline's own clustering, and
+the conclusion was wrong. It is retracted here.
+
+The nearest component to a heavily occluded block measures a median **0.19 m**
+in Z against a 0.30 m gate -- typically 0.59 x 0.41 x 0.18 with ~110 points.
+Partial and full blocks sit at 0.63 m and 0.52 m and pass. The gripper leaves a
+thin visible band of a 0.6 m block, and the gate reads that band as too small
+an object.
+
+### What this does and does not license
+
+It does NOT revive the shadow-aware waiver as written. That was measured and
+changed recall at no threshold, and the reason is now visible: even admitted, a
+0.18 m band is unlikely to yield a correct 0.6 m pose, because the top face the
+fitter pairs against is exactly what the gripper hides. This is consistent with
+the strict-scoring result -- orientation is underdetermined at 76% occlusion no
+matter which stage lets the component through.
+
+The honest position is that three probes have now disagreed with each other,
+and only the last used the detector's own records. Any further change here
+should be justified from those records, and measured with strict scoring,
+before it is written.

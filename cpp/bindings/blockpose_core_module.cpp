@@ -627,6 +627,97 @@ nb::dict evidence_to_dict(const blockpose::core::HypothesisEvidence & evidence)
   return result;
 }
 
+
+// Per-stage diagnostics. The detector already records all of these; without
+// them on the Python side a question like "which stage dropped this block?"
+// has to be answered by re-running the detector on a stand-in probe, and two
+// separate investigations reached wrong conclusions that way -- a cropped
+// cloud makes components look under-sized when the whole cloud's do not.
+nb::dict proposal_component_to_dict(const blockpose::core::ProposalComponentDiagnostics & d)
+{
+  nb::dict out;
+  out["dbscan_label"] = d.dbscan_label;
+  out["point_count"] = d.point_count;
+  out["extent"] = d.extent;
+  out["centroid"] = point_to_tuple(d.centroid);
+  out["center_ground_height"] = d.center_ground_height;
+  out["size_gate_ok"] = d.size_gate_ok;
+  out["extent_xy_gate_ok"] = d.extent_xy_gate_ok;
+  out["extent_z_gate_ok"] = d.extent_z_gate_ok;
+  out["center_z_gate_ok"] = d.center_z_gate_ok;
+  out["gate_passed"] = d.gate_passed;
+  out["truncated_by_max_components"] = d.truncated_by_max_components;
+  out["accepted_rank"] = d.accepted_rank ? nb::cast(*d.accepted_rank) : nb::none();
+  return out;
+}
+
+nb::dict wide_skip_to_dict(const blockpose::core::WideProposalSkipDiagnostics & d)
+{
+  nb::dict out;
+  out["proposal_component"] = d.proposal_component;
+  out["point_count"] = d.point_count;
+  out["region_count"] = d.region_count;
+  out["extent"] = d.extent;
+  return out;
+}
+
+nb::dict plane_region_to_dict(const blockpose::core::PlaneRegionDiagnostics & d)
+{
+  nb::dict out;
+  out["proposal_component"] = d.proposal_component;
+  out["region"] = d.region;
+  out["plane_count"] = d.plane_count;
+  out["leftover_points"] = d.leftover_points;
+  out["stop_reason"] = d.stop_reason;
+  return out;
+}
+
+nb::dict plane_patch_to_dict(const blockpose::core::PlanePatchDiagnostics & d)
+{
+  nb::dict out;
+  out["proposal_component"] = d.proposal_component;
+  out["region"] = d.region;
+  out["plane_index"] = d.plane_index;
+  out["point_count"] = d.point_count;
+  out["normal"] = point_to_tuple(d.normal);
+  out["centroid"] = point_to_tuple(d.centroid);
+  out["residual_mad"] = d.residual_mad;
+  return out;
+}
+
+nb::dict pairing_to_dict(const blockpose::core::RegionPairingDiagnostics & d)
+{
+  nb::dict out;
+  out["proposal_component"] = d.proposal_component;
+  out["region"] = d.region;
+  out["dims_index"] = d.dims_index;
+  nb::list planes;
+  for (const auto & plane : d.planes) {
+    nb::dict entry;
+    entry["plane_index"] = plane.plane_index;
+    entry["is_top"] = plane.is_top;
+    entry["is_side"] = plane.is_side;
+    nb::list attempts;
+    for (const auto & attempt : plane.side_attempts) {
+      nb::dict a;
+      a["side_plane_index"] = attempt.side_plane_index;
+      a["drop_m"] = attempt.drop_m;
+      a["gap_m"] = attempt.gap_m;
+      a["tangential_overlap_m"] = attempt.tangential_overlap_m;
+      a["drop_range_ok"] = attempt.drop_range_ok;
+      a["support_band_ok"] = attempt.support_band_ok;
+      a["tangential_overlap_ok"] = attempt.tangential_overlap_ok;
+      a["gap_ok"] = attempt.gap_ok;
+      a["selected"] = attempt.selected;
+      attempts.append(std::move(a));
+    }
+    entry["side_attempts"] = std::move(attempts);
+    planes.append(std::move(entry));
+  }
+  out["planes"] = std::move(planes);
+  return out;
+}
+
 nb::dict lineage_to_dict(const blockpose::core::RawHypothesisLineage & lineage)
 {
   nb::dict result;
@@ -731,6 +822,16 @@ nb::dict result_to_dict(const blockpose::core::DetectionResult & detection)
     raw_lineage.append(lineage_to_dict(entry));
   }
   result["raw_lineage"] = std::move(raw_lineage);
+  const auto to_list = [](const auto & source, auto converter) {
+    nb::list out;
+    for (const auto & item : source) {out.append(converter(item));}
+    return out;
+  };
+  result["proposal_diagnostics"] = to_list(detection.proposal_diagnostics, proposal_component_to_dict);
+  result["wide_proposal_skips"] = to_list(detection.wide_proposal_skips, wide_skip_to_dict);
+  result["plane_region_diagnostics"] = to_list(detection.plane_region_diagnostics, plane_region_to_dict);
+  result["plane_patch_diagnostics"] = to_list(detection.plane_patch_diagnostics, plane_patch_to_dict);
+  result["pairing_diagnostics"] = to_list(detection.pairing_diagnostics, pairing_to_dict);
   return result;
 }
 

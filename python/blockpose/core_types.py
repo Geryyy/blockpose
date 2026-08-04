@@ -132,6 +132,20 @@ class InferenceTrace:
     final_hypotheses: tuple[TraceHypothesis, ...]
     pre_refinement_hypotheses: tuple[TraceHypothesis, ...] = ()
     raw_lineage: tuple[RawHypothesisLineage, ...] = ()
+    # Per-stage records the detector already keeps. Kept as plain dicts rather
+    # than typed rows: they are a debugging surface whose fields track the C++
+    # structs, and freezing them into dataclasses here would mean editing two
+    # places every time a stage gains a counter.
+    #
+    # They exist because "which stage dropped this block?" was previously only
+    # answerable by re-running the detector on a stand-in probe, and doing that
+    # on a CROPPED cloud produced under-sized components that the whole cloud
+    # never shows -- two investigations drew wrong conclusions from it.
+    proposal_diagnostics: tuple[dict, ...] = ()
+    wide_proposal_skips: tuple[dict, ...] = ()
+    plane_region_diagnostics: tuple[dict, ...] = ()
+    plane_patch_diagnostics: tuple[dict, ...] = ()
+    pairing_diagnostics: tuple[dict, ...] = ()
 
 
 @dataclass(frozen=True)
