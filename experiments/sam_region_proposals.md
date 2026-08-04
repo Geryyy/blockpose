@@ -1,5 +1,14 @@
 # SAM2 region proposals: does zero-shot segmentation close the recall gap?
 
+> **Stale numbers — read this first.** Every figure below was measured with
+> `DetectionParameters.cluster_max_extent_xy = 1.5`, which was the default at the time. That
+> default now ships at **2.25** (see `experiments/detector_cluster_failures.md`), and the command
+> quoted here does **not** freeze detector parameters, so re-running it today does not reproduce
+> these tables. An independent audit's rerun at the current default gives baseline 46/62, 46/59
+> and pooled 49/62, 49/74 — recovering 3 of the 16 remaining misses with 14 new unmatched
+> detections, rather than 6 of 23 with 13. The *relative* conclusions below still hold; the
+> absolute counts describe the old configuration. Any rerun must pin the detector parameters.
+
 No training, no fitter changes. SAM2 (`facebook/sam2.1-hiera-small`) is prompted with a 8x8 point grid per image; surviving masks are projected to 3-D with `blockpose.rgb_annotation` (the same code the interactive annotator uses) and run through the existing geometric fitter's internal entry point (`annotation_candidates._run_detection`) exactly like a DINO proposal region. SAM-sourced accepted hypotheses are pooled with the whole-cloud PCL candidates and de-duplicated by centre distance (0.25 m). A block counts as detected when an accepted candidate's centre is within 0.30 m of the GT centre (Hungarian matching, same rule as the established baseline).
 
 ## Headline

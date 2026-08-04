@@ -15,12 +15,22 @@ rail_end_margin_m: 0.00
 # flush with it. The rail frame origin sits inboard of the jaw's contact
 # face, so a flush box reaches past the jaw and deletes points of the block
 # being gripped. Measured over the 59 approved blocks in
-# config/annotated_snapshots_seibersdorf.yaml: at 0.00 the filter removed
-# 6.3% of all block points (up to 55% on one block) and detector recall was
-# 34/59 = 58%; at 0.08 it removes 0.1% and recall is 37/59 = 63% with
-# precision also up, 81% -> 84%. The curve is flat from 0.08 to 0.10, so this
-# is the knee and not a tuned peak. Raising it only narrows the box from the
-# inside; the outer reach that actually masks the jaw is unchanged.
+# config/annotated_snapshots_seibersdorf.yaml (24 of them have the rail TF;
+# the wall2 captures lack K9/K11 frames): at 0.00 the filter removed 6.3% of
+# all block points, worst block 55%; at 0.08 it removes 0.07%.
+#
+# Detection effect, measured at cluster_max_extent_xy = 1.5 (the default when
+# this was set): recall 34/59 -> 37/59, precision 81% -> 84%. At the gate that
+# now ships, 2.25, the same comparison is 41/59 -> 44/59 -- still +3 blocks,
+# but do not quote the 34/37 figures against current defaults.
+#
+# Treat 0.08 as an in-sample, rig-specific trade-off rather than a geometric
+# knee: an independent audit found the detection response non-monotonic past
+# 0.10 (0.12/0.14 -> 40/59, 0.24 -> 41/59 at the 1.5 gate). Once GT-point
+# deletion reaches zero the remaining variation is admitted robot returns
+# perturbing clustering, not a property of the geometry. Raising it only
+# narrows the box from the inside; the outer reach that masks the jaw is
+# unchanged, which is the part that is geometrically sound.
 inner_clearance_m: 0.08
 
 # Everything structurally above the jaws -- the jaw carrier, boom, and arm --

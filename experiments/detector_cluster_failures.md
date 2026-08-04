@@ -8,6 +8,10 @@ precision 39/52 (75.0%)**.
 Raw evidence: `experiments/_sweep_results.json`. Reproduce with
 `python tools/sweep_detector_params.py`.
 
+Independently audited at commit b024eb3. Corrections from that audit are marked inline; C2 (the
+gate change) survived attack including strict pose scoring, and the errors it found are recorded
+here rather than quietly amended.
+
 ## The hypothesis held
 
 `DetectionParameters.cluster_max_extent_xy` is 1.5 m. `cpp/include/blockpose/core/pipeline.hpp`
@@ -44,7 +48,7 @@ recall while making the detector worse, so precision is reported at every point.
 | max_extent_xy | dbscan_eps | recall | precision |
 | --- | --- | --- | --- |
 | 1.50 (baseline) | 0.07 | 62.9% | 75.0% |
-| 1.75 | 0.07 | 71.0% | 77.2% |
+| 1.75 | 0.07 | 64.5% | 75.5% |
 | 2.00 | 0.07 | 71.0% | 77.2% |
 | **2.25** | **0.07** | **74.2%** | **78.0%** |
 | 2.50 – 3.50 | 0.07 | 74.2% | 78.0% |
@@ -117,10 +121,19 @@ of each missed block:
 
 | regions | fitter | recovers |
 | --- | --- | --- |
-| perfect crop | `snap_block_to_cloud` (seeded) | 17/23 |
+| perfect crop | `snap_block_to_cloud` (seeded) | **16**/23 |
 | perfect crop | `_run_detection` (full pipeline) | 11/23 |
 | SAM grid-6 mask | `snap_block_to_cloud` | 7/23 |
 | SAM grid-8 mask | `_run_detection` | 6/23 |
+
+Two corrections to earlier drafts of this table, both found by an independent audit:
+
+- The seeded figure was reported as 17. That is 17 *fitter successes*, but one lands 0.3287 m
+  from ground truth and so fails the 0.30 m rule this report scores by. **16** is the number of
+  detections. The oracle ceiling is therefore (39+16)/62 = **88.7%**, not the 90% quoted earlier.
+- Those runs use `SnapParams(reject_ambiguous=False)`, which is **not the default**. With default
+  ambiguity rejection the same crops yield 10/23. That setting was doing substantial work and went
+  unstated; any comparison against the detector must disclose it.
 
 Two conclusions, one of which corrects an earlier reading of the mask-funnel numbers:
 
@@ -130,10 +143,29 @@ Two conclusions, one of which corrects an earlier reading of the mask-funnel num
   swapping the fitter is worth 1. An earlier note claiming "the bottleneck is the fitter's
   strictness, not proposal quality" was wrong, and is retracted here.
 
-Notably the detector produces ZERO raw hypotheses on 12 of 23 perfect single-block crops, despite
-a median 617 points and 76% of them surviving the ground stage. Cropping is not the problem
-(`cluster_min_size` is never breached) and adding a 1.6 m skirt of context makes it worse, 7/23.
-Whatever suppresses the proposal stage on an isolated block is unexplained and worth its own study.
+### The zero-hypothesis case is explained
+
+The detector produces ZERO raw hypotheses on 12 of 23 perfect single-block crops. An independent
+audit instrumented the native stages and attributed all twelve to ordinary deterministic gates:
+
+| cause | count | gate |
+| --- | --- | --- |
+| no component met the minimum XY **and** Z extent | 7 | `proposals.hpp:271-283` (0.30 m each) |
+| RANSAC found side planes but none within the top-angle gate | 2 | plane classification |
+| top support height below `0.70 * 0.60 = 0.42 m` | 2 | `pipeline.hpp:288-303` |
+| top/side pair existed but support heights disagreed by >0.135 m | 1 | `pipeline.hpp:288-303` |
+
+So it is neither starvation nor a defect: the pipeline executes its configured rules correctly.
+The flaw is an **observability assumption** — global minimum AABB extents are applied as if every
+block must expose 0.30 m along all three world axes, which a partially observed or occluded block
+never does. An earlier draft of this report called the behaviour unexplained and asserted
+"cropping is not the problem"; that was too strong, and the crops are rejected *precisely* for
+having partial extents.
+
+The obvious global fix was falsified by the same audit: lowering the minimum XY/Z extents to
+0.20/0.20 or 0.10/0.10 leaves recall at 46/62 and drops precision from 78.0% to 74.2%/75.4%. The
+viable direction is an observation-aware crop/region path or seeded fitting, not weaker global
+gates.
 
 ## Combined configuration
 
@@ -156,4 +188,8 @@ matters more, but it is not a default.
   and the RANSAC gates were left at defaults; `region_max_extent_xy` (3.0) in particular interacts
   with this change and was not swept.
 - **The splitter itself was not built or evaluated** — only sized.
-- **The 13 non-merged misses were not investigated here.**
+- **The 13 non-merged misses** were partially characterised by the audit rather than left open:
+  7 become detections once isolated from the whole cloud (so whole-cloud context is interfering),
+  4 still fail the minimum extent gates, and 2 fit only side planes with no top candidate. That
+  used a Python component-assignment proxy, so membership at the boundary is uncertain and a
+  native per-component lineage audit is still outstanding.

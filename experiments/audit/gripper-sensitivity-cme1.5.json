@@ -1,0 +1,95 @@
+{
+  "unavailable": [
+    {
+      "snapshot": "2026_07_07_wall2__1783429326_921173248",
+      "blocks": 3,
+      "reason": "\"T_world_elastic/K9 not found in tf snapshot (have: ['T_seyond_blackfly_rotated', 'T_world_K0_mounting_base', 'T_world_blackfly_rotated', 'T_world_seyond'])\""
+    }
+  ],
+  "settings": {
+    "0": {
+      "gt": 59,
+      "gt_hit": 34,
+      "cand": 42,
+      "cand_tp": 34,
+      "recall": 0.576271186440678,
+      "precision": 0.8095238095238095,
+      "block_points": 28909,
+      "block_removed": 1820,
+      "block_removed_frac": 0.06295617281815352,
+      "max_block_removed_frac": 0.5537459283387622
+    },
+    "0.02": {
+      "gt": 59,
+      "gt_hit": 35,
+      "cand": 43,
+      "cand_tp": 35,
+      "recall": 0.5932203389830508,
+      "precision": 0.813953488372093,
+      "block_points": 28909,
+      "block_removed": 1411,
+      "block_removed_frac": 0.04880832958594209,
+      "max_block_removed_frac": 0.4755700325732899
+    },
+    "0.04": {
+      "gt": 59,
+      "gt_hit": 36,
+      "cand": 44,
+      "cand_tp": 36,
+      "recall": 0.6101694915254238,
+      "precision": 0.8181818181818182,
+      "block_points": 28909,
+      "block_removed": 875,
+      "block_removed_frac": 0.03026739077795842,
+      "max_block_removed_frac": 0.3273615635179153
+    },
+    "0.06": {
+      "gt": 59,
+      "gt_hit": 36,
+      "cand": 43,
+      "cand_tp": 36,
+      "recall": 0.6101694915254238,
+      "precision": 0.8372093023255814,
+      "block_points": 28909,
+      "block_removed": 270,
+      "block_removed_frac": 0.009339652011484312,
+      "max_block_removed_frac": 0.08404255319148936
+    },
+    "0.08": {
+      "gt": 59,
+      "gt_hit": 37,
+      "cand": 44,
+      "cand_tp": 37,
+      "recall": 0.6271186440677966,
+      "precision": 0.8409090909090909,
+      "block_points": 28909,
+      "block_removed": 19,
+      "block_removed_frac": 0.0006572347711785257,
+      "max_block_removed_frac": 0.008928571428571428
+    },
+    "0.1": {
+      "gt": 59,
+      "gt_hit": 37,
+      "cand": 44,
+      "cand_tp": 37,
+      "recall": 0.6271186440677966,
+      "precision": 0.8409090909090909,
+      "block_points": 28909,
+      "block_removed": 0,
+      "block_removed_frac": 0.0,
+      "max_block_removed_frac": 0
+    },
+    "0.12": {
+      "gt": 59,
+      "gt_hit": 40,
+      "cand": 46,
+      "cand_tp": 40,
+      "recall": 0.6779661016949152,
+      "precision": 0.8695652173913043,
+      "block_points": 28909,
+      "block_removed": 0,
+      "block_removed_frac": 0.0,
+      "max_block_removed_frac": 0
+    }
+  }
+}
