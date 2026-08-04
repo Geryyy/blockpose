@@ -6,8 +6,10 @@ their detection or scoring logic:
 
 - ``pcl``: pure PCL geometry -- the raw hypotheses from
   ``blockpose.detection.detect_blocks_detailed``.
-- ``rgb_edge_prior``: the classical RGB edge prior
-  (``blockpose.rgb_edge_prior``) scoring those same raw hypotheses.
+- ``rgb_edge_prior``: the classical RGB edge validator/reranker
+  (``blockpose.rgb_edge_prior``), scoring the same raw PCL hypotheses. It does
+  not seed or detect blocks independently; the internal key is retained for
+  API and on-disk compatibility.
 - ``dino_proposer``: proposal-driven 3-D candidates from the learned
   full-image DINOv2 region proposer (``blockpose.rgb_region_proposer`` /
   ``blockpose.rgb_proposals``).
@@ -31,6 +33,7 @@ from pathlib import Path
 
 import numpy as np
 
+from blockpose.annotation_preprocess import filter_exclusion_boxes
 from blockpose.core_bridge import detect_blocks_detailed_cpp
 from blockpose.core_types import DetectionParameters, SensorContext, TraceHypothesis
 from blockpose.io import CameraModel
@@ -99,6 +102,54 @@ def _run_detection(
     return result.trace.raw_hypotheses
 
 
+def _reject_hypotheses_above_gripper(
+    hypotheses: tuple[TraceHypothesis, ...],
+    above_gripper_boxes: dict[str, np.ndarray] | None,
+) -> tuple[TraceHypothesis, ...]:
+    """Drop raw hypotheses centred inside the above-gripper exclusion volume.
+
+    The point-cloud self-filter (`annotation_preprocess.filter_pzs100_gripper`)
+    already removes points above the jaws before detection ever runs, but a
+    partial geometric fit can still be built almost entirely from points
+    outside that volume (e.g. hugging a boom edge) and end up CENTRED inside
+    it -- the point filter alone cannot catch that. This is a second,
+    independent guard: reject any hypothesis whose pose centre falls inside
+    the same above-gripper volume.
+
+    Reuses the native oriented-box point test (via `filter_exclusion_boxes`)
+    rather than reimplementing the box geometry in Python, per the
+    single-source-of-geometry-truth convention -- the C++ core owns what
+    "inside the box" means.
+
+    `above_gripper_boxes` is the `above_centers`/`above_rotations`/
+    `above_sizes` triple returned by `filter_pzs100_gripper`. `None`, or zero
+    boxes (feature off, or no gripper geometry available), is a no-op --
+    callers that don't have gripper geometry are unaffected.
+    """
+    if not hypotheses or above_gripper_boxes is None:
+        return hypotheses
+    # `.get()`, not indexing: callers pass the whole `filter_pzs100_gripper`
+    # diagnostics dict, and an older compiled `_core` predates these keys.
+    # `compute_candidate_sources` documents that it never raises, so a stale
+    # extension must degrade to "no above-gripper rejection", not KeyError.
+    above_centers = np.asarray(above_gripper_boxes.get("above_centers", ()), dtype=np.float64)
+    if above_centers.shape[0] == 0:
+        return hypotheses
+    above_rotations = np.asarray(above_gripper_boxes.get("above_rotations", ()), dtype=np.float64)
+    above_sizes = np.asarray(above_gripper_boxes.get("above_sizes", ()), dtype=np.float64)
+    if above_rotations.shape != (above_centers.shape[0], 3, 3) or (
+        above_sizes.shape != above_centers.shape
+    ):
+        return hypotheses
+    kept = []
+    for hypothesis in hypotheses:
+        position = np.ascontiguousarray(hypothesis.pose.position, dtype=np.float64).reshape(1, 3)
+        _, removed = filter_exclusion_boxes(position, above_centers, above_rotations, above_sizes)
+        if removed == 0:
+            kept.append(hypothesis)
+    return tuple(kept)
+
+
 def _pcl_candidates(raw_hypotheses: tuple[TraceHypothesis, ...]) -> tuple[SourceCandidate, ...]:
     return tuple(
         SourceCandidate(h.id, h.pose, float(h.score), h.fate == "final", h.fate)
@@ -113,13 +164,15 @@ def _rgb_edge_prior_candidates(
     camera: CameraModel,
 ) -> tuple[SourceCandidate, ...]:
     from blockpose import _core
+
     if not getattr(_core, "vision_enabled", False):
-        raise RuntimeError("C++ RGB edge prior is not enabled in blockpose._core")
+        raise RuntimeError("C++ RGB edge validator/reranker is not enabled in blockpose._core")
     gray = np.ascontiguousarray(
         np.mean(np.asarray(rgb, dtype=np.float64)[..., :3], axis=2).clip(0, 255), dtype=np.uint8
     )
     scorer = _core.RgbEdgePrior(
-        gray, np.ascontiguousarray(camera.K, dtype=np.float64),
+        gray,
+        np.ascontiguousarray(camera.K, dtype=np.float64),
         np.ascontiguousarray(camera.D, dtype=np.float64),
         np.ascontiguousarray(T_world_camera, dtype=np.float64),
     )
@@ -143,6 +196,7 @@ def _dino_proposer_candidates(
     camera: CameraModel,
     checkpoint: Path,
     sensor_origin: np.ndarray | None,
+    above_gripper_boxes: dict[str, np.ndarray] | None,
 ) -> tuple[tuple[SourceCandidate, ...], str | None]:
     """Proposal-driven 3-D candidates, or `((), warning)` if the source fails.
 
@@ -168,7 +222,10 @@ def _dino_proposer_candidates(
             # A malformed single proposal (e.g. mask shape mismatch) must not
             # discard every other proposal's candidates.
             continue
-        for hypothesis in _run_detection(points[indices], sensor_origin):
+        proposal_hypotheses = _reject_hypotheses_above_gripper(
+            _run_detection(points[indices], sensor_origin), above_gripper_boxes
+        )
+        for hypothesis in proposal_hypotheses:
             candidates.append(
                 SourceCandidate(
                     f"dino_proposer:{proposal_index}:{hypothesis.id}",
@@ -397,6 +454,7 @@ def compute_candidate_sources(
     T_world_cloud: np.ndarray | None = None,
     dino_proposer_checkpoint: Path | None = None,
     dino_verifier_checkpoint: Path | None = None,
+    above_gripper_boxes: dict[str, np.ndarray] | None = None,
 ) -> CandidateSourcesResult:
     """Compute candidate blocks from all four sources for one snapshot.
 
@@ -410,6 +468,16 @@ def compute_candidate_sources(
     `camera` together; DINO sources additionally require their checkpoint.
     Any unmet requirement or failure degrades to an empty tuple plus an
     explanatory entry in `warnings`, never an exception.
+
+    `above_gripper_boxes` is the optional `above_centers`/`above_rotations`/
+    `above_sizes` diagnostics triple from `annotation_preprocess.
+    filter_pzs100_gripper` (the PZS100 above-jaws exclusion volume covering
+    the carrier/boom/arm). When given, any raw hypothesis whose pose centre
+    falls inside that volume is rejected before scoring, on top of whatever
+    the point-cloud self-filter already removed -- a partial fit can be built
+    from points outside the volume yet still land centred inside it. `None`
+    (the default) keeps every source's behaviour unchanged for callers with
+    no gripper geometry available.
     """
     warnings: list[str] = []
     points = np.asarray(points, dtype=np.float64)
@@ -421,7 +489,9 @@ def compute_candidate_sources(
             "evidence terms are zeroed, PCL/derived scores are not comparable to production"
         )
 
-    raw_hypotheses = _run_detection(points, sensor_origin)
+    raw_hypotheses = _reject_hypotheses_above_gripper(
+        _run_detection(points, sensor_origin), above_gripper_boxes
+    )
     pcl = _pcl_candidates(raw_hypotheses)
 
     if have_rgb_context:
@@ -431,15 +501,15 @@ def compute_candidate_sources(
         # geometry-only build (or any failure while constructing/scoring the
         # prior) must not discard the already-computed PCL candidates.
         try:
-            rgb_edge_prior = _rgb_edge_prior_candidates(
-                raw_hypotheses, rgb, T_world_camera, camera
-            )
+            rgb_edge_prior = _rgb_edge_prior_candidates(raw_hypotheses, rgb, T_world_camera, camera)
         except Exception as error:  # noqa: BLE001 - optional backend boundary
             rgb_edge_prior = ()
-            warnings.append(f"rgb_edge_prior unavailable: {error!r}")
+            warnings.append(f"RGB edge validator/reranker unavailable: {error!r}")
     else:
         rgb_edge_prior = ()
-        warnings.append("rgb_edge_prior unavailable: rgb/T_world_camera/camera not all provided")
+        warnings.append(
+            "RGB edge validator/reranker unavailable: rgb/T_world_camera/camera not all provided"
+        )
 
     dino_proposer: tuple[SourceCandidate, ...]
     if dino_proposer_checkpoint is None:
@@ -451,7 +521,13 @@ def compute_candidate_sources(
     else:
         assert rgb is not None and T_world_camera is not None and camera is not None
         dino_proposer, proposer_warning = _dino_proposer_candidates(
-            points, rgb, T_world_camera, camera, dino_proposer_checkpoint, sensor_origin
+            points,
+            rgb,
+            T_world_camera,
+            camera,
+            dino_proposer_checkpoint,
+            sensor_origin,
+            above_gripper_boxes,
         )
         if proposer_warning is not None:
             warnings.append(proposer_warning)

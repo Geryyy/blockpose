@@ -71,13 +71,9 @@ def test_pcl_only_populates_when_no_rgb_or_checkpoints_given() -> None:
     # The geometry-only verifier view needs no RGB/checkpoint at all.
     assert len(result.dino_verifier_geometry_only) == len(result.pcl)
 
-    assert any("rgb_edge_prior unavailable" in w for w in result.warnings)
-    assert any(
-        w == "dino_proposer unavailable: no checkpoint given" for w in result.warnings
-    )
-    assert any(
-        w == "dino_verifier unavailable: no checkpoint given" for w in result.warnings
-    )
+    assert any("RGB edge validator/reranker unavailable" in w for w in result.warnings)
+    assert any(w == "dino_proposer unavailable: no checkpoint given" for w in result.warnings)
+    assert any(w == "dino_verifier unavailable: no checkpoint given" for w in result.warnings)
 
 
 def test_missing_sensor_origin_warns_and_changes_pcl_scores() -> None:
@@ -106,6 +102,63 @@ def test_missing_sensor_origin_warns_and_changes_pcl_scores() -> None:
     assert max_score_with > max_score_without
 
 
+def test_above_gripper_boxes_reject_candidates_centred_inside_the_volume() -> None:
+    """A partial fit can be built from points outside the above-gripper
+    volume yet still end up centred inside it -- the point-cloud self-filter
+    alone cannot catch that, so `compute_candidate_sources` must additionally
+    reject any candidate whose pose centre falls inside the supplied volume.
+    """
+    sample, _ = _scene()
+    baseline = compute_candidate_sources(sample.points, None, None, None)
+    assert len(baseline.pcl) > 0, "the synthetic scene must produce at least one candidate"
+
+    # A volume large enough to engulf the whole synthetic scene (and thus
+    # every candidate's centre) -- everything must be rejected.
+    engulfing_boxes = {
+        "above_centers": np.array([[0.0, 0.0, 0.0]]),
+        "above_rotations": np.array([np.eye(3)]),
+        "above_sizes": np.array([[1000.0, 1000.0, 1000.0]]),
+    }
+    excluded = compute_candidate_sources(
+        sample.points, None, None, None, above_gripper_boxes=engulfing_boxes
+    )
+    assert excluded.pcl == ()
+    # The geometry-only verifier view is derived from the same (already
+    # rejected) raw hypotheses, so it must be empty too.
+    assert excluded.dino_verifier_geometry_only == ()
+
+    # A volume nowhere near the scene must leave every candidate untouched.
+    distant_boxes = {
+        "above_centers": np.array([[100.0, 100.0, 100.0]]),
+        "above_rotations": np.array([np.eye(3)]),
+        "above_sizes": np.array([[1.0, 1.0, 1.0]]),
+    }
+    unaffected = compute_candidate_sources(
+        sample.points, None, None, None, above_gripper_boxes=distant_boxes
+    )
+    assert {item.id for item in unaffected.pcl} == {item.id for item in baseline.pcl}
+
+
+def test_above_gripper_boxes_none_or_empty_is_a_backward_compatible_no_op() -> None:
+    """Callers that don't pass gripper geometry (the default) or pass the
+    empty (0, 3)-shaped arrays `filter_pzs100_gripper` returns when the
+    feature is off must see identical results to today's behaviour.
+    """
+    sample, _ = _scene()
+    baseline = compute_candidate_sources(sample.points, None, None, None)
+
+    empty_boxes = {
+        "above_centers": np.empty((0, 3)),
+        "above_rotations": np.empty((0, 3, 3)),
+        "above_sizes": np.empty((0, 3)),
+    }
+    with_empty_boxes = compute_candidate_sources(
+        sample.points, None, None, None, above_gripper_boxes=empty_boxes
+    )
+
+    assert {item.id for item in with_empty_boxes.pcl} == {item.id for item in baseline.pcl}
+
+
 def test_rgb_edge_prior_populates_when_rgb_camera_and_tf_are_given() -> None:
     from blockpose import _core
 
@@ -119,7 +172,7 @@ def test_rgb_edge_prior_populates_when_rgb_camera_and_tf_are_given() -> None:
 
     assert len(result.rgb_edge_prior) == len(result.pcl)
     assert {item.id for item in result.rgb_edge_prior} == {item.id for item in result.pcl}
-    assert not any("rgb_edge_prior unavailable" in w for w in result.warnings)
+    assert not any("RGB edge validator/reranker unavailable" in w for w in result.warnings)
     # Still unavailable: no DINO checkpoints given.
     assert result.dino_proposer == ()
     assert result.dino_verifier_reranked == ()
@@ -138,8 +191,7 @@ def test_unavailable_rgb_edge_prior_does_not_discard_pcl_candidates(monkeypatch)
     assert len(result.pcl) > 0
     assert result.rgb_edge_prior == ()
     assert any(
-        "rgb_edge_prior unavailable" in warning
-        and "not enabled" in warning
+        "RGB edge validator/reranker unavailable" in warning and "not enabled" in warning
         for warning in result.warnings
     )
 
@@ -170,7 +222,9 @@ def test_dino_sources_report_a_clear_warning_without_crashing_when_no_checkpoint
         assert len(result.rgb_edge_prior) == len(result.pcl)
     else:
         assert result.rgb_edge_prior == ()
-        assert any("rgb_edge_prior unavailable" in warning for warning in result.warnings)
+        assert any(
+            "RGB edge validator/reranker unavailable" in warning for warning in result.warnings
+        )
     assert len(result.dino_verifier_geometry_only) == len(result.pcl)
 
 

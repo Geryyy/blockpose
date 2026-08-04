@@ -29,6 +29,13 @@ class Pzs100SelfFilterParams:
     outboard_extent_m: float = 0.30
     cross_rail_extent_m: float = 0.90
     rail_end_margin_m: float = 0.00
+    # Additional exclusion volume for the jaw carrier/boom/arm structurally
+    # above both jaws -- not covered by the outward-facing rail boxes above.
+    # Both default to 0.0 (feature off): `filter_pzs100_gripper` forwards
+    # these fields generically to the native `Pzs100SelfFilterParameters`, so
+    # callers that don't set them keep the pre-existing rail-only behaviour.
+    above_exclusion_height_m: float = 0.00
+    above_exclusion_margin_m: float = 0.00
 
 
 @dataclass(frozen=True)
@@ -71,12 +78,18 @@ def load_pzs100_self_filter_config(path: str | Path) -> Pzs100SelfFilterConfig:
         outboard_extent_m=float(payload["outboard_extent_m"]),
         cross_rail_extent_m=float(payload["cross_rail_extent_m"]),
         rail_end_margin_m=float(payload["rail_end_margin_m"]),
+        # Defaulted rather than required: existing profiles are schema_version
+        # 1 and predate this feature, and must keep loading unchanged.
+        above_exclusion_height_m=float(payload.get("above_exclusion_height_m", 0.0)),
+        above_exclusion_margin_m=float(payload.get("above_exclusion_margin_m", 0.0)),
     )
     if (
         not np.all(np.isfinite(tuple(vars(parameters).values())))
         or parameters.outboard_extent_m <= 0
         or parameters.cross_rail_extent_m <= 0
         or parameters.rail_end_margin_m < 0
+        or parameters.above_exclusion_height_m < 0
+        or parameters.above_exclusion_margin_m < 0
     ):
         raise ValueError("PZS100 extents must be finite and positive (margin non-negative)")
     return Pzs100SelfFilterConfig(bool(payload.get("enabled", True)), parameters, tuple(rails))
@@ -167,6 +180,19 @@ def filter_pzs100_gripper(
     )
     boxes = {
         name: np.asarray(result[name], dtype=np.float64)
-        for name in ("centers", "rotations", "sizes", "rail_starts", "rail_ends", "outward_normals")
+        for name in (
+            "centers",
+            "rotations",
+            "sizes",
+            "rail_starts",
+            "rail_ends",
+            # Above-gripper exclusion volume: kept under separate keys (not
+            # appended to centers/rotations/sizes) so the existing GUI overlay
+            # keeps seeing only the two jaw boxes there and can render this
+            # volume distinctly. Shape (0, 3) etc. when the feature is off.
+            "above_centers",
+            "above_rotations",
+            "above_sizes",
+        )
     }
     return _points(result["points"]), int(result["removed_count"]), boxes

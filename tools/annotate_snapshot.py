@@ -24,14 +24,17 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "python"))
 
 from blockpose.annotation_preprocess import (  # noqa: E402
-    filter_exclusion_boxes,
     filter_pzs100_gripper,
     filter_workspace,
     load_pzs100_self_filter_config,
     pzs100_self_filter_available,
     remove_ground,
 )
-from blockpose.annotation_snap import SnapParams, snap_block_to_cloud  # noqa: E402
+from blockpose.annotation_snap import (  # noqa: E402
+    SnapParams,
+    snap_block_face_to_plane,
+    snap_block_to_cloud,
+)
 from blockpose.annotation_tool import (  # noqa: E402
     VISIBILITIES,
     AnnotationController,
@@ -42,8 +45,8 @@ from blockpose.annotation_tool import (  # noqa: E402
     full_workspace_roi,
     initial_camera_focus,
     nearest_point_to_ray_with_distance,
-    next_symmetry_rotation,
     orientation_summary,
+    pca_oriented_block_pose,
     pick_oriented_box,
     remove_background_by_range,
     save_annotations_atomic,
@@ -55,6 +58,7 @@ from blockpose.io import (  # noqa: E402
     load_snapshot,
     load_tf_snapshot,
 )
+from blockpose.pose import BLOCK_DIMS  # noqa: E402
 from blockpose.projection import (  # noqa: E402
     colorize_world_points,
     project_points,
@@ -87,11 +91,11 @@ BOX_COLORS = {
 }
 # One comparison-overlay color per candidate source, distinct from BOX_COLORS and
 # from each other: thin gray for the raw geometric proposer, orange for the
-# accepted RGB-edge-prior refinement, purple for the DINO proposer, teal for the
-# reranked DINO verifier.
+# RGB edge validator/reranker (it scores PCL hypotheses), purple for the DINO
+# proposer, teal for the reranked DINO verifier.
 CANDIDATE_SOURCES = (
     ("pcl", "PCL geometry"),
-    ("rgb_edge_prior", "+ RGB edge prior"),
+    ("rgb_edge_prior", "+ RGB edge validator/reranker"),
     ("dino_proposer", "+ DINO proposer"),
     ("dino_verifier_reranked", "+ DINO verifier (reranked)"),
 )
@@ -108,24 +112,27 @@ WORKFLOW_SECTION_TITLES = (
     "4. Visibility and details",
     "5. Save snapshot",
 )
-SELECTED_BLOCK_POINTS_COLOR = (0.0, 0.9, 0.9)
-SELECTED_BLOCK_POINTS_BAND_M = 0.10
+# Explicit, GUI-owned order for the "Snap face" combobox. This is deliberately
+# not derived from `annotation_snap.FACE_CLASSES`' dict order: doing so was
+# exactly the bug being fixed elsewhere (`list(FACE_NORMALS)[selected_index]`
+# silently depended on another module's dict insertion order).
+SNAP_FACE_CHOICES = ("Auto", "End", "Long face")
 BASE_POINT_SIZE = 3.5
 # The PZS100 self-filter is intentionally visible in the scene.  Keep its
 # surfaces faint so they explain which part of the cloud was masked without
 # hiding the annotation targets or auto-fit comparison boxes.
-PZS_FILTER_VOLUME_COLOR = (1.0, 0.32, 0.04, 0.13)
 PZS_FILTER_OUTLINE_COLOR = (1.0, 0.46, 0.08, 1.0)
 PZS_FILTER_RAIL_COLOR = (0.1, 0.82, 1.0, 1.0)
 PZS_FILTER_OUTLINE_WIDTH = 2.0
 PZS_FILTER_RAIL_WIDTH = 4.0
-PZS_FILTER_STATUS_PREFIXES = (
-    "PZS100 gripper removed:",
-    "PZS100 gripper filter disabled.",
-    "PZS100 gripper filter unavailable:",
-    "PZS100 gripper filter failed:",
-    "PZS100 filter active; overlay unavailable",
-)
+# The above-gripper "dead zone" is a distinct exclusion volume (points centred
+# inside it are masked/rejected even though they're outside the rail boxes),
+# so it gets its own colour distinct from both PZS_FILTER_OUTLINE_COLOR and
+# PZS_FILTER_RAIL_COLOR.  Deep blue rather than magenta: magenta is already the
+# RGB/SAM point selection (see _refresh_scene), and two saturated magentas in
+# one view read as one concept when they are unrelated.
+PZS_FILTER_ABOVE_GRIPPER_COLOR = (0.15, 0.30, 0.95, 1.0)
+PZS_FILTER_ABOVE_GRIPPER_WIDTH = 3.0
 INITIAL_EYE = np.array([0.0, 0.0, 0.0])
 INITIAL_UP = np.array([0.0, 0.0, 1.0])
 INITIAL_DIRECTION = np.array([-1.0, 0.0, 0.0])
@@ -218,9 +225,11 @@ class AnnotatorWindow:
         self.selected_rgb_points = np.empty((0, 3))
         self.selected_mask: np.ndarray | None = None
         self.candidate_sources_result = None
-        self.candidate_choices: list[tuple[str, int, object]] = []
-        self._rotate_cycle_state: tuple[str, np.ndarray, int] | None = None
-        self._rotate_cycle_last_applied: np.ndarray | None = None
+        self.snap_face = gui.Combobox()
+        for choice in SNAP_FACE_CHOICES:
+            self.snap_face.add_item(choice)
+        self.snap_face.selected_index = 0  # Auto: resolve across all six axes
+        self.snap_pick_mode = False
         self.sam_backend = (
             None
             if args.sam_model is None
@@ -248,8 +257,11 @@ class AnnotatorWindow:
         for item in self.snapshots:
             self.snapshot_combo.add_item(item.name)
         self.snapshot_combo.set_on_selection_changed(self._on_snapshot_changed)
-        self.prev_button = self._button("◀ Prev", lambda: self._navigate(-1))
-        self.next_button = self._button("Next ▶", lambda: self._navigate(1))
+        # Open3D's bundled font cannot render the Unicode triangle glyphs
+        # these buttons used to use; ASCII arrows keep them legible in the
+        # running app instead of showing as "?".
+        self.prev_button = self._button("< Prev", lambda: self._navigate(-1))
+        self.next_button = self._button("Next >", lambda: self._navigate(1))
         self.target_list = gui.ListView()
         self.target_list.set_max_visible_items(8)
         self.target_list.set_on_selection_changed(self._on_target_selected)
@@ -271,15 +283,19 @@ class AnnotatorWindow:
         self.self_filter_toggle.set_on_checked(lambda _checked: self._on_point_filters_changed())
         # Native PZS100 poses are the primary source.  Explicit boxes remain a
         # compatibility layer for captures that genuinely need extra masking.
-        self.pzs100_filter_inputs: tuple[
-            np.ndarray, np.ndarray, np.ndarray, np.ndarray, object
-        ] | None = None
+        self.pzs100_filter_inputs: (
+            tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, object] | None
+        ) = None
         # Populated only by a successful invocation of the native filter.
         # These are its diagnostic volumes/rail segments, in world coordinates,
         # rather than approximations reconstructed by the GUI.
         self.pzs100_filter_diagnostics: dict[str, np.ndarray] | None = None
-        self.self_filter_boxes: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
         self.self_filter_reason = gui.Label("Disabled: loading PZS100 filter profile")
+        # Explicit memory of whether `self.status.text` currently holds one of
+        # `_apply_point_filters`' own PZS-filter messages, so the next call can
+        # tell "stale PZS message from last time" apart from "unrelated status
+        # from some other action" without parsing the label's own text.
+        self._pzs_status_is_current = False
         self.remove_background_toggle = gui.Checkbox("Remove background (range cutoff)")
         self.remove_background_toggle.checked = True
         self.remove_background_toggle.set_on_checked(
@@ -294,11 +310,6 @@ class AnnotatorWindow:
             checkbox.checked = False
             checkbox.set_on_checked(lambda _checked: self._candidate_sources_changed())
         self.candidate_checks["pcl"].checked = True
-        self.candidate_combo = gui.Combobox()
-        self.adopt_candidate_button = self._button(
-            "Adopt selected suggestion as editable block", self._adopt_candidate
-        )
-        self.adopt_candidate_button.enabled = False
         self.candidate_status = gui.Label(
             "unavailable: annotation_candidates module not found"
             if compute_candidate_sources is None
@@ -314,15 +325,24 @@ class AnnotatorWindow:
         self.visibility.set_on_selection_changed(self._metadata_changed)
         self.ignore_reason = gui.TextEdit()
         self.ignore_reason.placeholder_text = "ignore reason (optional)"
-        self.ignore_reason.set_on_text_changed(self._ignore_reason_changed)
+        # `set_on_value_changed` (fires once on focus-loss/Enter) rather than
+        # `set_on_text_changed` (fires on every keystroke): each commit does a
+        # full `copy.deepcopy` of the document onto the undo stack, so typing
+        # a reason used to push one undo entry per character. See
+        # `_commit_pending_text_edits` for how a not-yet-blurred edit is still
+        # guaranteed to reach the document before Save/navigate/close.
+        self.ignore_reason.set_on_value_changed(self._ignore_reason_changed)
         self.notes = gui.TextEdit()
         self.notes.placeholder_text = "snapshot notes"
         self.complete = gui.Checkbox("ROI exhaustively annotated")
         self.add_fields = [self._number() for _ in range(3)]
         self.pose_step_buttons: list[gui.Button] = []
         self._build_panel()
-        self.complete.set_on_checked(lambda _checked: self._mark_widget_dirty())
-        self.notes.set_on_text_changed(lambda _text: self._mark_widget_dirty())
+        self.complete.set_on_checked(self._complete_changed)
+        # See the matching comment on `self.ignore_reason` above: this used to
+        # be `set_on_text_changed`, firing (and undo-stacking a full document
+        # deepcopy) on every keystroke.
+        self.notes.set_on_value_changed(self._notes_changed)
         self.window.add_child(self.scene)
         self.window.add_child(self.rgb_view)
         self.window.add_child(self.panel)
@@ -332,6 +352,10 @@ class AnnotatorWindow:
         self.scene.set_on_mouse(self._on_mouse)
         self.scene.set_on_key(self._on_key)
         self._loading_widgets = False
+        # See _commit_pending_text_edits: which block the ignore-reason box is
+        # showing, and a latch to stop undo/redo re-committing stale text.
+        self._ignore_reason_target_id: str | None = None
+        self._suppress_text_commit = False
         self._load_snapshot(initial)
 
     @staticmethod
@@ -372,9 +396,7 @@ class AnnotatorWindow:
             gui.Label("Choose which cloud points are used for fitting.")
         )
         preprocessing_section.add_child(self.remove_ground_toggle)
-        advanced_filters = gui.CollapsableVert(
-            "Advanced cloud filters", 4, gui.Margins(4, 0, 0, 4)
-        )
+        advanced_filters = gui.CollapsableVert("Advanced cloud filters", 4, gui.Margins(4, 0, 0, 4))
         advanced_filters.set_is_open(False)
         advanced_filters.add_child(self.workspace_toggle)
         workspace_grid = gui.VGrid(4, 3)
@@ -397,17 +419,15 @@ class AnnotatorWindow:
 
         candidates_section = self._section(WORKFLOW_SECTION_TITLES[1])
         candidates_section.add_child(
-            gui.Label("Select fit methods, compute suggestions, then adopt the best fit.")
+            gui.Label("Select fit methods and compute; accepted suggestions become pending blocks.")
         )
         for key, _label in CANDIDATE_SOURCES:
             candidates_section.add_child(self.candidate_checks[key])
         candidates_section.add_child(
             self._button("Compute auto-fit suggestions", self._compute_candidates)
         )
-        candidates_section.add_child(self.candidate_combo)
-        candidates_section.add_child(self.adopt_candidate_button)
         candidates_section.add_child(
-            gui.Label("Adopted suggestions become pending blocks you can adjust below.")
+            gui.Label("Accepted results are added to the editable block list below.")
         )
         candidates_section.add_child(self.candidate_status)
 
@@ -418,6 +438,16 @@ class AnnotatorWindow:
         edit_section.add_child(gui.Label("pending=yellow · approved=green · excluded=red"))
         edit_section.add_child(self.target_list)
 
+        # Enabled by the live RGB/SAM point selection, not by a block being
+        # selected -- see `_update_create_from_selection_button`. Deliberately
+        # not folded into `_update_selection_actions`, which is keyed only on
+        # block selection.
+        self.create_from_selection_button = self._button(
+            "Create block from selection", self._create_block_from_selection
+        )
+        self._update_create_from_selection_button()
+        edit_section.add_child(self.create_from_selection_button)
+
         edit_section.add_child(gui.Label("Add block at XYZ (metres)"))
         add_row = gui.Horiz(3)
         for field in self.add_fields:
@@ -427,40 +457,40 @@ class AnnotatorWindow:
 
         # Delete is deliberately adjacent to the block list, always visible in
         # the main workflow, and guarded by the existing confirmation dialog.
-        self.delete_button = self._button("Delete selected block…", self._confirm_delete_selected)
+        self.delete_button = self._button("Delete selected block...", self._confirm_delete_selected)
         edit_section.add_child(self.delete_button)
 
         edit_section.add_child(
             gui.Label("Position XYZ (m), Euler XYZ (deg; canonical block frame)")
         )
         edit_section.add_child(self.orientation_label)
-        grid = gui.VGrid(2, 4)
-        for label, field in zip(("X", "Y", "Z", "Roll", "Pitch", "Yaw"), self.fields, strict=True):
-            grid.add_child(gui.Label(label))
-            grid.add_child(field)
-        edit_section.add_child(grid)
-        steps = gui.Horiz(3)
-        for axis, label in enumerate(("X", "Y", "Z")):
-            minus = self._button(f"{label}-", lambda a=axis: self._step(a, -1))
-            plus = self._button(f"{label}+", lambda a=axis: self._step(a, 1))
+        # Keep each correction control beside the value it changes.  The old
+        # layout put all six fields in one grid and the +/- controls in two
+        # separate rows below it, making it difficult to tell which button
+        # affected which value.  A compact row per degree of freedom mirrors
+        # the pose data and keeps the existing callbacks/button ordering.
+        for axis, (label, field) in enumerate(
+            zip(("X", "Y", "Z", "Roll", "Pitch", "Yaw"), self.fields, strict=True)
+        ):
+            row = gui.Horiz(4)
+            row.add_child(gui.Label(label))
+            # The row label identifies the degree of freedom, so the controls
+            # only need compact +/- glyphs and do not repeat the axis name.
+            minus = self._button("-", lambda a=axis: self._step(a, -1))
+            plus = self._button("+", lambda a=axis: self._step(a, 1))
             self.pose_step_buttons.extend((minus, plus))
-            steps.add_child(minus)
-            steps.add_child(plus)
-        edit_section.add_child(steps)
-        turns = gui.Horiz(3)
-        for axis, label in enumerate(("R", "P", "Y"), start=3):
-            minus = self._button(f"{label}-", lambda a=axis: self._step(a, -1))
-            plus = self._button(f"{label}+", lambda a=axis: self._step(a, 1))
-            self.pose_step_buttons.extend((minus, plus))
-            turns.add_child(minus)
-            turns.add_child(plus)
-        edit_section.add_child(turns)
-        self.rotate_button = self._button(
-            "Rotate 90° (alternative face labeling)", self._rotate_selected_90
-        )
+            row.add_child(minus)
+            row.add_child(field)
+            row.add_child(plus)
+            edit_section.add_child(row)
+        self.rotate_button = self._button("Rotate 90° yaw", self._rotate_selected_90)
         edit_section.add_child(self.rotate_button)
-        self.snap_button = self._button("Snap selected block to cloud", self._snap_selected)
-        edit_section.add_child(self.snap_button)
+        snap_row = gui.Horiz(3)
+        snap_row.add_child(gui.Label("Snap face"))
+        snap_row.add_child(self.snap_face)
+        self.snap_pick_button = self._button("Pick support plane in cloud", self._toggle_snap_pick)
+        snap_row.add_child(self.snap_pick_button)
+        edit_section.add_child(snap_row)
         history = gui.Horiz(4)
         history.add_child(self._button("Undo", self._undo))
         history.add_child(self._button("Redo", self._redo))
@@ -522,14 +552,19 @@ class AnnotatorWindow:
         )
 
     def _load_snapshot(self, snapshot: Path) -> None:
-        self.snapshot = snapshot
         manifest = snapshot / "annotations.yaml"
         if not manifest.is_file():
             raise FileNotFoundError(f"Missing annotation manifest: {manifest}")
-        self.controller = AnnotationController(AnnotationDocument.load(manifest))
+        # Do every load that can raise (FileNotFoundError, malformed tf/cloud,
+        # an empty/non-finite capture) into locals first. Committing to
+        # `self` only after all of this succeeds means a failure here leaves
+        # self.snapshot/self.controller/self.points/the combobox still
+        # describing the snapshot that was already loaded, rather than a
+        # half-loaded new one escaping this GUI callback in an inconsistent
+        # state.
+        document = AnnotationDocument.load(manifest)
         tf = load_tf_snapshot(snapshot / "tf.yaml")
-        self.T_world_cloud = tf.T_world_cloud
-        self.raw_points, _ = load_snapshot(
+        raw_points, _ = load_snapshot(
             snapshot,
             self.config,
             T_world_cloud=tf.T_world_cloud,
@@ -541,16 +576,18 @@ class AnnotatorWindow:
         # AnnotationDocument.validate()'s ROI completeness requirement without
         # the user ever touching it, and without the completeness region
         # shrinking just because a display/candidate filter is toggled on.
-        self.controller.document.roi_min, self.controller.document.roi_max = full_workspace_roi(
-            self.raw_points
-        )
+        roi_min, roi_max = full_workspace_roi(raw_points)
+
+        # Nothing from here on can fail, so it is now safe to commit.
+        self.snapshot = snapshot
+        self.controller = AnnotationController(document)
+        self.T_world_cloud = tf.T_world_cloud
+        self.raw_points = raw_points
+        self.controller.document.roi_min, self.controller.document.roi_max = roi_min, roi_max
         self.max_range_field.double_value = default_max_range_m(
             self.raw_points, self.T_world_cloud[:3, 3]
         )
-        workspace_min, workspace_max = full_workspace_roi(self.raw_points)
-        for field, value in zip(
-            self.workspace_fields, (*workspace_min, *workspace_max), strict=True
-        ):
+        for field, value in zip(self.workspace_fields, (*roi_min, *roi_max), strict=True):
             field.double_value = float(value)
         self._load_self_filter_boxes(snapshot, tf)
         self.rgb = None
@@ -558,16 +595,18 @@ class AnnotatorWindow:
         self.camera = None
         self.candidate_masks = {}
         self.candidate_sources_result = None
-        self.candidate_choices = []
-        self.candidate_combo.clear_items()
-        self.adopt_candidate_button.enabled = False
+        # A prior snapshot's SAM/mask pick is a set of world-space points and
+        # stays numerically valid across filter changes (see
+        # `_apply_point_filters`), but it has no relation to a newly loaded
+        # snapshot's cloud, so this is the one place it must be dropped.
+        self.selected_rgb_points = np.empty((0, 3))
+        self.selected_mask = None
+        self._update_create_from_selection_button()
         self.candidate_status.text = (
             "unavailable: annotation_candidates module not found"
             if compute_candidate_sources is None
             else ""
         )
-        self._rotate_cycle_state = None
-        self._rotate_cycle_last_applied = None
         if self.sam_worker is not None:
             self.sam_worker.invalidate()
         if (snapshot / "rgb.png").is_file():
@@ -578,14 +617,33 @@ class AnnotatorWindow:
             except (ValueError, KeyError):
                 self.rgb = None
                 self.camera = None
+        # If the default filters somehow leave nothing (see
+        # `_apply_point_filters`'s empty-cloud guard), fall back to this
+        # snapshot's own raw cloud rather than whatever the previous
+        # snapshot happened to leave in `self.points`.
+        self.points = self.raw_points
         self._apply_point_filters()
         if self.rgb is not None:
             self._refresh_rgb()
+        else:
+            # Without this, a snapshot with no rgb.png left the ImageWidget
+            # showing the PREVIOUS snapshot's photo next to the new
+            # snapshot's cloud -- nothing else clears it once `self.rgb`
+            # itself has already been set to None above.
+            self._clear_rgb_view()
         self._changing_snapshot_combo = True
         self.snapshot_combo.selected_index = snapshot_selection_index(self.snapshots, snapshot)
         self._changing_snapshot_combo = False
         self._update_nav_buttons()
-        self._load_document_widgets()
+        # The text widgets still hold the PREVIOUS snapshot's text while this
+        # document is freshly loaded, so a flush here would overwrite the new
+        # snapshot's stored notes with stale text. `_go_to_snapshot` has
+        # already committed the outgoing snapshot's edits before we got here.
+        self._suppress_text_commit = True
+        try:
+            self._load_document_widgets()
+        finally:
+            self._suppress_text_commit = False
         self._refresh_scene(reset_camera=True)
 
     def _on_point_filters_changed(self) -> None:
@@ -594,24 +652,19 @@ class AnnotatorWindow:
         except (ImportError, ValueError) as error:
             self.status.text = f"Preprocessing unchanged: {error}"
             return
-        if self.rgb is not None:
-            self._refresh_rgb()
-        self._refresh_scene()
+        self._refresh_views()
 
     def _load_self_filter_boxes(self, snapshot: Path, tf) -> None:
-        """Configure native PZS100 rails, with explicit boxes as a safe fallback.
+        """Configure the PZS100 rail filter from the snapshot's captured TF.
 
-        Captured TF is authoritative for the rail endpoints.  Unlike the old
-        UI, no per-snapshot ``gripper_exclusions.yaml`` is necessary for the
-        standard PZS100 filter to be active.
+        Captured TF is the only source of rail endpoints. Captures whose TF
+        lacks the profile's rail frames simply leave the toggle disabled,
+        naming the missing frame so it is obvious why.
         """
-        path = snapshot / "gripper_exclusions.yaml"
         self.pzs100_filter_inputs = None
         self.pzs100_filter_diagnostics = None
-        self.self_filter_boxes = None
         self.self_filter_toggle.checked = False
         self.self_filter_toggle.enabled = False
-        pzs_reason = ""
         try:
             available, native_reason = pzs100_self_filter_available()
             if not available:
@@ -635,50 +688,14 @@ class AnnotatorWindow:
                 profile.parameters,
             )
         except (ImportError, KeyError, OSError, TypeError, ValueError, yaml.YAMLError) as error:
-            pzs_reason = str(error)
-
-        legacy_reason = ""
-        if path.is_file():
-            try:
-                payload = yaml.safe_load(path.read_text()) or {}
-                boxes = payload.get("boxes", [])
-                centers = np.asarray([item["center"] for item in boxes], dtype=np.float64)
-                rotations = np.asarray([item["rotation"] for item in boxes], dtype=np.float64)
-                sizes = np.asarray([item["size"] for item in boxes], dtype=np.float64)
-                if (
-                    centers.ndim != 2
-                    or centers.shape[1] != 3
-                    or rotations.shape != (len(boxes), 3, 3)
-                    or sizes.shape != centers.shape
-                    or not len(boxes)
-                ):
-                    raise ValueError("boxes must contain center (3), rotation (3x3), and size (3)")
-                self.self_filter_boxes = centers, rotations, sizes
-            except (OSError, TypeError, ValueError, KeyError, yaml.YAMLError) as error:
-                legacy_reason = f"invalid gripper_exclusions.yaml ({error})"
-
-        if self.pzs100_filter_inputs is not None:
-            self.self_filter_toggle.checked = True
-            self.self_filter_toggle.enabled = True
-            suffix = (
-                f"; {len(self.self_filter_boxes[0])} legacy explicit box(es) ignored to avoid "
-                "combining unrelated capture-specific masks"
-                if self.self_filter_boxes is not None
-                else ""
-            )
-            self.self_filter_reason.text = (
-                f"PZS100 native filter ready from captured K9/K11 rails; "
-                f"its translucent filter volumes and rails are shown in 3D{suffix}"
-            )
+            self.self_filter_reason.text = f"Disabled: {error}"
             return
-        if self.self_filter_boxes is not None:
-            self.self_filter_toggle.enabled = True
-            self.self_filter_reason.text = (
-                "PZS100 unavailable: " + pzs_reason + "; explicit exclusion boxes available"
-            )
-            return
-        detail = pzs_reason or legacy_reason or "no PZS100 TF rails or explicit exclusions"
-        self.self_filter_reason.text = f"Disabled: {detail}"
+        self.self_filter_toggle.checked = True
+        self.self_filter_toggle.enabled = True
+        self.self_filter_reason.text = (
+            "PZS100 native filter ready from captured K9/K11 rails; its filter volume "
+            "outlines and rails are shown in 3D"
+        )
 
     def _apply_point_filters(self) -> None:
         """Recompute the working cloud from `raw_points` under the current filter toggles.
@@ -688,8 +705,15 @@ class AnnotatorWindow:
         from what's displayed. The annotation ROI is deliberately NOT
         recomputed here -- it always covers the full raw capture (see
         `_load_snapshot`), independent of these display/candidate filters.
+
+        The status label is decided by collecting every message this pass
+        could show as `(priority, message, is_pzs_message)` candidates, then
+        emitting only the highest-priority one at the end -- rather than
+        directly overwriting `self.status.text` at each step and separately
+        re-deriving "was the filter active last time" by string-matching the
+        label's own previous text against a fixed prefix tuple.
         """
-        had_pzs_status = self.status.text.startswith(PZS_FILTER_STATUS_PREFIXES)
+        had_pzs_status = self._pzs_status_is_current
         if had_pzs_status:
             self.status.text = ""
         # Never retain a diagnostic overlay from a previous filter pass.  In
@@ -698,10 +722,12 @@ class AnnotatorWindow:
         self.pzs100_filter_diagnostics = None
         pzs_filter_failed = False
         points = self.raw_points
+        status_candidates: list[tuple[int, str, bool]] = []
+
         if self.remove_ground_toggle.checked:
             points, ground = remove_ground(points)
-            self.status.text = (
-                f"Ground removed: {ground['removed_count']} points ({ground['source']})"
+            status_candidates.append(
+                (1, f"Ground removed: {ground['removed_count']} points ({ground['source']})", False)
             )
         if self.workspace_toggle.checked:
             minimum = np.array([field.double_value for field in self.workspace_fields[:3]])
@@ -717,26 +743,17 @@ class AnnotatorWindow:
                     points, *self.pzs100_filter_inputs
                 )
                 self.pzs100_filter_diagnostics = diagnostics
-                self.status.text = f"PZS100 gripper removed: {removed} points"
+                status_candidates.append((3, f"PZS100 gripper removed: {removed} points", True))
             except (ImportError, ValueError, RuntimeError) as error:
                 # A stale .so or malformed capture must not make the annotator
                 # unusable.  Keep the cloud untouched and expose the cause.
                 self.self_filter_toggle.checked = False
-                self.self_filter_toggle.enabled = self.self_filter_boxes is not None
+                self.self_filter_toggle.enabled = False
                 self.pzs100_filter_inputs = None
                 self.self_filter_reason.text = f"Disabled: PZS100 native filter failed ({error})"
-                self.status.text = f"PZS100 gripper filter failed: {error}"
+                status_candidates.append((3, f"PZS100 gripper filter failed: {error}", True))
                 pzs_filter_failed = True
-        # Explicit boxes are a legacy fallback, rather than another mask to
-        # silently combine with the current FK-based PZS100 geometry.
-        if (
-            self.self_filter_toggle.checked
-            and self.pzs100_filter_inputs is None
-            and self.self_filter_boxes is not None
-        ):
-            points, removed = filter_exclusion_boxes(points, *self.self_filter_boxes)
-            self.status.text = f"Explicit gripper exclusions removed: {removed} points"
-        elif not self.self_filter_toggle.checked and not pzs_filter_failed:
+        if not self.self_filter_toggle.checked and not pzs_filter_failed:
             # Make a state transition visible when toggling an otherwise-ready
             # filter off.  If another preprocessing operation produced status
             # in this same pass (e.g. ground removal), leave that more useful
@@ -746,21 +763,39 @@ class AnnotatorWindow:
                 and had_pzs_status
                 and not self.remove_ground_toggle.checked
             ):
-                self.status.text = "PZS100 gripper filter disabled."
-            elif (
-                self.pzs100_filter_inputs is None
-                and self.self_filter_boxes is None
-                and not self.remove_ground_toggle.checked
-            ):
+                status_candidates.append((2, "PZS100 gripper filter disabled.", True))
+            elif self.pzs100_filter_inputs is None and not self.remove_ground_toggle.checked:
                 detail = self.self_filter_reason.text.removeprefix("Disabled: ")
-                self.status.text = f"PZS100 gripper filter unavailable: {detail}"
+                status_candidates.append((2, f"PZS100 gripper filter unavailable: {detail}", True))
+
+        if status_candidates:
+            _priority, message, is_pzs = max(status_candidates, key=lambda item: item[0])
+            self.status.text = message
+            self._pzs_status_is_current = is_pzs
+        elif had_pzs_status:
+            self.status.text = ""
+            self._pzs_status_is_current = False
+
+        if not len(points):
+            # "max range (m)" accepts values down to 0.1 and the workspace
+            # min/max fields accept min > max, so this combination can
+            # legitimately zero out the cloud. Adopting an empty
+            # `self.points` would hand a degenerate array to rendering and to
+            # Ctrl+click picking (`_show_click_ray` takes `np.ptp` over it,
+            # which raises on a zero-size array), so keep the last working
+            # cloud and explain why the filters were not applied instead.
+            self.status.text = (
+                "Filter combination would leave an empty cloud; keeping the previous "
+                f"{len(self.points)}-point cloud instead."
+            )
+            self._pzs_status_is_current = False
+            return
         self.points = points
-        self.selected_rgb_points = np.empty((0, 3))
-        self.selected_mask = None
+        # The SAM/mask selection is a set of world-space points and stays
+        # valid under any of these filters -- it is only invalidated by
+        # loading a different snapshot (see `_load_snapshot`), so it is
+        # deliberately not cleared here.
         self.candidate_sources_result = None
-        self.candidate_choices = []
-        self.candidate_combo.clear_items()
-        self.adopt_candidate_button.enabled = False
         if self.camera is not None and self.rgb is not None:
             try:
                 self.rgb_colors, _ = colorize_world_points(
@@ -788,6 +823,9 @@ class AnnotatorWindow:
         self._go_to_snapshot(chosen)
 
     def _load_document_widgets(self) -> None:
+        # Every reload overwrites the text widgets from the document, so
+        # anything typed but not yet blurred has to be captured first.
+        self._commit_pending_text_edits()
         self._loading_widgets = True
         document = self.controller.document
         self.target_list.set_items(
@@ -804,6 +842,7 @@ class AnnotatorWindow:
         target = self.controller.target
         self._update_selection_actions(target is not None)
         if target is None:
+            self._ignore_reason_target_id = None
             self.orientation_label.text = "No block selected"
             return
         self._loading_widgets = True
@@ -811,6 +850,9 @@ class AnnotatorWindow:
             field.double_value = float(value)
         self.visibility.selected_index = VISIBILITIES.index(target.visibility)
         self.ignore_reason.text_value = target.ignore_reason or ""
+        # Record whose reason the widget now shows, so a later flush cannot
+        # attribute this text to a different block (see _commit_pending_text_edits).
+        self._ignore_reason_target_id = target.id
         self.orientation_label.text = orientation_summary(target.rotation)
         self._loading_widgets = False
 
@@ -819,7 +861,7 @@ class AnnotatorWindow:
         for widget in (
             self.delete_button,
             self.rotate_button,
-            self.snap_button,
+            self.snap_pick_button,
             self.approve_button,
             self.reject_button,
             self.abort_button,
@@ -830,6 +872,19 @@ class AnnotatorWindow:
             *self.pose_step_buttons,
         ):
             widget.enabled = has_selection
+
+    def _refresh_views(self) -> None:
+        """Refresh the 3D scene and the RGB overlay together.
+
+        Both panes independently redraw the same `self.controller.document.
+        targets` (3D wireframes in `_refresh_scene`, projected wireframes in
+        `_refresh_rgb`). Calling only one after a pose/selection/review change
+        left the other showing a stale block -- e.g. moving a block in 3D
+        left its RGB wireframe behind at the old pose. `_refresh_rgb` already
+        no-ops when `self.rgb` is None, so this is always safe to call.
+        """
+        self._refresh_scene()
+        self._refresh_rgb()
 
     def _refresh_scene(self, reset_camera: bool = False) -> None:
         self.scene.scene.clear_geometry()
@@ -878,9 +933,11 @@ class AnnotatorWindow:
         """Render native PZS filter diagnostics as read-only scene context.
 
         The native core supplies the exact oriented exclusion boxes used for
-        masking, plus the captured rail endpoints.  This routine deliberately
-        has no connection to editable targets or candidate computation: it is
-        a visual explanation of an already-applied preprocessing step only.
+        masking, plus the captured rail endpoints, and optionally the
+        above-gripper "dead zone" volume (see `_add_above_gripper_geometry`).
+        This routine deliberately has no connection to editable targets or
+        candidate computation: it is a visual explanation of an
+        already-applied preprocessing step only.
         """
         diagnostics = self.pzs100_filter_diagnostics
         if diagnostics is None:
@@ -914,10 +971,6 @@ class AnnotatorWindow:
             self.status.text = f"PZS100 filter active; overlay unavailable ({error})"
             return
 
-        volume_material = rendering.MaterialRecord()
-        volume_material.shader = "defaultUnlitTransparency"
-        volume_material.base_color = PZS_FILTER_VOLUME_COLOR
-        volume_material.has_alpha = True
         outline_material = rendering.MaterialRecord()
         outline_material.shader = "unlitLine"
         outline_material.base_color = PZS_FILTER_OUTLINE_COLOR
@@ -928,8 +981,9 @@ class AnnotatorWindow:
         rail_material.line_width = PZS_FILTER_RAIL_WIDTH
 
         # A single LineSet keeps both rails visually consistent and makes their
-        # captured endpoints obvious, while each volume has a transparent face
-        # mesh and a crisp outline for depth perception.
+        # captured endpoints obvious.  The filter volumes are outlines only:
+        # this makes their active region clear without hiding cloud points or
+        # relying on backend-specific transparent materials.
         rail_lines = o3d.geometry.LineSet(
             points=o3d.utility.Vector3dVector(np.vstack((rail_starts, rail_ends))),
             lines=o3d.utility.Vector2iVector(
@@ -940,19 +994,58 @@ class AnnotatorWindow:
         for index, (center, rotation, size) in enumerate(
             zip(centers, rotations, sizes, strict=True)
         ):
-            # create_box starts at the origin.  Center it first, then apply the
-            # native world-frame orientation and translation.
-            volume = o3d.geometry.TriangleMesh.create_box(*size)
-            volume.translate(-size / 2.0)
-            volume.rotate(rotation, center=np.zeros(3))
-            volume.translate(center)
-            self.scene.scene.add_geometry(f"pzs-filter-volume-{index}", volume, volume_material)
-
             box = o3d.geometry.OrientedBoundingBox(center, rotation, size)
             outline = o3d.geometry.LineSet.create_from_oriented_bounding_box(box)
-            self.scene.scene.add_geometry(
-                f"pzs-filter-outline-{index}", outline, outline_material
-            )
+            self.scene.scene.add_geometry(f"pzs-filter-outline-{index}", outline, outline_material)
+        self._add_above_gripper_geometry(diagnostics)
+
+    def _add_above_gripper_geometry(self, diagnostics: dict[str, np.ndarray]) -> None:
+        """Render the above-gripper "dead zone" exclusion volume, if present.
+
+        ``above_centers``/``above_rotations``/``above_sizes`` are newer
+        diagnostics keys (see `annotation_preprocess.filter_pzs100_gripper`);
+        an older compiled ``_core`` extension's diagnostics dict simply lacks
+        them. `.get()` plus the early return below keeps the rail/outline
+        overlay drawn by the caller intact instead of losing the whole
+        overlay over this optional addition.
+        """
+        above_centers = diagnostics.get("above_centers")
+        above_rotations = diagnostics.get("above_rotations")
+        above_sizes = diagnostics.get("above_sizes")
+        if above_centers is None or above_rotations is None or above_sizes is None:
+            return
+        try:
+            above_centers = np.asarray(above_centers, dtype=float)
+            above_rotations = np.asarray(above_rotations, dtype=float)
+            above_sizes = np.asarray(above_sizes, dtype=float)
+            above_count = len(above_centers)
+            if (
+                above_centers.shape != (above_count, 3)
+                or above_rotations.shape != (above_count, 3, 3)
+                or above_sizes.shape != (above_count, 3)
+                or not np.all(np.isfinite(above_centers))
+                or not np.all(np.isfinite(above_rotations))
+                or not np.all(np.isfinite(above_sizes))
+                or np.any(above_sizes <= 0.0)
+            ):
+                raise ValueError("invalid native above-gripper diagnostics")
+        except (TypeError, ValueError):
+            # Malformed optional diagnostics must not break the rail/outline
+            # overlay that already rendered successfully in the caller.
+            return
+        if not above_count:
+            return  # Feature off: empty-shaped arrays, nothing to draw.
+
+        above_material = rendering.MaterialRecord()
+        above_material.shader = "unlitLine"
+        above_material.base_color = PZS_FILTER_ABOVE_GRIPPER_COLOR
+        above_material.line_width = PZS_FILTER_ABOVE_GRIPPER_WIDTH
+        for index, (center, rotation, size) in enumerate(
+            zip(above_centers, above_rotations, above_sizes, strict=True)
+        ):
+            box = o3d.geometry.OrientedBoundingBox(center, rotation, size)
+            outline = o3d.geometry.LineSet.create_from_oriented_bounding_box(box)
+            self.scene.scene.add_geometry(f"pzs-filter-above-{index}", outline, above_material)
 
     def _reset_camera(self) -> None:
         focus = initial_camera_focus(self.points, INITIAL_EYE, INITIAL_DIRECTION)
@@ -989,7 +1082,7 @@ class AnnotatorWindow:
         if compute_candidate_sources is None:
             self.candidate_status.text = "unavailable: annotation_candidates module not found"
             return
-        self.candidate_status.text = "Computing candidates…"
+        self.candidate_status.text = "Computing candidates..."
         try:
             result = compute_candidate_sources(
                 self.points,
@@ -999,63 +1092,56 @@ class AnnotatorWindow:
                 T_world_cloud=self.T_world_cloud,
                 dino_proposer_checkpoint=self.args.dino_proposer_checkpoint,
                 dino_verifier_checkpoint=self.args.dino_verifier_checkpoint,
+                # `None` when the PZS100 filter is off/unavailable, which
+                # `compute_candidate_sources` treats as a no-op -- callers
+                # with no gripper geometry are unaffected.
+                above_gripper_boxes=self.pzs100_filter_diagnostics,
             )
         except Exception as error:  # noqa: BLE001 - surface any backend failure in the status bar
             self.candidate_sources_result = None
             self.candidate_status.text = f"Candidate computation failed: {error}"
-            self._refresh_scene()
+            self._refresh_views()
             return
         self.candidate_sources_result = result
-        self._refresh_candidate_choices()
+        try:
+            promoted = self._promote_accepted_candidates()
+        except ValueError as error:
+            self.candidate_status.text = f"Candidate promotion failed: {error}"
+            self._refresh_views()
+            return
         message = f"Computed candidates for {self.snapshot.name}."
+        if promoted:
+            message += f" Added {len(promoted)} pending block(s)."
         if result.warnings:
             message += " " + " ".join(result.warnings)
         self.candidate_status.text = message
-        self._refresh_scene()
+        self._refresh_views()
 
-    def _candidate_sources_changed(self) -> None:
-        self._refresh_candidate_choices()
-        self._refresh_scene()
-
-    def _refresh_candidate_choices(self) -> None:
-        """List accepted, visible suggestions once, preferring refined sources."""
-        self.candidate_combo.clear_items()
-        self.candidate_choices = []
+    def _promote_accepted_candidates(self) -> list[str]:
+        """Promote accepted checked-source results as one undoable GUI action."""
         if self.candidate_sources_result is None:
-            self.adopt_candidate_button.enabled = False
-            return
-        unique: dict[str, tuple[str, int, object]] = {}
+            return []
+        # Later/refined sources replace the raw view of the same detector ID.
+        # Iterating in CANDIDATE_SOURCES order gives deterministic precedence.
+        unique: dict[str, object] = {}
         for key, _label in CANDIDATE_SOURCES:
             if not self.candidate_checks[key].checked:
                 continue
-            for index, candidate in enumerate(getattr(self.candidate_sources_result, key, ())):
+            for candidate in getattr(self.candidate_sources_result, key, ()):
                 if candidate.accepted and candidate.id not in self.controller.adopted_candidate_ids:
-                    # Later/refined sources replace the raw view of the same detector ID.
-                    unique[candidate.id] = (key, index, candidate)
-        self.candidate_choices = list(unique.values())
-        labels = dict(CANDIDATE_SOURCES)
-        for key, _index, candidate in self.candidate_choices:
-            self.candidate_combo.add_item(
-                f"{labels[key]} · {candidate.id} · score {candidate.score:.3f}"
-            )
-        self.adopt_candidate_button.enabled = bool(self.candidate_choices)
-
-    def _adopt_candidate(self) -> None:
-        index = self.candidate_combo.selected_index
-        if index < 0 or index >= len(self.candidate_choices):
-            self.status.text = "Compute and select an accepted auto-fit suggestion first."
-            return
-        _source, _source_index, candidate = self.candidate_choices[index]
-        target_id = self.controller.adopt_candidate(
-            candidate.id, candidate.pose.position, candidate.pose.rotation, candidate.pose.dims
-        )
-        self._refresh_candidate_choices()
+                    unique[candidate.id] = candidate
+        specs = [
+            (candidate.id, candidate.pose.position, candidate.pose.rotation, candidate.pose.dims)
+            for candidate in unique.values()
+        ]
+        if not specs:
+            return []
+        target_ids = self.controller.adopt_candidates(specs)
         self._load_document_widgets()
+        return target_ids
+
+    def _candidate_sources_changed(self) -> None:
         self._refresh_scene()
-        self.status.text = (
-            f"Adopted {candidate.id!r} as pending {target_id!r}. "
-            "Adjust its pose and visibility, then approve it."
-        )
 
     def _refresh_rgb(self) -> None:
         if self.rgb is None:
@@ -1080,6 +1166,14 @@ class AnnotatorWindow:
                     color.astype(np.uint8),
                 )
         self.rgb_view.update_image(o3d.geometry.Image(np.ascontiguousarray(shown)))
+
+    def _clear_rgb_view(self) -> None:
+        """Blank the RGB pane so a stale photo from a previous snapshot never lingers.
+
+        `gui.ImageWidget` has no "clear" call, only `update_image`; a
+        zero-sized image is the documented way to make it show nothing.
+        """
+        self.rgb_view.update_image(o3d.geometry.Image())
 
     def _on_rgb_mouse(self, event):
         if event.type != gui.MouseEvent.BUTTON_DOWN or not event.is_button_down(
@@ -1130,7 +1224,7 @@ class AnnotatorWindow:
 
         accepted = self.sam_worker.submit(self.rgb, point, snapshot, schedule, finish)
         self.status.text = (
-            "Running SAM segmentation…"
+            "Running SAM segmentation..."
             if accepted
             else "SAM is busy; wait for the current prompt to finish."
         )
@@ -1147,8 +1241,8 @@ class AnnotatorWindow:
         )
         self.selected_mask = result.mask
         self.selected_rgb_points = result.points
-        self._refresh_rgb()
-        self._refresh_scene()
+        self._update_create_from_selection_button()
+        self._refresh_views()
         if not result.success:
             self.status.text = f"{source} selection failed: {result.reason}."
             return
@@ -1168,42 +1262,153 @@ class AnnotatorWindow:
         if not snap.success:
             self.status.text = (
                 f"{source}: selected {len(result.points)} points, but fit failed: "
-                f"{snap.reason}. No annotation was changed."
+                f"{snap.reason}. Use 'Create block from selection' below to place a "
+                "block at the selection and adjust it by hand instead."
             )
             return
         assert snap.position is not None and snap.rotation is not None
         assert snap.dimensions is not None
-        self.controller.add_manual(snap.position)
-        self.controller.apply_snapped_pose(snap.position, snap.rotation, snap.dimensions)
+        self.controller.add_manual_with_pose(
+            snap.position, snap.rotation, snap.dimensions, provenance="rgb_mask"
+        )
         self._load_document_widgets()
-        self._refresh_scene()
+        self._refresh_views()
         self.status.text = (
             f"{source}: fitted pending block from {len(result.points)} selected points "
             f"(score {snap.score:.2f}). Correct and approve, or abort."
         )
+
+    def _update_create_from_selection_button(self) -> None:
+        """Keep the button's label/enabled state honest about the live RGB/SAM selection.
+
+        Unlike `_update_selection_actions`, this is gated on whether a mask
+        selection exists, not on whether a block is selected.
+        """
+        count = len(self.selected_rgb_points)
+        self.create_from_selection_button.text = f"Create block from selection ({count} points)"
+        self.create_from_selection_button.enabled = count > 0
+
+    def _create_block_from_selection(self) -> None:
+        """Turn the current RGB/SAM point selection into a pending block.
+
+        This is the dead-end fix: previously, when the automatic fit
+        triggered by clicking in the RGB pane failed, an operator with a
+        visibly correct (magenta) point selection had no way to turn it into
+        an annotatable block at all. This lets them do so on demand, from
+        whatever selection is currently highlighted.
+        """
+        points = self.selected_rgb_points
+        if not len(points):
+            self.status.text = "Select RGB/SAM points before creating a block."
+            return
+        centroid = points.mean(axis=0)
+        seed = points[int(np.argmin(np.linalg.norm(points - centroid, axis=1)))]
+        snap = snap_block_to_cloud(points, seed, SnapParams(reject_ambiguous=False))
+        if snap.success:
+            assert snap.position is not None and snap.rotation is not None
+            assert snap.dimensions is not None
+            self.controller.add_manual_with_pose(
+                snap.position, snap.rotation, snap.dimensions, provenance="rgb_mask"
+            )
+            self.status.text = (
+                f"Created pending block from {len(points)} selected points "
+                f"(score {snap.score:.2f}). Correct and approve, or abort."
+            )
+        else:
+            # No supported top/side placement exists (e.g. a partial or
+            # heavily occluded view) -- fall back to a canonical box centred
+            # on the selection, oriented by its principal axes, for the
+            # operator to correct by hand instead of a dead end. Provenance
+            # is distinct from a successful fit so this placement stays
+            # auditable.
+            position, rotation = pca_oriented_block_pose(points)
+            self.controller.add_manual_with_pose(
+                position, rotation, BLOCK_DIMS, provenance="rgb_mask_pca_fallback"
+            )
+            self.status.text = (
+                f"Fit failed ({snap.reason}); placed an approximate block from "
+                f"{len(points)} selected points instead. Correct its pose by hand, "
+                "then approve or discard."
+            )
+        self._load_document_widgets()
+        self._refresh_views()
 
     def _pose_fields_changed(self) -> None:
         if self._loading_widgets or self.controller.target is None:
             return
         values = np.array([field.double_value for field in self.fields])
         self.controller.set_pose(values[:3], values[3:])
-        self._refresh_scene()
+        self._refresh_views()
 
     def _metadata_changed(self, _text: str, index: int) -> None:
         if self._loading_widgets or self.controller.target is None:
             return
-        self.controller._change(
-            lambda: setattr(self.controller.target, "visibility", VISIBILITIES[index])
-        )
+        self.controller.set_visibility(VISIBILITIES[index])
 
     def _ignore_reason_changed(self, text: str) -> None:
         if not self._loading_widgets:
             self.controller.set_ignore_reason(text)
 
-    def _mark_widget_dirty(self) -> None:
-        if not self._loading_widgets:
-            self.controller.dirty = True
-            self.status.text = "Unsaved changes — press Ctrl+S or Validate and save snapshot."
+    def _complete_changed(self, checked: bool) -> None:
+        # Commit into the document immediately (routed through the controller,
+        # so it is undoable) rather than only at save time: any of the many
+        # buttons that reload widgets from the document -- Approve, Reject,
+        # Abort, Undo, etc. -- would otherwise silently overwrite this
+        # checkbox with the last-saved value, discarding what the operator
+        # just set.
+        if self._loading_widgets:
+            return
+        self.controller.set_annotation_complete(checked)
+        self.status.text = "Unsaved changes... press Ctrl+S or Validate and save snapshot."
+
+    def _notes_changed(self, text: str) -> None:
+        # `self.notes`/`self.ignore_reason` are wired to `set_on_value_changed`
+        # (see __init__), which fires once when the widget loses focus or the
+        # user presses Enter -- NOT on every keystroke -- so a whole burst of
+        # typing becomes one undo entry instead of one per character. That
+        # alone would still lose text typed right before Save/Prev/Next/Close
+        # if the widget never loses focus first, so `_commit_pending_text_edits`
+        # additionally reads the live widget value at each of those points.
+        if self._loading_widgets:
+            return
+        self.controller.set_notes(text)
+        self.status.text = "Unsaved changes... press Ctrl+S or Validate and save snapshot."
+
+    def _commit_pending_text_edits(self) -> None:
+        """Flush notes/ignore-reason text into the document without waiting on focus-loss.
+
+        `set_on_value_changed` only fires once the widget loses focus or the
+        user presses Enter, so text typed and then immediately acted on -- via
+        a button, a 3D-scene click, or an async SAM result landing mid-typing
+        -- needs an explicit read here, otherwise the last burst of typing is
+        silently dropped. That is why this is called from the top of
+        `_load_document_widgets` and not only from the exit points: any reload
+        overwrites the widgets from the document, so every reload is a chance
+        to lose text.
+
+        Two ordering hazards make the guards below load-bearing:
+
+        * The ignore-reason box belongs to ONE block. Callers such as
+          `add_manual` move the selection before the GUI reloads, so a blind
+          flush would write the previous block's reason onto the new one.
+          `_ignore_reason_target_id` records whose text the widget is actually
+          showing, and the flush is skipped unless it still matches.
+        * Undo/redo replace the whole document. Flushing during their reload
+          would re-commit the pre-undo widget text on top of the restored
+          state, silently defeating the undo. They flush FIRST (so typing
+          becomes its own undo entry, reversible with one more press) and then
+          suppress the flush while repainting.
+        """
+        if self._loading_widgets or self._suppress_text_commit:
+            return
+        target = self.controller.target
+        # A None marker means the box has not been repainted for any block yet
+        # (startup), where the widget is empty and flushing is a harmless
+        # no-op. Only a marker naming a DIFFERENT block means the selection
+        # moved out from under the text, which is the case worth skipping.
+        if target is not None and self._ignore_reason_target_id in (None, target.id):
+            self.controller.set_ignore_reason(self.ignore_reason.text_value)
+        self.controller.set_notes(self.notes.text_value)
 
     def _step(self, axis: int, sign: int) -> None:
         step = 0.01 if axis < 3 else 1.0
@@ -1212,66 +1417,69 @@ class AnnotatorWindow:
         self._load_target_widgets()
 
     def _rotate_selected_90(self) -> None:
-        """Cycle the selected target through alternative box-face labelings.
-
-        This is a pose edit like any manual field change: it goes through
-        `AnnotationController.set_pose`, so it is undoable and marks the
-        document dirty rather than silently rewriting the target in place.
-        """
+        """Rotate the selected block exactly +90 degrees about world Z (yaw)."""
+        self._commit_pending_text_edits()
         target = self.controller.target
         if target is None:
             self.status.text = "Select a block before rotating."
             return
-        state = self._rotate_cycle_state
-        continuing = (
-            state is not None
-            and state[0] == target.id
-            and self._rotate_cycle_last_applied is not None
-            and np.allclose(target.rotation, self._rotate_cycle_last_applied, atol=1e-9)
-        )
-        if continuing:
-            _, base, index = state
-        else:
-            base, index = target.rotation.copy(), 0
-        index += 1
-        rotation = next_symmetry_rotation(base, index, target.dimensions)
-        self._rotate_cycle_state = (target.id, base, index)
-        self._rotate_cycle_last_applied = rotation.copy()
-        euler = Rotation.from_matrix(rotation).as_euler("xyz", degrees=True)
-        self.controller.set_pose(target.position, euler)
+        # Apply the rotation matrix directly (`set_pose_matrix`) instead of
+        # round-tripping through "xyz" Euler angles: a STANDING block's
+        # canonical long axis is vertical, exactly the gimbal-lock singularity
+        # for that convention, so decomposing to Euler and rebuilding risked
+        # drift/misbehavior in precisely the case the tool's docs call out.
+        rotation = Rotation.from_euler("z", 90.0, degrees=True).as_matrix() @ target.rotation
+        self.controller.set_pose_matrix(target.position, rotation)
         self._load_document_widgets()
-        self._refresh_scene()
+        self._refresh_views()
+        self.status.text = "Rotated block +90 degrees around world Z (yaw). Review and approve."
+
+    def _toggle_snap_pick(self) -> None:
+        self.snap_pick_mode = not self.snap_pick_mode
+        self.snap_pick_button.text = (
+            "Cancel support-plane pick" if self.snap_pick_mode else "Pick support plane in cloud"
+        )
         self.status.text = (
-            "Rotated to an alternative face labeling of the same box; "
-            "review and approve if this matches the physical block."
+            "Click a nearby cloud point to snap the selected face."
+            if self.snap_pick_mode
+            else "Support-plane pick cancelled."
         )
 
     def _approve(self) -> None:
         if self.controller.target is None:
             return
+        self._commit_pending_text_edits()
         self.controller.set_review("approved")
         self._load_document_widgets()
-        self._refresh_scene()
+        self._refresh_views()
 
     def _reject(self) -> None:
+        self._commit_pending_text_edits()
         reason = self.ignore_reason.text_value.strip()
         if not reason:
             self.status.text = "Enter an exclusion reason before excluding this block."
             return
+        # Persist the reason as the block's ignore_reason too, not only as the
+        # rejection_reason. Otherwise the reload below repaints the visible
+        # "Exclusion / review reason" box from `target.ignore_reason` (still
+        # None) and the text the operator just typed vanishes from the screen
+        # the instant they exclude the block.
+        self.controller.set_ignore_reason(reason)
         self.controller.set_review("rejected", reason)
         self._load_document_widgets()
-        self._refresh_scene()
+        self._refresh_views()
 
     def _abort(self) -> None:
+        self._commit_pending_text_edits()
         self.controller.abort_selected()
-        self._refresh_candidate_choices()
         self._load_document_widgets()
-        self._refresh_scene()
+        self._refresh_views()
 
     def _reset(self) -> None:
+        self._commit_pending_text_edits()
         self.controller.reset_selected()
         self._load_document_widgets()
-        self._refresh_scene()
+        self._refresh_views()
 
     def _confirm_delete_selected(self) -> None:
         target = self.controller.target
@@ -1307,21 +1515,21 @@ class AnnotatorWindow:
         if not deleted:
             self.status.text = "Selection changed; nothing was deleted."
             return
-        self._refresh_candidate_choices()
         self._load_document_widgets()
-        self._refresh_scene()
+        self._refresh_views()
         self.status.text = (
             f"Deleted {target_id!r} [{target_status}] from the draft. "
             "Undo is available; save the snapshot to persist."
         )
 
-    def _snap_selected(self, seed: np.ndarray | None = None) -> bool:
+    def _snap_selected(self, seed: np.ndarray) -> bool:
         target = self.controller.target
         if target is None:
             self.status.text = "Select a block before snapping."
             return False
-        result = snap_block_to_cloud(
-            self.points, target.position if seed is None else np.asarray(seed, dtype=float)
+        face = SNAP_FACE_CHOICES[self.snap_face.selected_index]
+        result = snap_block_face_to_plane(
+            self.points, seed, target.position, target.rotation, target.dimensions, face
         )
         if not result.success:
             self.status.text = f"Snap failed: {result.reason}; pose unchanged."
@@ -1331,7 +1539,7 @@ class AnnotatorWindow:
         assert result.dimensions is not None
         self.controller.apply_snapped_pose(result.position, result.rotation, result.dimensions)
         self._load_document_widgets()
-        self._refresh_scene()
+        self._refresh_views()
         self.status.text = (
             f"Snapped pending proposal: score {result.score:.2f}, "
             f"{result.inlier_count} surface points. Review and approve manually."
@@ -1339,26 +1547,40 @@ class AnnotatorWindow:
         return True
 
     def _add_at_fields(self) -> None:
+        self._commit_pending_text_edits()
         self.controller.add_manual(np.array([field.double_value for field in self.add_fields]))
         self._load_document_widgets()
-        self._refresh_scene()
+        self._refresh_views()
 
     def _undo(self) -> None:
+        # Commit typing BEFORE the history move, so it becomes its own
+        # reversible entry rather than being clobbered or re-applied.
+        self._commit_pending_text_edits()
         if self.controller.undo():
-            self._refresh_candidate_choices()
-            self._load_document_widgets()
-            self._refresh_scene()
+            self._suppress_text_commit = True
+            try:
+                self._load_document_widgets()
+            finally:
+                self._suppress_text_commit = False
+            self._refresh_views()
 
     def _redo(self) -> None:
+        # Commit typing BEFORE the history move, so it becomes its own
+        # reversible entry rather than being clobbered or re-applied.
+        self._commit_pending_text_edits()
         if self.controller.redo():
-            self._refresh_candidate_choices()
-            self._load_document_widgets()
-            self._refresh_scene()
+            self._suppress_text_commit = True
+            try:
+                self._load_document_widgets()
+            finally:
+                self._suppress_text_commit = False
+            self._refresh_views()
 
     def _on_target_selected(self, _value: str, _double_click: bool) -> None:
+        self._commit_pending_text_edits()
         self.controller.selected = self.target_list.selected_index
         self._load_target_widgets()
-        self._refresh_scene()
+        self._refresh_views()
 
     def _ray(self, event) -> tuple[np.ndarray, np.ndarray]:
         x = event.x - self.scene.frame.x
@@ -1385,7 +1607,11 @@ class AnnotatorWindow:
         except ValueError as error:
             self.status.text = f"Cannot draw click ray: {error}"
             return
-        extent = max(float(np.linalg.norm(np.ptp(self.points, axis=0))), 20.0)
+        # An empty or degenerate working cloud (see `_apply_point_filters`'s
+        # empty-cloud guard) must not reach `np.ptp`, which raises on a
+        # zero-size array and escapes this Open3D mouse callback.
+        spread = float(np.linalg.norm(np.ptp(self.points, axis=0))) if len(self.points) else 0.0
+        extent = max(spread, 20.0) if np.isfinite(spread) else 20.0
         end = origin + unit * extent
         ray = o3d.geometry.LineSet(
             o3d.utility.Vector3dVector(np.vstack([origin, end])),
@@ -1425,6 +1651,18 @@ class AnnotatorWindow:
         except (ValueError, np.linalg.LinAlgError) as error:
             self.status.text = f"Cannot compute click ray: {error}"
             return gui.Widget.EventCallbackResult.HANDLED
+        if self.snap_pick_mode:
+            candidate = nearest_point_to_ray_with_distance(origin, direction, self.points)
+            point = (
+                candidate[0] if candidate is not None and candidate[1] <= self.pick_radius else None
+            )
+            if point is None:
+                self.status.text = "No nearby cloud point found for support-plane snap."
+            else:
+                self._snap_selected(point)
+                self.snap_pick_mode = False
+                self.snap_pick_button.text = "Pick support plane in cloud"
+            return gui.Widget.EventCallbackResult.HANDLED
         if event.is_modifier_down(gui.KeyModifier.CTRL):
             candidate = nearest_point_to_ray_with_distance(origin, direction, self.points)
             point = (
@@ -1433,13 +1671,11 @@ class AnnotatorWindow:
             if point is not None:
                 self.controller.add_manual(point)
                 self._load_document_widgets()
-                self._refresh_scene()
-                snapped = self._snap_selected(point)
+                self._refresh_views()
                 self._show_click_ray(origin, direction, point, True)
-                if not snapped:
-                    # _snap_selected already explains that the original draft
-                    # was retained.  Keep the successful pick visible as well.
-                    self.status.text += " Click shown in green."
+                self.status.text = (
+                    "Manual block added. Choose a face and pick a support plane to snap it."
+                )
             else:
                 nearest = None if candidate is None else candidate[0]
                 distance = None if candidate is None else candidate[1]
@@ -1455,10 +1691,14 @@ class AnnotatorWindow:
             return gui.Widget.EventCallbackResult.HANDLED
         selected = pick_oriented_box(origin, direction, self.controller.document.targets)
         if selected is not None:
+            # SceneWidget mouse events are dispatched outside the ImGui frame,
+            # so the ignore-reason box has had no chance to blur and fire its
+            # value-changed callback. Capture it before the selection moves.
+            self._commit_pending_text_edits()
             self.controller.selected = selected
             self.target_list.selected_index = selected
             self._load_target_widgets()
-            self._refresh_scene()
+            self._refresh_views()
             return gui.Widget.EventCallbackResult.HANDLED
         return gui.Widget.EventCallbackResult.IGNORED
 
@@ -1479,15 +1719,12 @@ class AnnotatorWindow:
             return gui.Widget.EventCallbackResult.HANDLED
         return gui.Widget.EventCallbackResult.IGNORED
 
-    def _commit_document_widgets(self) -> None:
-        # ROI is set unconditionally to the full workspace in _load_snapshot and
-        # is never edited from the UI, so only these two fields need committing.
-        document = self.controller.document
-        document.annotation_complete = self.complete.checked
-        document.notes = self.notes.text_value
-
     def _save(self) -> bool:
-        self._commit_document_widgets()
+        # The completeness checkbox commits on every click (`_complete_changed`),
+        # but notes/ignore-reason only commit on focus-loss/Enter (see
+        # __init__) -- flush them explicitly so a burst of typing right before
+        # Save is never silently dropped.
+        self._commit_pending_text_edits()
         try:
             backup = save_annotations_atomic(
                 self.controller.document, self.snapshot / "annotations.yaml"
@@ -1534,6 +1771,11 @@ class AnnotatorWindow:
         """Dirty-check-then-load path shared by the combobox and Prev/Next."""
         if chosen == self.snapshot:
             return
+        # Flush a not-yet-blurred notes/ignore-reason edit before the dirty
+        # check below, so it is both included in the save-prompt decision and
+        # never left behind in the widget when `_load_snapshot` repopulates it
+        # from the next snapshot's document.
+        self._commit_pending_text_edits()
         if self.sam_worker is not None:
             self.sam_worker.invalidate()
 
@@ -1546,6 +1788,9 @@ class AnnotatorWindow:
             action()
 
     def _on_close(self) -> bool:
+        # Same reasoning as `_go_to_snapshot`: a not-yet-blurred edit must
+        # count towards the dirty check that decides whether to prompt to save.
+        self._commit_pending_text_edits()
         if self.controller.dirty:
             if self.sam_worker is not None:
                 self.sam_worker.invalidate()

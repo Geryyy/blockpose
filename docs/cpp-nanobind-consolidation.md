@@ -130,7 +130,7 @@ repo still runs the pure-Python implementation:
 | Classical RGB edge prior | **Both**, independently: `python/blockpose/rgb_edge_prior.py` **and** `cpp/src/rgb_edge_prior.cpp` (`blockpose::vision`, built behind `BLOCKPOSE_VISION_BUILD`) | **No** — `blockpose::vision` isn't in the nanobind bindings at all |
 | `Observability`/`calibrated_confidence` classification | `python/blockpose/detection.py::_diagnostics`, `confidence.py` | **No** |
 | Per-stage timing instrumentation | `python/blockpose/detection.py::_detect_blocks_impl` (11 named stages) | **No** — `pipeline.hpp` has zero timing code |
-| PZS100 gripper self-filter | `gripper_self_filter.hpp`: rail endpoint poses → two outward-facing boxes → exclusion; used by the ROS adapter and snapshot runner | `pzs100_filter_boxes()` and `filter_pzs100_gripper()` accept world-frame FK poses; frame lookup remains adapter-specific |
+| PZS100 gripper self-filter | `gripper_self_filter.hpp`: rail endpoint poses → two outward-facing boxes → exclusion; used by the ROS adapter and snapshot runner | `filter_pzs100_gripper()` accepts world-frame FK poses; frame lookup remains adapter-specific |
 
 **Explicitly out of scope, correctly Python-only, no action needed:**
 `rgb_verifier.py`, `rgb_region_proposer.py`, `_dino_backbone.py`,

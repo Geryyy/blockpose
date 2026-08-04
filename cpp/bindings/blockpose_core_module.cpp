@@ -313,7 +313,8 @@ std::vector<blockpose::core::Pzs100RailPose> pzs100_rails_from_numpy(
 }
 
 nb::dict pzs100_filter_boxes_to_dict(
-  const std::vector<blockpose::core::Pzs100GripperFilterBox> & boxes)
+  const std::vector<blockpose::core::Pzs100GripperFilterBox> & boxes,
+  const blockpose::core::OrientedBox * above_exclusion_box)
 {
   auto numpy = nb::module_::import_("numpy");
   auto centers = nb::cast<nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig>>(
@@ -326,17 +327,34 @@ nb::dict pzs100_filter_boxes_to_dict(
     numpy.attr("empty")(nb::make_tuple(boxes.size(), 3), numpy.attr("float64")));
   auto rail_ends = nb::cast<nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig>>(
     numpy.attr("empty")(nb::make_tuple(boxes.size(), 3), numpy.attr("float64")));
-  auto outward_normals = nb::cast<nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig>>(
-    numpy.attr("empty")(nb::make_tuple(boxes.size(), 3), numpy.attr("float64")));
   for (std::size_t index = 0; index < boxes.size(); ++index) {
     for (std::size_t axis = 0; axis < 3; ++axis) {
       centers(index, axis) = boxes[index].box.center(axis);
       sizes(index, axis) = boxes[index].box.size(axis);
       rail_starts(index, axis) = boxes[index].rail_start(axis);
       rail_ends(index, axis) = boxes[index].rail_end(axis);
-      outward_normals(index, axis) = boxes[index].outward_normal(axis);
       for (std::size_t column = 0; column < 3; ++column) {
         rotations(index, axis, column) = boxes[index].box.rotation(axis, column);
+      }
+    }
+  }
+  // The above-gripper exclusion volume is returned under separate keys
+  // (rather than appended to centers/rotations/sizes) so existing callers --
+  // in particular the GUI overlay -- keep seeing only the two jaw boxes
+  // there, and can render this new volume with its own colour/label instead.
+  const std::size_t above_count = above_exclusion_box != nullptr ? 1U : 0U;
+  auto above_centers = nb::cast<nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig>>(
+    numpy.attr("empty")(nb::make_tuple(above_count, 3), numpy.attr("float64")));
+  auto above_rotations = nb::cast<nb::ndarray<nb::numpy, double, nb::ndim<3>, nb::c_contig>>(
+    numpy.attr("empty")(nb::make_tuple(above_count, 3, 3), numpy.attr("float64")));
+  auto above_sizes = nb::cast<nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig>>(
+    numpy.attr("empty")(nb::make_tuple(above_count, 3), numpy.attr("float64")));
+  if (above_exclusion_box != nullptr) {
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      above_centers(0, axis) = above_exclusion_box->center(axis);
+      above_sizes(0, axis) = above_exclusion_box->size(axis);
+      for (std::size_t column = 0; column < 3; ++column) {
+        above_rotations(0, axis, column) = above_exclusion_box->rotation(axis, column);
       }
     }
   }
@@ -346,22 +364,10 @@ nb::dict pzs100_filter_boxes_to_dict(
   output["sizes"] = sizes;
   output["rail_starts"] = rail_starts;
   output["rail_ends"] = rail_ends;
-  output["outward_normals"] = outward_normals;
+  output["above_centers"] = above_centers;
+  output["above_rotations"] = above_rotations;
+  output["above_sizes"] = above_sizes;
   return output;
-}
-
-nb::dict pzs100_filter_boxes_from_numpy(
-  const nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig> & parent_positions,
-  const nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig> & rail_positions,
-  const nb::ndarray<nb::numpy, double, nb::ndim<3>, nb::c_contig> & parent_rotations,
-  const nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig> & outward_axes_parent,
-  const blockpose::core::Pzs100SelfFilterParameters & parameters)
-{
-  const auto rails = pzs100_rails_from_numpy(
-    parent_positions, rail_positions, parent_rotations, outward_axes_parent);
-  std::vector<blockpose::core::Pzs100GripperFilterBox> boxes;
-  {nb::gil_scoped_release release; boxes = blockpose::core::make_pzs100_gripper_filter_boxes(rails, parameters);}
-  return pzs100_filter_boxes_to_dict(boxes);
 }
 
 nb::dict filter_pzs100_gripper_from_numpy(
@@ -376,17 +382,27 @@ nb::dict filter_pzs100_gripper_from_numpy(
   const auto rails = pzs100_rails_from_numpy(
     parent_positions, rail_positions, parent_rotations, outward_axes_parent);
   std::vector<blockpose::core::Pzs100GripperFilterBox> detailed_boxes;
+  blockpose::core::OrientedBox above_box;
+  bool has_above = false;
   blockpose::core::Points kept;
   std::size_t removed = 0U;
   {
     nb::gil_scoped_release release;
     detailed_boxes = blockpose::core::make_pzs100_gripper_filter_boxes(rails, parameters);
     std::vector<blockpose::core::OrientedBox> boxes;
-    boxes.reserve(detailed_boxes.size());
+    boxes.reserve(detailed_boxes.size() + 1U);
     for (const auto & box : detailed_boxes) {boxes.push_back(box.box);}
+    // Only build/apply the above-gripper volume when it is actually
+    // configured: default parameters (height 0.0) must reproduce the
+    // pre-existing rail-only filtering behaviour exactly.
+    if (parameters.above_exclusion_height_m > 0.0) {
+      above_box = blockpose::core::make_pzs100_above_gripper_exclusion_box(rails, parameters);
+      has_above = true;
+      boxes.push_back(above_box);
+    }
     kept = blockpose::core::remove_points_inside_oriented_boxes(input, boxes, &removed);
   }
-  auto output = pzs100_filter_boxes_to_dict(detailed_boxes);
+  auto output = pzs100_filter_boxes_to_dict(detailed_boxes, has_above ? &above_box : nullptr);
   output["points"] = points_to_numpy(kept);
   output["input_count"] = input.size();
   output["removed_count"] = removed;
@@ -845,12 +861,9 @@ NB_MODULE(_core, module)
   pzs100_parameters.def(nb::init<>())
     .def_rw("outboard_extent_m", &blockpose::core::Pzs100SelfFilterParameters::outboard_extent_m)
     .def_rw("cross_rail_extent_m", &blockpose::core::Pzs100SelfFilterParameters::cross_rail_extent_m)
-    .def_rw("rail_end_margin_m", &blockpose::core::Pzs100SelfFilterParameters::rail_end_margin_m);
-  module.def("pzs100_filter_boxes", &pzs100_filter_boxes_from_numpy,
-    nb::arg("parent_positions"), nb::arg("rail_positions"), nb::arg("parent_rotations"),
-    nb::arg("outward_axes_parent"),
-    nb::arg("parameters") = blockpose::core::Pzs100SelfFilterParameters{},
-    "Build PZS100 K9/K11 to K10/K12 outward exclusion boxes from world-frame FK poses.");
+    .def_rw("rail_end_margin_m", &blockpose::core::Pzs100SelfFilterParameters::rail_end_margin_m)
+    .def_rw("above_exclusion_height_m", &blockpose::core::Pzs100SelfFilterParameters::above_exclusion_height_m)
+    .def_rw("above_exclusion_margin_m", &blockpose::core::Pzs100SelfFilterParameters::above_exclusion_margin_m);
   module.def("filter_pzs100_gripper", &filter_pzs100_gripper_from_numpy,
     nb::arg("points"), nb::arg("parent_positions"), nb::arg("rail_positions"),
     nb::arg("parent_rotations"), nb::arg("outward_axes_parent"),
