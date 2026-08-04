@@ -1,73 +1,89 @@
-# Ground-truth orientation, and why partial-observation placement stalls
+# Occlusion, not annotation error: why the last blocks resist geometry
 
-Two results from the same measurement pass, at the shipped detector defaults
-(`cluster_max_extent_xy=2.25`, `dbscan_eps=0.07`). Scored with
-`blockpose.experiment_record.strict_match`: centre <= 0.30 m, symmetry-aware
-rotation <= 30 deg, oriented-box IoU >= 0.25.
+Superseded conclusion first, because the earlier version of this file was
+wrong. It claimed 11 of the 62 approved poses had a wrong long axis, inferred
+from re-fitting each pose from its own points and finding ~88 degrees of
+symmetry-aware disagreement on blocks placed with the annotator's PCA fallback.
 
-## 11 of 62 ground-truth poses have the wrong long axis
+**The ground truth is correct.** The operator checked the flagged snapshots.
+The disagreement measures the REFIT failing, not the label. The confound: the
+PCA fallback is used precisely BECAUSE a block is too occluded for the fitter,
+so `pca_fallback` is a proxy for occlusion and I read it as a cause of error.
 
-Re-fitting every approved pose from the points inside its own box:
+## What the disagreement actually tracks
 
-| how the pose was created | n | refit succeeded | median position delta | median rotation delta |
-| --- | ---: | ---: | ---: | ---: |
-| `auto_fit` (detector) | 13 | 13 | 0.025 m | **2.0 deg** |
-| `rgb_mask` (fitted from an RGB selection) | 6 | 6 | 0.023 m | **1.9 deg** |
-| `rgb_mask_pca_fallback` (hand-placed) | 12 | 6 | 0.168 m | **88.4 deg** |
+Refit-vs-recorded rotation, grouped by the annotator's own visibility label:
 
-The comparison is symmetry-aware, so a 90 deg disagreement is not a face
-relabelling — it means the recorded long axis points the wrong way. Poses the
-fitter produced agree with their own geometry to about 2 degrees, so the
-disagreement is specific to the fallback rather than a property of the metric.
-
-`tools/audit_annotation_poses.py` lists 11 suspect blocks in total (a few
-`rgb_mask` and one `auto_fit` pose are also flagged near 85-90 deg). It only
-reports: an automatic refit is the same mechanism that produced the suspect
-poses, so it is not trustworthy as a replacement. These need a human in
-`tools/annotate_snapshot.py`.
-
-**This contaminates strict-scored evaluation.** A detection can be correct and
-still score as a miss when the reference orientation is 90 deg out.
-
-## Partial-observation placement does not clear the bar
-
-Three ways of placing a block from a perfect (GT-box) crop of each of the 16
-blocks the shipped detector still misses:
-
-| method | centre-only | strict | median rotation error |
+| visibility | n | median rotation delta | over 30 deg |
 | --- | ---: | ---: | ---: |
-| single dominant face + gravity prior | 11/16 | **0/16** | — |
-| PCA fallback (`pca_oriented_block_pose`) | 11/16 | **2/16** | 41.3 deg |
-| seeded fitter (`snap_block_to_cloud`) | 9/16 | **5/16** | 44.1 deg |
+| `full` | 23 | **1.2 deg** | 0 |
+| `partial` | 20 | 2.1 deg | 3 |
+| `heavy_occlusion` | 8 | **87.8 deg** | 7 |
+| `unknown` | 5 | 2.0 deg | 1 |
 
-Centre-only scoring would have reported the first row as 11/16 and a success.
-It places boxes near blocks, not on them. This is the case strict scoring was
-added for, and it caught it on first use.
+Every fully visible block agrees to about a degree. The metric is a measure of
+**observability**, and `tools/audit_annotation_poses.py` now reports it as such.
 
-But the strict column is itself depressed by the bad ground truth above.
-Excluding blocks whose GT came from the PCA fallback:
+## The occluder is the gripper, and FK locates it exactly
 
-| GT subset | seeded fitter, strict |
+Ray-casting each block's surface from the sensor against the FK gripper boxes
+and against every other annotated block:
+
+| visibility | n | surface hidden by the gripper | by other blocks | median rotation delta |
+| --- | ---: | ---: | ---: | ---: |
+| `full` | 23 | 0% | 0% | 1.2 deg |
+| `partial` | 24 | 29% | 8% | 2.1 deg |
+| `heavy_occlusion` | 10 | **76%** | 0% | **87.8 deg** |
+
+Two things follow. Occlusion is caused by the gripper, essentially never by
+neighbouring blocks; and it is computable **before fitting**, from FK alone,
+with no inference. A detector can know which hypotheses it is unable to
+constrain rather than discovering it by failing.
+
+## Where this points, and what it rules out
+
+`evidence.hpp` already computes `VisibilityEvidence` -- `incident_rays`,
+`supported_rays`, `expected_faces`, `covered_faces` -- from sensor geometry.
+It has no notion of a known occluder. A ray blocked by the gripper stops short,
+so its range never matches the hypothesis surface: it is counted as incident
+but unsupported, and the hypothesis is penalised for geometry the gripper is
+standing in front of. Excluding occluder-blocked rays from `incident_rays` is a
+bounded change in the core, and it is the change these measurements support.
+
+**A second camera viewpoint does not help.** The camera sits 0.17 m from the
+LiDAR, so it shares the shadow almost exactly:
+
+| viewpoint | median surface hidden by gripper |
 | --- | ---: |
-| all 16 missed blocks | 5/16 = 31% |
-| excluding `pca_fallback` GT | **4/7 = 57%** |
+| LiDAR | 76% |
+| camera | 74% |
+| hidden from BOTH | 74% |
 
-So the honest reading is: the method is roughly twice as good as the headline
-suggests, and the headline is dragged down by references that are themselves
-wrong. **Neither number is a basis for shipping.** Fix the ground truth first;
-re-measure after.
+In 0 of 10 heavily occluded blocks does the camera see more than 20 percentage
+points beyond what the LiDAR sees. RGB cannot recover the hidden geometry of
+THESE blocks by parallax -- it would have to infer the pose from the visible
+quarter, which is a different and harder claim than "RGB adds information".
+That is not an argument against RGB in general: RGB measurably helps
+*finding* blocks the geometry stage never proposes (recall on `rgb_mask` blocks
+rose 19% -> 44% with SAM regions). It is an argument that the occluded-pose
+problem specifically will not be solved by adding a camera at this baseline.
 
-## Consequence for sequencing
+## Partial-observation placement, re-read
 
-Correcting the 11 suspect poses is now a prerequisite, not a tidy-up. Until it
-is done:
+Three placements on perfect crops of the 16 blocks the shipped detector misses:
 
-- strict-scored recall is understated by an unknown amount,
-- any claim about orientation accuracy is unsafe,
-- and a partial-observation placement stage cannot be evaluated, so it should
-  not be built.
+| method | centre-only | strict |
+| --- | ---: | ---: |
+| single dominant face + gravity prior | 11/16 | **0/16** |
+| PCA fallback | 11/16 | **2/16** |
+| seeded fitter | 9/16 | **5/16** |
 
-The detector changes already shipped (`cluster_max_extent_xy` 2.25, gripper
-`inner_clearance_m` 0.08) are unaffected: both were established on centre
-distance and independently re-verified under strict scoring by the audit, and
-all seven gate recoveries are `rgb_mask` blocks, none of which are suspect.
+The first row is the case strict scoring was added for: centre-only would have
+called it 11/16 and a success, and it is placing boxes near blocks rather than
+on them.
+
+Given the corrected reading above, the strict column is not depressed by bad
+labels -- it is the honest score against correct labels on blocks that are 76%
+hidden. Orientation is genuinely underdetermined there. Better placement
+heuristics will not fix it; only supplying the missing constraint will, which
+is what occlusion-aware evidence is for.

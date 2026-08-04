@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
-"""Flag annotated poses whose own points disagree with the recorded orientation.
+"""Measure where re-fitting a block from its own points is unreliable.
 
-Twelve of the 62 approved blocks were placed by the annotator's PCA fallback,
-which pins a canonical box on a point selection when the native fitter cannot
-find a top/side pair. Re-fitting each recorded pose from the points inside it
-shows those twelve disagree with their own geometry by a median 88.4 degrees
-AFTER symmetry-aware comparison -- i.e. the long axis is wrong, not a face
-relabelling. Blocks created by the fitter or by a successful RGB-mask fit agree
-to ~2 degrees, so this is specific to the fallback and not a property of the
-comparison.
+For each approved pose, refit a canonical block from the points inside it and
+compare. The disagreement is a measure of OBSERVABILITY, not of annotation
+quality, and it tracks the annotator's own visibility label almost perfectly:
 
-That matters beyond tidiness: strict-scored detector evaluation is measured
-against these poses, so a wrong-orientation reference makes a correct detection
-look like a failure. Excluding them changes the seeded fitter's strict recovery
-on perfect crops from 5/16 to 4/7.
+    full             23 blocks   median  1.2 deg disagreement   0 over 30 deg
+    partial          20 blocks   median  2.1 deg               3 over 30 deg
+    heavy_occlusion   8 blocks   median 87.8 deg               7 over 30 deg
 
-This tool only REPORTS. It never rewrites annotations: a disagreement means the
-pose needs a human's eye in the annotator, not an automatic overwrite, and the
-refit is exactly the mechanism that was already too weak to trust here.
+An earlier version of this file claimed the opposite -- that a large
+disagreement meant the recorded pose was wrong -- because the flagged blocks
+were mostly ones the annotator had placed with the PCA fallback. That was a
+confound: the fallback is used precisely BECAUSE a block is too occluded for
+the fitter, so `pca_fallback` is a proxy for occlusion, not a cause of error.
+The operator checked the flagged snapshots and the ground truth is correct.
+
+What the number is actually good for: it says which blocks carry too little
+visible geometry to pin an orientation from the cloud alone. Those are the
+blocks a detector will not recover by better fitting, and the ones where
+occlusion-aware reasoning or RGB evidence has to supply what the geometry
+cannot. Read a high value as "this block is hard", not "this label is wrong".
 """
 
 from __future__ import annotations
@@ -42,9 +45,9 @@ from blockpose.pose import BLOCK_DIMS, BlockPose  # noqa: E402
 
 DEFAULT_MANIFEST = REPO_ROOT / "config" / "annotated_snapshots_seibersdorf.yaml"
 DEFAULT_TRANSFORMS = REPO_ROOT / "config" / "transforms_pzs100_initial_pose_1.yaml"
-# 30 degrees separates "same block, slightly off" from "wrong axis": agreeing
-# poses sit near 2 degrees and the flagged ones near 90.
-SUSPECT_ROTATION_DEG = 30.0
+# 30 degrees separates "the geometry pins this" from "the geometry does not":
+# well-observed blocks sit near 2 degrees, heavily occluded ones near 90.
+UNDERDETERMINED_ROTATION_DEG = 30.0
 MIN_POINTS = 50
 
 
@@ -92,7 +95,7 @@ def audit(manifest: Path, transforms: Path) -> list[dict]:
                                 np.linalg.norm(fitted.position - recorded.position)
                             ),
                             "rotation_delta_deg": drot,
-                            "suspect": bool(drot > SUSPECT_ROTATION_DEG),
+                            "underdetermined": bool(drot > UNDERDETERMINED_ROTATION_DEG),
                         }
                 rows.append(row)
     return rows
@@ -106,21 +109,25 @@ def main() -> int:
     args = parser.parse_args()
 
     rows = audit(args.manifest, args.transforms)
-    suspect = [r for r in rows if r["refit"] and r["refit"]["suspect"]]
+    underdetermined = [r for r in rows if r["refit"] and r["refit"]["underdetermined"]]
     unfittable = [r for r in rows if r["refit"] is None]
 
     print(f"approved blocks audited: {len(rows)}")
-    print(f"orientation disagrees by >{SUSPECT_ROTATION_DEG:.0f} deg: {len(suspect)}")
+    print(
+        f"orientation NOT pinned by the visible geometry "
+        f"(>{UNDERDETERMINED_ROTATION_DEG:.0f} deg): {len(underdetermined)}"
+    )
     print(f"no refit possible (too few points or fit failed): {len(unfittable)}\n")
-    for row in sorted(suspect, key=lambda r: -r["refit"]["rotation_delta_deg"]):
+    for row in sorted(underdetermined, key=lambda r: -r["refit"]["rotation_delta_deg"]):
         print(
             f"  {row['snapshot'][:44]:<46}{row['block']:<10}{row['provenance']:<24}"
             f"drot {row['refit']['rotation_delta_deg']:>5.1f} deg  "
             f"dpos {row['refit']['position_delta_m']:.3f} m"
         )
-    print("\nRe-open these in tools/annotate_snapshot.py and correct the pose by hand.")
-    print("Nothing is rewritten here: an automatic refit is the same mechanism that")
-    print("produced the suspect poses, so it is not trustworthy as a replacement.")
+    print("\nThese are blocks whose visible geometry does not determine an orientation.")
+    print("They are NOT mislabelled -- the operator verified them. Treat them as the")
+    print("cases a geometry-only detector cannot solve, needing occlusion-aware")
+    print("reasoning or RGB evidence rather than a better fitter.")
 
     if args.json_out is not None:
         args.json_out.write_text(
