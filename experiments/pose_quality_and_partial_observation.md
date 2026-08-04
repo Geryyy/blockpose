@@ -230,3 +230,58 @@ The honest position is that three probes have now disagreed with each other,
 and only the last used the detector's own records. Any further change here
 should be justified from those records, and measured with strict scoring,
 before it is written.
+
+## The missing constraint is the gripper pose, and it was there all along
+
+The operator's objection was that seeing the RGB made the annotation obvious,
+so this must be a method bottleneck rather than a sensing limit. That is
+correct, and it identifies a prior the detector never had: **a block in this
+workcell is aligned with the gripper that placed or holds it.** FK gives that
+for free.
+
+Orientation error against ground truth, all 59 blocks with rail TF, comparing
+the gripper's tool-centre-point orientation against a world-aligned control:
+
+| visibility | n | TCP orientation | world-aligned control |
+| --- | ---: | ---: | ---: |
+| `full` | 21 | **3.7 deg** | 23.3 deg |
+| `partial` | 23 | **5.5 deg** | 86.9 deg |
+| `heavy_occlusion` | 10 | **6.5 deg** | 88.7 deg |
+| `unknown` | 5 | 28.4 deg | 83.8 deg |
+
+| | n | TCP orientation error |
+| --- | ---: | ---: |
+| blocks at the grasp point (<0.6 m) | 14 | **2.3 deg** |
+| blocks merely behind the gripper | 45 | 6.4 deg |
+
+The control matters: a fixed world-aligned guess scores 23-89 deg, so the scene
+is not trivially axis-aligned and the TCP is genuinely carrying the
+information. On exactly the blocks where the visible geometry disagrees with
+itself by 88 deg, the gripper pose is right to 6.5 deg.
+
+This reframes everything above. The earlier conclusion -- "orientation is
+underdetermined at 76% occlusion" -- is true of the CLOUD IN ISOLATION and
+false of the problem. A 0.18 m visible band plus a known orientation is a
+solvable pose: the band fixes position, the prior fixes rotation, and the block
+model supplies the extent the gripper hides. That is the same reasoning the
+operator applies when the RGB makes it obvious.
+
+### Why non-gripped blocks align too, and what that costs
+
+Blocks merely behind the gripper still track it to 6.4 deg because this robot
+placed them; they inherit its yaw. That is a real regularity of the workcell,
+not a law. It is also in-sample: 59 blocks from 24 scenes of one cell, and the
+`unknown`-visibility blocks at 28.4 deg are a reminder that it is not
+universal. A detector using it should treat the gripper pose as a PRIOR to be
+confirmed by whatever geometry is visible, not as an answer -- otherwise it
+will confidently mis-pose the first block a human puts down by hand.
+
+### What to build
+
+Hypothesis generation seeded by the gripper prior, for components the gate
+currently rejects: take the visible band's position, take orientation from the
+TCP, instantiate a canonical block, and score it with the existing evidence.
+That needs no new sensing, no training, and no relaxation of the gates for
+everything else -- the prior is what tells you a thin band is a block rather
+than clutter. Measure it strict-scored, and against the `unknown`-visibility
+blocks specifically, since those are where the prior is weakest.
