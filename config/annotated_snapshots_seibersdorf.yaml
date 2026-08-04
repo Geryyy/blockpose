@@ -1,0 +1,247 @@
+# Annotated snapshots in data/seibersdorf_dataset, for DINO prior/verifier
+# training and detector finetuning/ablations.
+#
+# Selection is derived, not hand-listed: a snapshot qualifies when its
+# annotations.yaml has annotation_complete: true and at least one approved
+# block. All three independent signals (complete flag, approved blocks,
+# presence of a tool-written backup) agree on the same 25 directories, so the
+# classification is unambiguous. Regenerate rather than edit by hand.
+#
+# `scene` groups match config/rgb_ablation_splits_seibersdorf.yaml, so this
+# composes with the existing leave-one-scenario-out folds instead of defining
+# a second, competing grouping.
+#
+# Two caveats that matter for how this set is used, recorded here rather than
+# left to be rediscovered:
+#
+# 1. `scenes_without_annotation` lists five scenes with NO annotated snapshot
+#    at all -- pre_stack, stacked, stacking, static_occluded and wet. These
+#    are not near-duplicate frames that were deduplicated away; the whole
+#    condition is absent, and they cover occlusion, stacking and wet surfaces.
+#    Any claim of coverage over those conditions is currently unsupported.
+#
+# 2. `approximate_poses` counts approved blocks whose pose came from the
+#    RGB-mask PCA fallback (provenance rgb_mask_pca_fallback) rather than a
+#    native geometric fit. The fallback places a canonical box on the selected
+#    points for the operator to correct by hand, so these are human-approved
+#    but not fitter-derived. That is fine for detection/recall targets and for
+#    DINO region supervision; treat it with care for pose-regression metrics.
+schema_version: 1
+dataset: data/seibersdorf_dataset
+selection_criteria: 'annotation_complete: true AND at least one approved block'
+grouping: scene = capture directory prefix before '__'; matches config/rgb_ablation_splits_seibersdorf.yaml
+  groups
+totals:
+  snapshots_in_dataset: 286
+  annotated_snapshots: 25
+  approved_blocks: 62
+  approximate_poses: 12
+  scenes_total: 24
+  scenes_annotated: 19
+  scenes_without_annotation: 5
+scenes:
+  2026_07_07_grip_at_bottom:
+    snapshots_in_scene: 4
+    annotated:
+    - name: 2026_07_07_grip_at_bottom__1783428244_423788800
+      blocks: 3
+      approximate_poses: 1
+      visibility:
+        heavy_occlusion: 2
+        partial: 1
+    - name: 2026_07_07_grip_at_bottom__1783428245_523785984
+      blocks: 3
+      approximate_poses: 0
+      visibility:
+        heavy_occlusion: 1
+        partial: 2
+    - name: 2026_07_07_grip_at_bottom__1783428246_523810560
+      blocks: 3
+      approximate_poses: 1
+      visibility:
+        heavy_occlusion: 1
+        partial: 2
+  2026_07_07_grip_at_bottom_no_sides:
+    snapshots_in_scene: 7
+    annotated:
+    - name: 2026_07_07_grip_at_bottom_no_sides__1783428274_923417088
+      blocks: 3
+      approximate_poses: 0
+      visibility:
+        heavy_occlusion: 2
+        partial: 1
+  2026_07_07_grip_at_bottom_no_sides_high:
+    snapshots_in_scene: 8
+    annotated:
+    - name: 2026_07_07_grip_at_bottom_no_sides_high__1783428305_919404288
+      blocks: 3
+      approximate_poses: 1
+      visibility:
+        heavy_occlusion: 1
+        unknown: 2
+  2026_07_07_grip_at_bottom_rotated:
+    snapshots_in_scene: 5
+    annotated:
+    - name: 2026_07_07_grip_at_bottom_rotated__1783428219_723549440
+      blocks: 3
+      approximate_poses: 1
+      visibility:
+        heavy_occlusion: 1
+        unknown: 2
+  2026_07_07_grip_at_top:
+    snapshots_in_scene: 11
+    annotated:
+    - name: 2026_07_07_grip_at_top__1783428139_624435968
+      blocks: 3
+      approximate_poses: 0
+      visibility:
+        heavy_occlusion: 1
+        partial: 2
+  2026_07_07_grip_at_top_rotated:
+    snapshots_in_scene: 8
+    annotated:
+    - name: 2026_07_07_grip_at_top_rotated__1783428171_824145664
+      blocks: 3
+      approximate_poses: 1
+      visibility:
+        heavy_occlusion: 1
+        partial: 2
+  2026_07_07_misaligned_stack:
+    snapshots_in_scene: 5
+    annotated:
+    - name: 2026_07_07_misaligned_stack__1783428546_619315968
+      blocks: 3
+      approximate_poses: 1
+      visibility:
+        partial: 3
+  2026_07_07_partially_wet:
+    snapshots_in_scene: 4
+    annotated:
+    - name: 2026_07_07_partially_wet__1783431057_617312512
+      blocks: 3
+      approximate_poses: 1
+      visibility:
+        full: 2
+        unknown: 1
+  2026_07_07_pickup:
+    snapshots_in_scene: 35
+    annotated:
+    - name: 2026_07_07_pickup__1783429278_921587712
+      blocks: 1
+      approximate_poses: 0
+      visibility:
+        partial: 1
+  2026_07_07_pickup_and_stack_rotated:
+    snapshots_in_scene: 18
+    annotated:
+    - name: 2026_07_07_pickup_and_stack_rotated__1783428993_018994432
+      blocks: 3
+      approximate_poses: 2
+      visibility:
+        full: 1
+        partial: 2
+    - name: 2026_07_07_pickup_and_stack_rotated__1783429000_618425856
+      blocks: 2
+      approximate_poses: 0
+      visibility:
+        full: 1
+        partial: 1
+    - name: 2026_07_07_pickup_and_stack_rotated__1783429011_918448640
+      blocks: 2
+      approximate_poses: 0
+      visibility:
+        full: 2
+  2026_07_07_pickup_and_stack_rotated2:
+    snapshots_in_scene: 42
+    annotated:
+    - name: 2026_07_07_pickup_and_stack_rotated2__1783429039_018721024
+      blocks: 3
+      approximate_poses: 0
+      visibility:
+        full: 2
+        partial: 1
+    - name: 2026_07_07_pickup_and_stack_rotated2__1783429054_917964800
+      blocks: 2
+      approximate_poses: 0
+      visibility:
+        full: 2
+    - name: 2026_07_07_pickup_and_stack_rotated2__1783429084_722002176
+      blocks: 2
+      approximate_poses: 1
+      visibility:
+        full: 1
+        partial: 1
+  2026_07_07_pickup_and_stack_rotated3:
+    snapshots_in_scene: 9
+    annotated:
+    - name: 2026_07_07_pickup_and_stack_rotated3__1783429097_722190848
+      blocks: 2
+      approximate_poses: 1
+      visibility:
+        full: 1
+        partial: 1
+  2026_07_07_static:
+    snapshots_in_scene: 9
+    annotated:
+    - name: 2026_07_07_static__1783427926_718131712
+      blocks: 3
+      approximate_poses: 0
+      visibility:
+        full: 1
+        partial: 2
+  2026_07_07_wall:
+    snapshots_in_scene: 44
+    annotated:
+    - name: 2026_07_07_wall__1783429196_422551296
+      blocks: 2
+      approximate_poses: 0
+      visibility:
+        full: 2
+  2026_07_07_wall2:
+    snapshots_in_scene: 12
+    annotated:
+    - name: 2026_07_07_wall2__1783429326_921173248
+      blocks: 3
+      approximate_poses: 1
+      visibility:
+        full: 2
+        partial: 1
+  2026_07_07_wall3:
+    snapshots_in_scene: 14
+    annotated:
+    - name: 2026_07_07_wall3__1783429356_122876928
+      blocks: 2
+      approximate_poses: 0
+      visibility:
+        full: 2
+  2026_07_15_shadow:
+    snapshots_in_scene: 5
+    annotated:
+    - name: 2026_07_15_shadow__1784117236_765003008
+      blocks: 3
+      approximate_poses: 0
+      visibility:
+        full: 2
+        partial: 1
+  2026_07_15_shadow2:
+    snapshots_in_scene: 6
+    annotated:
+    - name: 2026_07_15_shadow2__1784118638_161726464
+      blocks: 1
+      approximate_poses: 0
+      visibility:
+        full: 1
+  2026_07_15_shadowpartial:
+    snapshots_in_scene: 5
+    annotated:
+    - name: 2026_07_15_shadowpartial__1784123369_248180224
+      blocks: 1
+      approximate_poses: 0
+      visibility:
+        full: 1
+scenes_without_annotation:
+  2026_07_07_pre_stack: 4
+  2026_07_07_stacked: 4
+  2026_07_07_stacking: 12
+  2026_07_07_static_occluded: 4
+  2026_07_07_wet: 11
