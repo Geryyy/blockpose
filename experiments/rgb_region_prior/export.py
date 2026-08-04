@@ -22,13 +22,20 @@ convex approximation of each block's silhouette (a loose box, not a tight
 segmentation) -- consistent with ``dino_proposer`` being a high-recall *region*
 proposer, never a precise mask.
 
-**Occlusion filtering.** Like ``experiments.rgb_candidate_prior.candidates``'s
-``_OCCLUDED_VISIBILITIES``, blocks annotated ``heavy_occlusion``/``unknown``
-visibility are excluded from the union: their registered pose is the least
-reliable exactly where RGB evidence is worst, so folding an uncertain box
-into a *hard* union target risks teaching the region head an incorrect
-footprint. (This constant is intentionally re-declared here, not imported,
-per this package's separation from the candidate-conditioned exporter.)
+**Occlusion filtering.** By default, blocks annotated ``heavy_occlusion`` or
+``unknown`` visibility are excluded from the union, on the v1 grounds that
+their registered pose is least reliable exactly where RGB evidence is worst,
+so folding an uncertain box into a *hard* union target risks teaching the
+region head an incorrect footprint.
+
+That default is now a decision, not a constant: ``--occluded-visibilities``
+controls it, and ``--occluded-visibilities none`` includes every approved
+block. The trade-off is real in both directions. Excluding them removes the
+noisiest labels -- but heavily occluded blocks are precisely the ones the
+geometric detector cannot find, so excluding them means the region head never
+sees a positive example of the class it exists to rescue. On this corpus the
+choice moves 15 of 62 blocks. Run both arms and compare held-out recall rather
+than assuming either way.
 
 Run inside the core devcontainer (no torch needed):
 
@@ -143,6 +150,7 @@ def export_snapshot(
     split_group: str,
     sync_tolerance_s: float,
     records: list[dict],
+    occluded_visibilities: tuple[str, ...] = OCCLUDED_VISIBILITIES,
 ) -> dict:
     """Export one full-image union-mask record for one snapshot, or a status entry."""
     annotation_path = snapshot / "annotations.yaml"
@@ -186,12 +194,12 @@ def export_snapshot(
             "details": sync.details,
         }
 
-    targets = approved_targets(annotations)
+    targets = approved_targets(annotations, occluded_visibilities)
     mask, contributing, dropped = union_mask(targets, tf.T_world_camera, camera)
     excluded_occluded = [
         target.id
         for target in annotations.targets
-        if target.is_evaluation_target and target.visibility in OCCLUDED_VISIBILITIES
+        if target.is_evaluation_target and target.visibility in occluded_visibilities
     ]
 
     rel_image = Path("images") / f"{snapshot.name}.png"
@@ -293,6 +301,13 @@ def _health_report(records: list[dict], per_snapshot: list[dict]) -> dict:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshots-dir", type=Path, default=DEFAULT_SNAPSHOTS)
+    parser.add_argument(
+        "--occluded-visibilities",
+        default=",".join(OCCLUDED_VISIBILITIES),
+        help="Comma-separated visibility labels to EXCLUDE from the union target, or "
+        "'none' to include every approved block. Default preserves v1 behaviour; "
+        "'none' is the arm that lets the head learn the occluded class it exists to rescue.",
+    )
     parser.add_argument("--calibration", type=Path, default=DEFAULT_CALIBRATION)
     parser.add_argument("--export-root", type=Path, required=True)
     parser.add_argument(
@@ -317,6 +332,12 @@ def main() -> int:
     if args.sessions is not None:
         sessions = yaml.safe_load(args.sessions.read_text()) or {}
 
+    # "none" means keep every approved block; the default preserves v1 behaviour.
+    occluded = (
+        ()
+        if args.occluded_visibilities.strip().lower() == "none"
+        else tuple(v.strip() for v in args.occluded_visibilities.split(",") if v.strip())
+    )
     camera = load_camera_model(args.calibration)
     calibration_checksum = gates.sha256_file(args.calibration)
     snapshots = sorted(p for p in args.snapshots_dir.iterdir() if (p / "tf.yaml").is_file())
@@ -336,6 +357,7 @@ def main() -> int:
                     split_group=sessions.get(snapshot.name, snapshot.name),
                     sync_tolerance_s=args.sync_tolerance_s,
                     records=records,
+                    occluded_visibilities=occluded,
                 )
             )
         except Exception as error:  # noqa: BLE001 - one bad capture must not abort the run
@@ -352,7 +374,7 @@ def main() -> int:
         "session_grouping": "sessions_yaml" if sessions else "per_snapshot_placeholder",
         "selection_eligible": False,
         "reason": "held-out split requires independent recording sessions",
-        "occluded_visibilities": list(OCCLUDED_VISIBILITIES),
+        "occluded_visibilities": list(occluded),
         "sync_tolerance_s": args.sync_tolerance_s,
         "total_records": len(records),
         "health": health,
