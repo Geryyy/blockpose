@@ -285,3 +285,36 @@ That needs no new sensing, no training, and no relaxation of the gates for
 everything else -- the prior is what tells you a thin band is a block rather
 than clutter. Measure it strict-scored, and against the `unknown`-visibility
 blocks specifically, since those are where the prior is weakest.
+
+## Correction: the gripper prior targets blocks that are already found
+
+The section above proposed building the gripped-block case first, on the
+grounds that the prior there is causal (2.3 deg) rather than statistical. Two
+measurements retire that plan.
+
+**The gripped blocks are already detected.** Of the 14 blocks within 0.6 m of
+the FK grasp point, the current detector already finds **12**. The prior has at
+most two blocks to contribute, and both are cases where a pose already exists.
+
+**The blocks that fail are hidden by the gripper, not held by it.** The ten
+`heavy_occlusion` blocks sit a median **1.23 m** from the grasp point, and only
+3 are within 0.6 m. FK therefore gives no handle on their position: they are
+elsewhere in the scene and the gripper merely stands in front of them.
+
+Prompting SAM2 in RGB at the projected FK grasp point confirms it directly:
+
+| prompt | usable masks | median points | median % of points on the GT block |
+| --- | ---: | ---: | ---: |
+| FK grasp point | 10/10 | 833 | **0%** |
+| GT block centre (upper bound) | 10/10 | 402 | **33%** |
+
+The FK prompt segments the gripper, which is what is actually at that pixel.
+And even a perfect prompt yields a mask only a third of whose projected points
+land on the block -- the mask bleeds onto whatever surrounds it.
+
+So the remaining problem is unchanged and correctly stated as: **locate a block
+that nothing in the kinematics points at, from a 0.18 m visible band, well
+enough to pose it.** That is the region-proposal problem, measured earlier at
+7 of 23 recovered with SAM grid regions. The gripper prior does not shortcut
+it. The orientation correlation is still real and may still be useful as a
+tie-breaker once a candidate exists, but it cannot generate the candidate.
