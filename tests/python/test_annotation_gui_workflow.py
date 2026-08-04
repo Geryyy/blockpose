@@ -80,3 +80,66 @@ def test_segmentation_is_enabled_by_default_and_opt_out() -> None:
     assert parser.parse_args([]).sam_model == tool.DEFAULT_SAM_MODEL
     assert parser.parse_args(["--no-sam"]).sam_model is None
     assert parser.parse_args(["--sam-model", "facebook/other"]).sam_model == "facebook/other"
+
+
+def test_build_panel_only_uses_widgets_init_has_already_created() -> None:
+    """Catch `_build_panel` reaching for an attribute `__init__` never assigned.
+
+    The GUI tests all drive real methods against SimpleNamespace fakes, which
+    supply every attribute by construction, so none of them exercise the real
+    `__init__` -> `_build_panel` ordering. Constructing a genuine
+    `AnnotatorWindow` needs a display and cannot run here, so this checks the
+    same invariant statically: every `self.<attr>` that `_build_panel` reads
+    must be assigned in `__init__` above the `self._build_panel()` call.
+
+    A regression here is not subtle -- it is an AttributeError on launch -- but
+    it is invisible to every other test in this suite.
+    """
+    import ast
+
+    source = Path("tools/annotate_snapshot.py").read_text(encoding="utf-8")
+    klass = next(
+        node
+        for node in ast.parse(source).body
+        if isinstance(node, ast.ClassDef) and node.name == "AnnotatorWindow"
+    )
+    methods = {n.name: n for n in klass.body if isinstance(n, ast.FunctionDef)}
+    init, build = methods["__init__"], methods["_build_panel"]
+
+    build_call_line = next(
+        node.lineno
+        for node in ast.walk(init)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_build_panel"
+    )
+    assigned = {
+        target.attr
+        for node in ast.walk(init)
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.lineno < build_call_line
+        for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+        if isinstance(target, ast.Attribute)
+        and isinstance(target.value, ast.Name)
+        and target.value.id == "self"
+    }
+    # Attributes _build_panel assigns itself are fine; so is anything callable
+    # on the class (methods, helpers) rather than an instance widget.
+    assigned |= {
+        target.attr
+        for node in ast.walk(build)
+        if isinstance(node, (ast.Assign, ast.AnnAssign))
+        for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+        if isinstance(target, ast.Attribute)
+        and isinstance(target.value, ast.Name)
+        and target.value.id == "self"
+    } | set(methods)
+
+    read = {
+        node.attr
+        for node in ast.walk(build)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    }
+    missing = sorted(read - assigned)
+    assert not missing, f"_build_panel uses attributes __init__ never creates: {missing}"

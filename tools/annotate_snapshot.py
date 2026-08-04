@@ -267,6 +267,25 @@ class AnnotatorWindow:
         self.rgb_toggle = gui.Checkbox("RGB-colored cloud")
         self.rgb_toggle.checked = True
         self.rgb_toggle.set_on_checked(lambda _checked: self._refresh_scene())
+        self.self_filter_toggle = gui.Checkbox("Remove PZS100 gripper points")
+        self.self_filter_toggle.checked = False
+        self.self_filter_toggle.enabled = False
+        self.self_filter_toggle.set_on_checked(lambda _checked: self._on_point_filters_changed())
+        # Rail poses resolved from the snapshot's captured TF; the only input
+        # the native filter needs.
+        self.pzs100_filter_inputs: (
+            tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, object] | None
+        ) = None
+        # Populated only by a successful invocation of the native filter.
+        # These are its diagnostic volumes/rail segments, in world coordinates,
+        # rather than approximations reconstructed by the GUI.
+        self.pzs100_filter_diagnostics: dict[str, np.ndarray] | None = None
+        self.self_filter_reason = gui.Label("Disabled: loading PZS100 filter profile")
+        # Explicit memory of whether `self.status.text` currently holds one of
+        # `_apply_point_filters`' own PZS-filter messages, so the next call can
+        # tell "stale PZS message from last time" apart from "unrelated status
+        # from some other action" without parsing the label's own text.
+        self._pzs_status_is_current = False
         self.candidate_status = gui.Label(
             "unavailable: annotation_candidates module not found"
             if compute_candidate_sources is None
