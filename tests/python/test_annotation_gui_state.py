@@ -73,6 +73,7 @@ _BOUND_METHODS = (
     "_refresh_rgb",
     "_add_pzs100_filter_geometries",
     "_add_candidate_source_geometries",
+    "_active_candidate_sources",
     "_commit_pending_text_edits",
 )
 
@@ -204,11 +205,6 @@ def test_repeated_identical_notes_edits_do_not_spam_the_undo_stack() -> None:
 def _filter_state(**overrides) -> SimpleNamespace:
     base = dict(
         raw_points=np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]]),
-        remove_ground_toggle=SimpleNamespace(checked=False),
-        workspace_toggle=SimpleNamespace(checked=False),
-        workspace_fields=[SimpleNamespace(double_value=0.0) for _ in range(6)],
-        remove_background_toggle=SimpleNamespace(checked=False),
-        max_range_field=SimpleNamespace(double_value=100.0),
         T_world_cloud=np.eye(4),
         self_filter_toggle=SimpleNamespace(checked=False, enabled=False),
         pzs100_filter_inputs=None,
@@ -229,43 +225,50 @@ def _filter_state(**overrides) -> SimpleNamespace:
     return SimpleNamespace(**base)
 
 
-def test_apply_point_filters_preserves_rgb_mask_selection() -> None:
+def test_apply_point_filters_preserves_rgb_mask_selection(monkeypatch) -> None:
     window = _filter_state(
-        remove_background_toggle=SimpleNamespace(checked=True),
-        max_range_field=SimpleNamespace(double_value=1.5),
+        self_filter_toggle=SimpleNamespace(checked=True, enabled=True),
+        pzs100_filter_inputs=(object(),),
+    )
+    kept = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+    monkeypatch.setattr(
+        annotator, "filter_pzs100_gripper", lambda points, *_a: (kept, 1, {"centers": []})
     )
 
     annotator.AnnotatorWindow._apply_point_filters(window)
 
-    # Toggling/nudging a cloud filter must not destroy the SAM/mask
-    # selection: it is expressed in world coordinates and stays valid until a
-    # different snapshot is loaded.
+    # Toggling a cloud filter must not destroy the SAM/mask selection: it is
+    # expressed in world coordinates and stays valid until a different
+    # snapshot is loaded.
     np.testing.assert_array_equal(window.selected_rgb_points, [[9.0, 9.0, 9.0]])
     assert window.selected_mask is not None
-    # Sanity: the filter itself did apply (only the farthest point survives).
-    np.testing.assert_array_equal(window.points, [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+    # Sanity: the filter itself did apply.
+    np.testing.assert_array_equal(window.points, kept)
 
 
 # --- 0.3: an empty working cloud must not be adopted or crash --------------
 
 
-def test_apply_point_filters_keeps_previous_cloud_when_result_is_empty() -> None:
+def test_apply_point_filters_keeps_previous_cloud_when_result_is_empty(monkeypatch) -> None:
     previous_points = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
     window = _filter_state(
         raw_points=np.array([[5.0, 0.0, 0.0], [6.0, 0.0, 0.0]]),
-        remove_background_toggle=SimpleNamespace(checked=True),
-        max_range_field=SimpleNamespace(double_value=0.1),
+        self_filter_toggle=SimpleNamespace(checked=True, enabled=True),
+        pzs100_filter_inputs=(object(),),
         selected_rgb_points=np.empty((0, 3)),
         selected_mask=None,
         candidate_sources_result=None,
         points=previous_points,
     )
+    monkeypatch.setattr(
+        annotator, "filter_pzs100_gripper", lambda points, *_a: (np.empty((0, 3)), 2, {})
+    )
 
     annotator.AnnotatorWindow._apply_point_filters(window)
 
-    # "max range (m)" accepts values down to 0.1, which can legitimately zero
-    # out the cloud; the previous working cloud must stay in place instead of
-    # handing an empty array to rendering/picking.
+    # A gripper close to the sensor can legitimately mask the whole cloud; the
+    # previous working cloud must stay in place instead of handing an empty
+    # array to rendering/picking.
     np.testing.assert_array_equal(window.points, previous_points)
     assert "empty cloud" in window.status.text
 

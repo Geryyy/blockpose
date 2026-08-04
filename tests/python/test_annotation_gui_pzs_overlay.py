@@ -204,9 +204,6 @@ def _filter_window(*, pzs_inputs: object | None, checked: bool = True) -> object
     return SimpleNamespace(
         pzs100_filter_diagnostics=_diagnostics(),
         raw_points=np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
-        remove_ground_toggle=SimpleNamespace(checked=False),
-        workspace_toggle=SimpleNamespace(checked=False),
-        remove_background_toggle=SimpleNamespace(checked=False),
         self_filter_toggle=SimpleNamespace(checked=checked, enabled=True),
         pzs100_filter_inputs=pzs_inputs,
         candidate_sources_result=object(),
@@ -285,9 +282,6 @@ def _candidates_window(*, pzs_diagnostics: dict[str, np.ndarray] | None) -> obje
         args=SimpleNamespace(dino_proposer_checkpoint=None, dino_verifier_checkpoint=None),
         pzs100_filter_diagnostics=pzs_diagnostics,
         candidate_status=SimpleNamespace(text=""),
-        candidate_checks={
-            key: SimpleNamespace(checked=False) for key, _label in annotator.CANDIDATE_SOURCES
-        },
         candidate_sources_result=None,
         snapshot=SimpleNamespace(name="scene-1"),
         controller=SimpleNamespace(adopted_candidate_ids=set()),
@@ -295,8 +289,11 @@ def _candidates_window(*, pzs_diagnostics: dict[str, np.ndarray] | None) -> obje
     )
     # `_compute_candidates` calls `self._promote_accepted_candidates()`; bind
     # the real implementation the same way production `self._method()` calls
-    # resolve (every `candidate_checks[key].checked` above is False, so this
-    # returns `[]` without touching a document).
+    # resolve (the stub result exposes no candidate sources, so this returns
+    # `[]` without touching a document).
+    window._active_candidate_sources = MethodType(
+        annotator.AnnotatorWindow._active_candidate_sources, window
+    )
     window._promote_accepted_candidates = MethodType(
         annotator.AnnotatorWindow._promote_accepted_candidates, window
     )

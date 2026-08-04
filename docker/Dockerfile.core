@@ -66,6 +66,12 @@ ENV CUDA_HOME=/usr/local/cuda \
 
 ENV PATH="${VIRTUAL_ENV}/bin:${CUDA_HOME}/bin:${PATH}"
 
+# Model weights (SAM2 via Hugging Face, anything via torch.hub) go to a fixed
+# path rather than $HOME/.cache, so docker-compose can mount one named volume
+# over it and a `docker compose run --rm` stops re-downloading them every time.
+ENV HF_HOME=/opt/model-cache/huggingface \
+    TORCH_HOME=/opt/model-cache/torch
+
 # ---------------------------------------------------------------------------
 # System packages
 # ---------------------------------------------------------------------------
@@ -222,7 +228,8 @@ RUN git lfs install --system \
   && echo "ubuntu ALL=(root) NOPASSWD:ALL" \
   > /etc/sudoers.d/ubuntu \
   && chmod 0440 /etc/sudoers.d/ubuntu \
-  && chown -R ubuntu:ubuntu /opt/venv /opt/uv
+  && mkdir -p /opt/model-cache/huggingface /opt/model-cache/torch \
+  && chown -R ubuntu:ubuntu /opt/venv /opt/uv /opt/model-cache
 
 # Verify that the installed Torch build contains CUDA support.
 # A GPU is not visible during docker build, so torch.cuda.is_available()

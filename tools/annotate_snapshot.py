@@ -25,10 +25,8 @@ sys.path.insert(0, str(REPO_ROOT / "python"))
 
 from blockpose.annotation_preprocess import (  # noqa: E402
     filter_pzs100_gripper,
-    filter_workspace,
     load_pzs100_self_filter_config,
     pzs100_self_filter_available,
-    remove_ground,
 )
 from blockpose.annotation_snap import (  # noqa: E402
     SnapParams,
@@ -41,14 +39,12 @@ from blockpose.annotation_tool import (  # noqa: E402
     AnnotationDocument,
     adjacent_snapshot,
     camera_ray,
-    default_max_range_m,
     full_workspace_roi,
     initial_camera_focus,
     nearest_point_to_ray_with_distance,
     orientation_summary,
     pca_oriented_block_pose,
     pick_oriented_box,
-    remove_background_by_range,
     save_annotations_atomic,
     snapshot_selection_index,
 )
@@ -89,16 +85,10 @@ BOX_COLORS = {
     "approved": (0.1, 0.9, 0.2, 1.0),
     "rejected": (0.9, 0.15, 0.15, 1.0),
 }
-# One comparison-overlay color per candidate source, distinct from BOX_COLORS and
-# from each other: thin gray for the raw geometric proposer, orange for the
-# RGB edge validator/reranker (it scores PCL hypotheses), purple for the DINO
-# proposer, teal for the reranked DINO verifier.
-CANDIDATE_SOURCES = (
-    ("pcl", "PCL geometry"),
-    ("rgb_edge_prior", "+ RGB edge validator/reranker"),
-    ("dino_proposer", "+ DINO proposer"),
-    ("dino_verifier_reranked", "+ DINO verifier (reranked)"),
-)
+# One overlay color per candidate source, distinct from BOX_COLORS and from
+# each other: gray for raw geometry, orange for the RGB edge reranker, purple
+# for the DINO proposer, teal for the reranked DINO verifier. Which source is
+# drawn is decided by `_active_candidate_sources`, not by the operator.
 CANDIDATE_SOURCE_COLORS = {
     "pcl": (0.6, 0.6, 0.6, 1.0),
     "rgb_edge_prior": (1.0, 0.55, 0.0, 1.0),
@@ -106,7 +96,7 @@ CANDIDATE_SOURCE_COLORS = {
     "dino_verifier_reranked": (0.0, 0.65, 0.65, 1.0),
 }
 WORKFLOW_SECTION_TITLES = (
-    "1. Preprocess cloud",
+    "1. Mask the gripper",
     "2. Auto-fit candidates",
     "3. Add and adjust blocks",
     "4. Visibility and details",
@@ -137,6 +127,7 @@ INITIAL_EYE = np.array([0.0, 0.0, 0.0])
 INITIAL_UP = np.array([0.0, 0.0, 1.0])
 INITIAL_DIRECTION = np.array([-1.0, 0.0, 0.0])
 DEFAULT_PICK_RADIUS_M = 0.30
+DEFAULT_SAM_MODEL = "facebook/sam2.1-hiera-small"
 BOX_EDGES = tuple(
     (first, second)
     for first in range(8)
@@ -230,6 +221,9 @@ class AnnotatorWindow:
             self.snap_face.add_item(choice)
         self.snap_face.selected_index = 0  # Auto: resolve across all six axes
         self.snap_pick_mode = False
+        # SAM is the tool for the blocks auto-fit never proposes -- measured at
+        # a quarter of them -- so it is on unless explicitly disabled.
+        # Constructing the backend imports nothing heavy; `_load` is lazy.
         self.sam_backend = (
             None
             if args.sam_model is None
@@ -239,6 +233,11 @@ class AnnotatorWindow:
         )
         self.sam_worker = (
             None if self.sam_backend is None else AsyncSegmentationWorker(self.sam_backend)
+        )
+        self.sam_status = gui.Label(
+            "Segmentation: disabled (--no-sam)"
+            if self.sam_backend is None
+            else f"Segmentation: loading {args.sam_model}..."
         )
 
         app = gui.Application.instance
@@ -268,48 +267,6 @@ class AnnotatorWindow:
         self.rgb_toggle = gui.Checkbox("RGB-colored cloud")
         self.rgb_toggle.checked = True
         self.rgb_toggle.set_on_checked(lambda _checked: self._refresh_scene())
-        self.remove_ground_toggle = gui.Checkbox("Remove ground")
-        self.remove_ground_toggle.checked = False
-        self.remove_ground_toggle.set_on_checked(lambda _checked: self._on_point_filters_changed())
-        self.workspace_toggle = gui.Checkbox("Limit to workspace ROI")
-        self.workspace_toggle.checked = False
-        self.workspace_toggle.set_on_checked(lambda _checked: self._on_point_filters_changed())
-        self.workspace_fields = [self._number() for _ in range(6)]
-        for field in self.workspace_fields:
-            field.set_on_value_changed(lambda _value: self._on_point_filters_changed())
-        self.self_filter_toggle = gui.Checkbox("Remove PZS100 gripper points")
-        self.self_filter_toggle.checked = False
-        self.self_filter_toggle.enabled = False
-        self.self_filter_toggle.set_on_checked(lambda _checked: self._on_point_filters_changed())
-        # Native PZS100 poses are the primary source.  Explicit boxes remain a
-        # compatibility layer for captures that genuinely need extra masking.
-        self.pzs100_filter_inputs: (
-            tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, object] | None
-        ) = None
-        # Populated only by a successful invocation of the native filter.
-        # These are its diagnostic volumes/rail segments, in world coordinates,
-        # rather than approximations reconstructed by the GUI.
-        self.pzs100_filter_diagnostics: dict[str, np.ndarray] | None = None
-        self.self_filter_reason = gui.Label("Disabled: loading PZS100 filter profile")
-        # Explicit memory of whether `self.status.text` currently holds one of
-        # `_apply_point_filters`' own PZS-filter messages, so the next call can
-        # tell "stale PZS message from last time" apart from "unrelated status
-        # from some other action" without parsing the label's own text.
-        self._pzs_status_is_current = False
-        self.remove_background_toggle = gui.Checkbox("Remove background (range cutoff)")
-        self.remove_background_toggle.checked = True
-        self.remove_background_toggle.set_on_checked(
-            lambda _checked: self._on_point_filters_changed()
-        )
-        self.max_range_field = gui.NumberEdit(gui.NumberEdit.DOUBLE)
-        self.max_range_field.decimal_precision = 2
-        self.max_range_field.set_limits(0.1, 1000.0)
-        self.max_range_field.set_on_value_changed(lambda _value: self._on_point_filters_changed())
-        self.candidate_checks = {key: gui.Checkbox(label) for key, label in CANDIDATE_SOURCES}
-        for checkbox in self.candidate_checks.values():
-            checkbox.checked = False
-            checkbox.set_on_checked(lambda _checked: self._candidate_sources_changed())
-        self.candidate_checks["pcl"].checked = True
         self.candidate_status = gui.Label(
             "unavailable: annotation_candidates module not found"
             if compute_candidate_sources is None
@@ -357,6 +314,7 @@ class AnnotatorWindow:
         self._ignore_reason_target_id: str | None = None
         self._suppress_text_commit = False
         self._load_snapshot(initial)
+        self._warm_up_sam()
 
     @staticmethod
     def _number() -> gui.NumberEdit:
@@ -393,43 +351,23 @@ class AnnotatorWindow:
 
         preprocessing_section = self._section(WORKFLOW_SECTION_TITLES[0])
         preprocessing_section.add_child(
-            gui.Label("Choose which cloud points are used for fitting.")
+            gui.Label("Mask the robot's own gripper out of the cloud before fitting.")
         )
-        preprocessing_section.add_child(self.remove_ground_toggle)
-        advanced_filters = gui.CollapsableVert("Advanced cloud filters", 4, gui.Margins(4, 0, 0, 4))
-        advanced_filters.set_is_open(False)
-        advanced_filters.add_child(self.workspace_toggle)
-        workspace_grid = gui.VGrid(4, 3)
-        for label, field in zip(
-            ("min X", "min Y", "min Z", "max X", "max Y", "max Z"),
-            self.workspace_fields,
-            strict=True,
-        ):
-            workspace_grid.add_child(gui.Label(label))
-            workspace_grid.add_child(field)
-        advanced_filters.add_child(workspace_grid)
-        preprocessing_section.add_child(self.remove_background_toggle)
-        range_row = gui.Horiz(3)
-        range_row.add_child(gui.Label("max range (m)"))
-        range_row.add_child(self.max_range_field)
-        preprocessing_section.add_child(range_row)
-        advanced_filters.add_child(self.self_filter_toggle)
-        advanced_filters.add_child(self.self_filter_reason)
-        preprocessing_section.add_child(advanced_filters)
+        preprocessing_section.add_child(self.self_filter_toggle)
+        preprocessing_section.add_child(self.self_filter_reason)
 
         candidates_section = self._section(WORKFLOW_SECTION_TITLES[1])
         candidates_section.add_child(
-            gui.Label("Select fit methods and compute; accepted suggestions become pending blocks.")
+            gui.Label("Fits blocks and adds every accepted result as a pending block.")
         )
-        for key, _label in CANDIDATE_SOURCES:
-            candidates_section.add_child(self.candidate_checks[key])
         candidates_section.add_child(
             self._button("Compute auto-fit suggestions", self._compute_candidates)
         )
-        candidates_section.add_child(
-            gui.Label("Accepted results are added to the editable block list below.")
-        )
         candidates_section.add_child(self.candidate_status)
+        candidates_section.add_child(
+            gui.Label("Then click any block the fitter missed in the RGB view.")
+        )
+        candidates_section.add_child(self.sam_status)
 
         edit_section = self._section(WORKFLOW_SECTION_TITLES[2])
         edit_section.add_child(
@@ -584,11 +522,6 @@ class AnnotatorWindow:
         self.T_world_cloud = tf.T_world_cloud
         self.raw_points = raw_points
         self.controller.document.roi_min, self.controller.document.roi_max = roi_min, roi_max
-        self.max_range_field.double_value = default_max_range_m(
-            self.raw_points, self.T_world_cloud[:3, 3]
-        )
-        for field, value in zip(self.workspace_fields, (*roi_min, *roi_max), strict=True):
-            field.double_value = float(value)
         self._load_self_filter_boxes(snapshot, tf)
         self.rgb = None
         self.T_world_camera = tf.T_world_camera
@@ -724,19 +657,6 @@ class AnnotatorWindow:
         points = self.raw_points
         status_candidates: list[tuple[int, str, bool]] = []
 
-        if self.remove_ground_toggle.checked:
-            points, ground = remove_ground(points)
-            status_candidates.append(
-                (1, f"Ground removed: {ground['removed_count']} points ({ground['source']})", False)
-            )
-        if self.workspace_toggle.checked:
-            minimum = np.array([field.double_value for field in self.workspace_fields[:3]])
-            maximum = np.array([field.double_value for field in self.workspace_fields[3:]])
-            points, _ = filter_workspace(points, minimum, maximum)
-        if self.remove_background_toggle.checked and self.T_world_cloud is not None:
-            points = remove_background_by_range(
-                points, self.T_world_cloud[:3, 3], self.max_range_field.double_value
-            )
         if self.self_filter_toggle.checked and self.pzs100_filter_inputs is not None:
             try:
                 points, removed, diagnostics = filter_pzs100_gripper(
@@ -758,13 +678,9 @@ class AnnotatorWindow:
             # filter off.  If another preprocessing operation produced status
             # in this same pass (e.g. ground removal), leave that more useful
             # result intact.
-            if (
-                self.pzs100_filter_inputs is not None
-                and had_pzs_status
-                and not self.remove_ground_toggle.checked
-            ):
+            if self.pzs100_filter_inputs is not None and had_pzs_status:
                 status_candidates.append((2, "PZS100 gripper filter disabled.", True))
-            elif self.pzs100_filter_inputs is None and not self.remove_ground_toggle.checked:
+            elif self.pzs100_filter_inputs is None:
                 detail = self.self_filter_reason.text.removeprefix("Disabled: ")
                 status_candidates.append((2, f"PZS100 gripper filter unavailable: {detail}", True))
 
@@ -1052,19 +968,44 @@ class AnnotatorWindow:
         self.scene.look_at(focus, INITIAL_EYE, INITIAL_UP)
         self.scene.force_redraw()
 
+    def _active_candidate_sources(self) -> list[tuple[str, tuple]]:
+        """The sources actually used, chosen automatically rather than by checkbox.
+
+        `pcl`, `rgb_edge_prior` and `dino_verifier_reranked` all re-score the
+        SAME raw hypotheses, so they are alternatives, not additions: only the
+        most refined one available is used. Measured over this repo's 23
+        snapshots, the RGB edge reranker strictly dominates raw PCL -- same
+        75% recall, 88% precision against 84% -- so there is nothing to choose
+        between them and no reason to ask the operator to.
+
+        `dino_proposer` is the exception: it runs its own detection over RGB
+        region proposals and can surface blocks the geometry stage never
+        proposed, so its candidates are added rather than substituted.
+        """
+        result = self.candidate_sources_result
+        if result is None:
+            return []
+        active: list[tuple[str, tuple]] = []
+        for key in ("dino_verifier_reranked", "rgb_edge_prior", "pcl"):
+            candidates = tuple(getattr(result, key, ()))
+            if candidates:
+                active.append((key, candidates))
+                break
+        proposer = tuple(getattr(result, "dino_proposer", ()))
+        if proposer:
+            active.append(("dino_proposer", proposer))
+        return active
+
     def _add_candidate_source_geometries(self) -> None:
-        """Draw read-only comparison boxes for each checked candidate source.
+        """Draw read-only comparison boxes for the candidates actually in play.
 
         These are plain LineSet overlays, never EditableTargets: they are not
         registered anywhere `pick_oriented_box` looks, so clicking them cannot
-        create or select an editable target.
+        create or select an editable target. Accepted candidates are promoted
+        immediately, so what remains drawn is the rejected near-misses -- the
+        useful signal being "the fitter saw something here and did not take it".
         """
-        if self.candidate_sources_result is None:
-            return
-        for key, _label in CANDIDATE_SOURCES:
-            if not self.candidate_checks[key].checked:
-                continue
-            candidates = getattr(self.candidate_sources_result, key, ())
+        for key, candidates in self._active_candidate_sources():
             color = CANDIDATE_SOURCE_COLORS[key]
             for candidate_index, candidate in enumerate(candidates):
                 if candidate.id in self.controller.adopted_candidate_ids:
@@ -1118,16 +1059,10 @@ class AnnotatorWindow:
         self._refresh_views()
 
     def _promote_accepted_candidates(self) -> list[str]:
-        """Promote accepted checked-source results as one undoable GUI action."""
-        if self.candidate_sources_result is None:
-            return []
-        # Later/refined sources replace the raw view of the same detector ID.
-        # Iterating in CANDIDATE_SOURCES order gives deterministic precedence.
+        """Promote every accepted result from the active sources as one undoable action."""
         unique: dict[str, object] = {}
-        for key, _label in CANDIDATE_SOURCES:
-            if not self.candidate_checks[key].checked:
-                continue
-            for candidate in getattr(self.candidate_sources_result, key, ()):
+        for _key, candidates in self._active_candidate_sources():
+            for candidate in candidates:
                 if candidate.accepted and candidate.id not in self.controller.adopted_candidate_ids:
                     unique[candidate.id] = candidate
         specs = [
@@ -1139,9 +1074,6 @@ class AnnotatorWindow:
         target_ids = self.controller.adopt_candidates(specs)
         self._load_document_widgets()
         return target_ids
-
-    def _candidate_sources_changed(self) -> None:
-        self._refresh_scene()
 
     def _refresh_rgb(self) -> None:
         if self.rgb is None:
@@ -1198,7 +1130,9 @@ class AnnotatorWindow:
         if self.sam_backend is None:
             candidate = candidate_mask_at(self.candidate_masks, point)
             if candidate is None:
-                self.status.text = "No stored candidate mask at this pixel; enable --sam-model."
+                self.status.text = (
+                    "No stored candidate mask here, and segmentation is off (--no-sam)."
+                )
             else:
                 self._apply_rgb_mask(candidate[1], point, f"candidate {candidate[0]}")
             return gui.Widget.EventCallbackResult.HANDLED
@@ -1229,6 +1163,31 @@ class AnnotatorWindow:
             else "SAM is busy; wait for the current prompt to finish."
         )
         return gui.Widget.EventCallbackResult.HANDLED
+
+    def _warm_up_sam(self) -> None:
+        """Load SAM weights in the background so the first real click is instant.
+
+        `TransformersSam2Backend._load` is lazy, which previously meant the
+        first RGB click blocked the GUI for however long the model took to
+        resolve, download and move to the device -- with no feedback. Doing it
+        here on the worker thread keeps the window responsive and turns the
+        wait into a visible readiness line instead of an unexplained stall.
+        """
+        if self.sam_worker is None or self.sam_backend is None:
+            return
+        probe = np.zeros((64, 64, 3), dtype=np.uint8)
+
+        def schedule(callback) -> None:
+            gui.Application.instance.post_to_main_thread(self.window, callback)
+
+        def finish(_mask, error, _context) -> None:
+            self.sam_status.text = (
+                f"Segmentation ready: {self.args.sam_model} on {self.sam_backend.device}"
+                if error is None
+                else f"Segmentation unavailable: {error}"
+            )
+
+        self.sam_worker.submit(probe, (32, 32), "warm-up", schedule, finish)
 
     def _apply_rgb_mask(self, mask: np.ndarray, prompt: tuple[int, int], source: str) -> None:
         assert self.projection_cache is not None
@@ -1801,7 +1760,7 @@ class AnnotatorWindow:
         return True
 
 
-def main() -> None:
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("snapshot", nargs="?", type=Path)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
@@ -1815,11 +1774,18 @@ def main() -> None:
     )
     parser.add_argument(
         "--sam-model",
-        nargs="?",
-        const="facebook/sam2.1-hiera-small",
-        default=None,
-        help="Enable RGB point-prompt segmentation (default model when flag has no value: "
-        "facebook/sam2.1-hiera-small). Without it, stored candidate masks are used.",
+        default=DEFAULT_SAM_MODEL,
+        help="Hugging Face model for RGB point-prompt segmentation "
+        f"(default: {DEFAULT_SAM_MODEL}).",
+    )
+    parser.add_argument(
+        "--no-sam",
+        dest="sam_model",
+        action="store_const",
+        const=None,
+        help="Disable RGB segmentation and fall back to stored candidate masks. Segmentation "
+        "is on by default because auto-fit misses roughly a quarter of blocks and clicking "
+        "them in RGB is the fastest way to recover them.",
     )
     parser.add_argument(
         "--sam-device",
@@ -1830,7 +1796,7 @@ def main() -> None:
     parser.add_argument(
         "--sam-offline",
         action="store_true",
-        help="Use only locally cached SAM configuration and weights.",
+        help="Use only locally cached SAM configuration and weights (no network).",
     )
     parser.add_argument(
         "--dino-proposer-checkpoint",
@@ -1845,6 +1811,11 @@ def main() -> None:
         help="Checkpoint enabling the DINO candidate verifier/reranker source "
         "(default: unavailable).",
     )
+    return parser
+
+
+def main() -> None:
+    parser = build_arg_parser()
     args = parser.parse_args()
     if not np.isfinite(args.pick_radius) or args.pick_radius <= 0:
         parser.error("--pick-radius must be a positive finite number")

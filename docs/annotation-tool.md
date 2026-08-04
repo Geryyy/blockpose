@@ -9,27 +9,39 @@ python tools/annotate_snapshot.py data/registration_snapshots/<snapshot-name>
 
 The window shows the interactive point cloud and RGB image side by side. The
 right-hand panel is scrollable and follows the annotation workflow from top to
-bottom: **1. Preprocess cloud**, **2. Auto-fit candidates**, **3. Add and adjust
+bottom: **1. Mask the gripper**, **2. Auto-fit candidates**, **3. Add and adjust
 blocks**, **4. Visibility and details**, and **5. Save snapshot**. Snapshot
 navigation stays above those stages, and undo/redo remains available alongside
 the block-adjustment controls. The first four stages scroll independently while
-the save stage remains pinned at the bottom of the panel. Snapshot navigation
-and advanced cloud filters start collapsed to keep the primary workflow compact.
+the save stage remains pinned at the bottom of the panel.
 
-Click a block in RGB to use an existing candidate mask as a 3D selection. To
-use SAM 2.1 point-prompt segmentation instead, install the optional
-dependencies and enable the model explicitly (the first run downloads its
-weights):
+The panel deliberately has no cloud-filter knobs beyond the gripper mask.
+Ground removal, the workspace ROI and the range cutoff were all measured to
+make no difference to what the fitter finds (identical hypothesis counts at
+every setting), so they were removed rather than left as controls that look
+consequential and are not.
+
+RGB point-prompt segmentation with SAM 2.1 is **on by default** and is the
+intended way to recover blocks the fitter misses. Install the optional
+dependencies once:
 
 ```bash
 uv sync --extra sam
-uv run python tools/annotate_snapshot.py --sam-model --sam-device auto
+uv run python tools/annotate_snapshot.py
 ```
 
-Use `--sam-offline` to prohibit network access and load only already cached
-model files. While one prompt is running, further RGB clicks are ignored with a
-busy status; switching snapshots or closing the window safely discards its
-result.
+Weights load in the background at startup, so the first click does not stall;
+the readiness line under **Auto-fit candidates** reports the model and device,
+or the reason it is unavailable. Pass `--no-sam` to turn it off and fall back
+to stored candidate masks, `--sam-model` to choose a different checkpoint,
+`--sam-device` to pin the device, or `--sam-offline` to forbid network access.
+While one prompt runs, further RGB clicks are ignored with a busy status;
+switching snapshots or closing the window safely discards its result.
+
+Model weights are cached under `HF_HOME`, which the container image points at
+`/opt/model-cache/huggingface`. `docker-compose.yml` mounts a named
+`model-cache` volume there, so the download survives `docker compose run
+--rm` instead of repeating on every launch.
 
 ## Snapshot navigation
 
@@ -42,16 +54,10 @@ disable at the first and last snapshot in `--root`.
 Interface strings are deliberately ASCII: the font Open3D ships cannot render
 an em dash or ellipsis and draws them as `?`.
 
-## Preprocess cloud
+## Mask the gripper
 
-**Remove background (range cutoff)** is **on by default**, seeded at the 95th
-percentile of point-to-sensor distance, so the cloud you first see is already
-trimmed of far returns. Turn it off or raise the limit to see the full capture.
-A filter combination that would empty the cloud is refused, and the previous
-cloud is kept, rather than leaving nothing to annotate.
-
-**Remove PZS100 gripper points** (under **Advanced cloud filters**) masks the
-robot's own jaws using the captured FK rails, and additionally excludes the
+**Remove PZS100 gripper points** masks the robot's own jaws using the captured
+FK rails, and additionally excludes the
 region *above* the jaws — the carrier, boom and arm — which the outward-facing
 jaw boxes never cover and which the geometric proposer otherwise fits blocks
 to. Two keys in `config/pzs100_gripper_filter.yaml` control it:
@@ -77,24 +83,34 @@ missing frame named in its reason.
 
 ## Auto-fit candidates
 
-The **Auto-fit candidates** stage compares up to four independent block
-detectors for the current snapshot: **PCL geometry** (raw geometric
-hypotheses), **+ RGB edge validator/reranker** (the classical edge-based
-re-score of those PCL hypotheses), **+
-DINO proposer**, and **+ DINO verifier (reranked)** (a learned reranking of
-the geometry hypotheses). Check the sources you want to see, then press
-**Compute auto-fit suggestions** — this never runs automatically on snapshot load or
-Prev/Next, so navigating stays fast. Each checked source renders as its own
-set of thin wireframe boxes in the 3D view (gray/orange/purple/teal
-respectively). Every accepted fit is immediately created as a pending,
-editable annotation in one undoable action. The new blocks appear in the
-editable block list and can be moved, rotated, snapped, approved, excluded,
-or deleted there. Their suggestion overlays disappear, preventing them from
-being confused with editable blocks. Duplicate detector IDs are listed once,
-preferring the refined source, and already represented IDs are skipped on
-recompute. The status label reports
-per-source warnings (e.g. a DINO source unavailable because no checkpoint was
-given) instead of silently dropping them.
+Press **Compute auto-fit suggestions** to fit the current snapshot. It never
+runs automatically on load or Prev/Next, so navigating stays fast. Every
+accepted fit becomes a pending, editable block in one undoable action; rejected
+near-misses stay on screen as thin wireframes so you can see where the fitter
+looked and declined. Already-adopted detector IDs are skipped on recompute, so
+recomputing is always safe.
+
+There is no source picker. `pcl`, `rgb_edge_prior` and `dino_verifier_reranked`
+all re-score the *same* raw geometric hypotheses, so they are alternatives, not
+additions, and the tool simply uses the most refined one available. Measured
+over the 23 snapshots in `data/registration_snapshots`, the RGB edge reranker
+strictly dominates raw PCL:
+
+| source | accepted | true positives | precision | recall |
+| --- | --- | --- | --- | --- |
+| `pcl` | 55 | 46 | 84% | 75% |
+| `rgb_edge_prior` | 52 | 46 | **88%** | 75% |
+
+Same recall, three fewer false positives, so there was nothing to choose.
+`dino_proposer` is the exception: it runs its own detection over RGB region
+proposals and can surface blocks geometry never proposed, so its candidates are
+*added* to the base source rather than replacing it. The status label reports
+per-source warnings (e.g. a DINO source unavailable for want of a checkpoint)
+instead of silently dropping them.
+
+Expect roughly three quarters of blocks to be found, each within about 3 cm of
+truth -- so corrections on found blocks are a nudge. Budget your time for the
+remaining quarter, which the RGB click path recovers.
 
 The DINO sources need model checkpoints:
 
@@ -103,7 +119,7 @@ python tools/annotate_snapshot.py --dino-proposer-checkpoint PATH --dino-verifie
 ```
 
 Both flags default to `None` (that source reports itself unavailable and is
-simply skipped) and are independent of each other and of `--sam-model`.
+simply skipped) and are independent of each other and of the SAM options.
 
 RGB masks are dilated slightly for calibration error, then filtered by camera
 depth and 3D connectivity to reject background bleed. Selected LiDAR points are
