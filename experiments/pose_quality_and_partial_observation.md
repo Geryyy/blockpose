@@ -87,3 +87,48 @@ labels -- it is the honest score against correct labels on blocks that are 76%
 hidden. Orientation is genuinely underdetermined there. Better placement
 heuristics will not fix it; only supplying the missing constraint will, which
 is what occlusion-aware evidence is for.
+
+## Occluder-aware evidence: implemented, measured, and it does not help
+
+`SensorContext` now carries `occluders`, and `visibility_evidence` drops rays a
+known occluder stopped rather than counting them as incident-but-unsupported
+(commit b83c70d). The reasoning holds and the unit tests confirm the mechanism.
+Supplying the FK gripper boxes across the annotated set:
+
+| gripper occluders | recall (centre) | recall (strict) | precision |
+| --- | ---: | ---: | ---: |
+| off | 44/59 = 75% | 42/59 = **71%** | 44/57 = 77% |
+| on | 44/59 = 75% | 38/59 = **64%** | 44/57 = 77% |
+| heavy_occlusion blocks only | 3/10 | 3/10 | — |
+
+No gain, and strict recall drops 7 points. Dropping occluded rays removes their
+penalty but also their support, so score denominators shrink and hypotheses
+become less separable — a worse-oriented one can now score comparably.
+
+**The diagnosis is that this targets the wrong stage.** For the heavily
+occluded blocks:
+
+    a raw hypothesis exists near the block : 3/10
+    one survives to "final"                : 3/10
+
+Seven of ten are lost with **no hypothesis ever generated**. Evidence scoring
+runs on hypotheses; where none exists it cannot help however well it reasons.
+This matches the earlier stage instrumentation, where 7 of 12 zero-hypothesis
+crops failed the 0.30 m minimum XY/Z extent gate in `proposals.hpp` — before
+any evidence is computed.
+
+The occluder primitive is kept because it is correct and inert by default
+(empty occluders reproduce previous behaviour exactly, and the ROS consumer
+builds against it), but **it should not be enabled**: on this data it is a
+small regression.
+
+### Where the ray-cast idea should act instead
+
+Hypothesis GENERATION, not scoring. A component is currently rejected for being
+under 0.30 m in XY or Z. When that shortfall is explained by the gripper's
+shadow — which FK gives us before fitting — the gate is measuring the occluder,
+not the block, and rejecting on it is the error. Relaxing the gate *only where
+the missing extent falls inside a known shadow* is narrow, keeps the gate's
+protection everywhere else, and is the thing these measurements actually
+support. A global relaxation was already falsified: recall unchanged, precision
+down.

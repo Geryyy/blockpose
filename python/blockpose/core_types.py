@@ -151,6 +151,12 @@ class SensorContext:
     miss_directions: np.ndarray = field(default_factory=lambda: np.zeros((0, 3)))
     ray_origins: np.ndarray | None = None
     miss_origins: np.ndarray | None = None
+    # Volumes known to block the sensor's view -- in practice the robot's own
+    # gripper, whose pose comes from FK. Rays these stop carry no information
+    # about anything behind them, so the native evidence code drops them rather
+    # than counting them against a hypothesis standing in the shadow. Pass the
+    # centre/rotation/size triple `filter_pzs100_gripper` already returns.
+    occluders: dict[str, np.ndarray] | None = None
 
     @classmethod
     def from_points(
@@ -159,6 +165,7 @@ class SensorContext:
         points: np.ndarray,
         *,
         ray_origins: np.ndarray | None = None,
+        occluders: dict[str, np.ndarray] | None = None,
     ) -> "SensorContext":
         origin, points = np.asarray(origin, dtype=np.float64), np.asarray(points, dtype=np.float64)
         origins = (
@@ -180,4 +187,5 @@ class SensorContext:
             vectors[valid] / ranges[valid, None],
             ranges[valid],
             ray_origins=origins[valid],
+            occluders=occluders,
         )
