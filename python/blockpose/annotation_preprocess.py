@@ -195,4 +195,9 @@ def filter_pzs100_gripper(
             "above_sizes",
         )
     }
+    # Not an array, so it cannot ride along in the comprehension above: the
+    # reason the above-gripper volume was skipped, or "" when it was built.
+    # The jaw boxes still apply either way -- an enhancement that cannot
+    # describe a given rig must not disable the core self-filter.
+    boxes["above_exclusion_error"] = result.get("above_exclusion_error", "")
     return _points(result["points"]), int(result["removed_count"]), boxes

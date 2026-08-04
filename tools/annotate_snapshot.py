@@ -682,7 +682,18 @@ class AnnotatorWindow:
                     points, *self.pzs100_filter_inputs
                 )
                 self.pzs100_filter_diagnostics = diagnostics
-                status_candidates.append((3, f"PZS100 gripper removed: {removed} points", True))
+                # The jaws are masked either way; say so when only the
+                # above-gripper volume was skipped, so a rig the volume cannot
+                # describe is visible rather than silently absent from the 3D view.
+                skipped = diagnostics.get("above_exclusion_error") or ""
+                status_candidates.append(
+                    (
+                        3,
+                        f"PZS100 gripper removed: {removed} points"
+                        + (f" (above-gripper volume skipped: {skipped})" if skipped else ""),
+                        True,
+                    )
+                )
             except (ImportError, ValueError, RuntimeError) as error:
                 # A stale .so or malformed capture must not make the annotator
                 # unusable.  Keep the cloud untouched and expose the cause.

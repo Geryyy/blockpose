@@ -153,16 +153,19 @@ inline void validate_oriented_box(const OrientedBox & box)
 // in the gap *between* the two rails, a region the outward-facing per-rail
 // boxes never reach, so one combined volume spanning both rails is required.
 //
-// "Up" is anchored to the FIRST rail's own structural cross-axis (col(2)),
-// which rotates with the rig, and is then sanity-checked against world +Z
-// with a signed test.  See the body for why a sign taken from world +Z is
-// unrecoverably ambiguous rather than merely imprecise.  A rig that is
-// steeply tilted, inverted, or whose rails arrive in the opposite order is
-// REFUSED: the failure mode is "no filter", never "filter inverted onto the
-// payload".  The principled long-term fix is an explicit `up_axis_parent`
-// in Pzs100RailPose, analogous to the existing `outward_axis_parent`, so up
-// comes from rig structure with no world-frame assumption at all; that is
-// not implemented here.
+// "Up" is world +Z, and deliberately not any structural axis of the rig.
+// An earlier version anchored it to a rail's own cross-axis (col(2)) on the
+// theory that a structural direction survives rig tilt.  That was wrong twice
+// over: it assumed a rail convention that does not hold -- when the rail runs
+// vertically, col(2) comes out horizontal and an ordinary upright gripper was
+// rejected -- and it solved the wrong problem.  Which side the payload is on
+// is not structural but gravitational: the block is clamped between the jaws
+// and hangs below them, while the carrier, boom and arm are above.  World +Z
+// therefore separates the two under any rig orientation, and it carries no
+// sign to resolve, so none of the tilt/inversion guards that convention
+// needed are required here.  The volume's horizontal footprint is taken from
+// the jaw boxes themselves, so it needs no assumption about which structural
+// axis is which.
 inline OrientedBox make_pzs100_above_gripper_exclusion_box(
   const std::vector<Pzs100RailPose> & rails, const Pzs100SelfFilterParameters & parameters = {})
 {
@@ -178,78 +181,65 @@ inline OrientedBox make_pzs100_above_gripper_exclusion_box(
   const auto box1 = make_pzs100_gripper_filter_box(rails[1], parameters);
 
   constexpr double kMinAxisComponent = 1e-6;
-  // Anchor "up" to the FIRST rail's own cross-axis, which is a structural
-  // direction that rotates with the rig, rather than to whichever sign
-  // happens to point along world +Z.  Taking the sign from world +Z is not
-  // merely imprecise, it is unrecoverably ambiguous: the two rails' cross
-  // axes are antiparallel by construction (left rail outward=+Y gives
-  // col(2)=+Z, right rail outward=-Y gives col(2)=-Z), so the pair {+Z,-Z}
-  // looks identical whether the rig is upright or fully inverted, and a
-  // sign chosen from |dot| admits BOTH bands -- at 135 deg of rig tilt it
-  // resolves structural down and extrudes the exclusion volume through the
-  // payload.  Anchoring to rails[0] removes that ambiguity entirely.
-  //
-  // The remaining assumption is the convention that rails[0]'s cross-axis
-  // points structurally up.  That is checked below against world +Z with a
-  // SIGNED test, so a rig that is inverted, lying on its side, or supplied
-  // with its rails in the opposite order is REFUSED rather than silently
-  // filtered the wrong way round -- the failure mode is "no filter", which
-  // the caller surfaces as a visible disabled reason.
-  constexpr double kMinUprightAlignment = 0.5;  // 60 deg from vertical
-  const Point up = box0.box.rotation.col(2);
-  if (up.dot(Point::UnitZ()) < kMinUprightAlignment) {
-    throw std::invalid_argument(
-      "PZS100 first rail's cross-axis is not within 60 degrees of world +Z -- the rig is "
-      "tilted, inverted, or its rails are supplied in the wrong order; refusing to build "
-      "the above-gripper exclusion volume rather than risk inverting it onto the payload");
-  }
-  // The second rail must oppose the first, confirming the pair really is a
-  // gripper's two jaws rather than an unrelated pose supplied by mistake.
-  if (box1.box.rotation.col(2).dot(up) > -kMinUprightAlignment) {
-    throw std::invalid_argument("PZS100 rails disagree on which direction is up");
-  }
-  // `up` is a column of an already-orthonormal rotation, so it needs no
-  // renormalisation here.
+  const Point up = Point::UnitZ();
 
-  // The forward (along-rail) axis of the combined volume: the average of
-  // both rails' own forward axes, re-orthogonalised against up so the three
-  // resulting columns stay an orthonormal, right-handed basis.
-  Point forward = box0.box.rotation.col(0) + box1.box.rotation.col(0);
-  forward -= up * forward.dot(up);
-  const double forward_norm = forward.norm();
-  if (forward_norm <= kMinAxisComponent) {
-    throw std::invalid_argument("PZS100 rail directions are degenerate relative to up");
-  }
-  forward /= forward_norm;
-  const Point transverse = up.cross(forward);  // forward x transverse = up (right-handed)
-
-  // Span the true gap between the rails -- the rail centrelines themselves,
-  // not the per-rail boxes (which are already offset outward, away from that
-  // gap) -- plus the configured lateral margin.
+  // The horizontal frame comes from how the two jaws are separated, which is
+  // the one thing a two-jaw gripper always has: they straddle the block, so
+  // their centrelines are horizontally apart whatever the rails' own axis
+  // convention happens to be.
   const Point rail_center_0 = (rails[0].parent_position + rails[0].rail_position) * 0.5;
   const Point rail_center_1 = (rails[1].parent_position + rails[1].rail_position) * 0.5;
-  const double width = std::abs(transverse.dot(rail_center_1 - rail_center_0)) +
-    parameters.above_exclusion_margin_m;
-  if (width <= kMinAxisComponent) {
-    throw std::invalid_argument("PZS100 rails coincide -- cannot span a width between them");
+  Point transverse = rail_center_1 - rail_center_0;
+  transverse -= up * transverse.dot(up);
+  const double transverse_norm = transverse.norm();
+  if (transverse_norm <= kMinAxisComponent) {
+    throw std::invalid_argument(
+      "PZS100 rail centrelines are not horizontally separated -- cannot span the gap between "
+      "the jaws");
   }
-  const double length = std::max(box0.box.size.x(), box1.box.size.x());
+  transverse /= transverse_norm;
+  // forward x transverse = up keeps the basis right-handed (det = +1).
+  const Point forward = transverse.cross(up);
 
-  // Extrude upward starting at the higher of the two jaw-box tops, so the
-  // volume never dips down into either jaw box (and therefore never into the
-  // payload hanging below them).
-  const double top0 = up.dot(box0.box.center) + box0.box.size.z() * 0.5;
-  const double top1 = up.dot(box1.box.center) + box1.box.size.z() * 0.5;
-  const double top_height = std::max(top0, top1);
-  const Point reference = (rail_center_0 + rail_center_1) * 0.5;
+  // Footprint: the combined horizontal extent of both jaw boxes along each
+  // axis, so the volume covers whatever the gripper actually occupies rather
+  // than a reconstruction from rail geometry. The half-extent of an oriented
+  // box along a direction is the sum of its per-axis projections.
+  const auto half_extent = [](const OrientedBox & box, const Point & axis) {
+      return 0.5 * (std::abs(axis.dot(box.rotation.col(0))) * box.size.x() +
+             std::abs(axis.dot(box.rotation.col(1))) * box.size.y() +
+             std::abs(axis.dot(box.rotation.col(2))) * box.size.z());
+    };
+  const auto span = [&](const Point & axis) {
+      const double c0 = axis.dot(box0.box.center), h0 = half_extent(box0.box, axis);
+      const double c1 = axis.dot(box1.box.center), h1 = half_extent(box1.box, axis);
+      return std::pair<double, double>{
+        std::min(c0 - h0, c1 - h1), std::max(c0 + h0, c1 + h1)};
+    };
+  const auto forward_span = span(forward);
+  const auto transverse_span = span(transverse);
+  const auto up_span = span(up);
+
+  const double margin = parameters.above_exclusion_margin_m;
+  const double length = forward_span.second - forward_span.first + margin;
+  const double width = transverse_span.second - transverse_span.first + margin;
+  if (length <= kMinAxisComponent || width <= kMinAxisComponent) {
+    throw std::invalid_argument("PZS100 jaw boxes have no horizontal extent to span");
+  }
+
+  // Start at the highest point of either jaw box, so the volume sits strictly
+  // above the gripper and can never reach the block clamped below it.
+  const double top = up_span.second;
+  const Point centre_forward = forward * (0.5 * (forward_span.first + forward_span.second));
+  const Point centre_transverse = transverse * (0.5 * (transverse_span.first + transverse_span.second));
 
   OrientedBox result;
   result.rotation.col(0) = forward;
   result.rotation.col(1) = transverse;
   result.rotation.col(2) = up;
   result.size = Point(length, width, parameters.above_exclusion_height_m);
-  result.center = reference +
-    up * (top_height + parameters.above_exclusion_height_m * 0.5 - up.dot(reference));
+  result.center = centre_forward + centre_transverse +
+    up * (top + parameters.above_exclusion_height_m * 0.5);
   validate_oriented_box(result);
   return result;
 }

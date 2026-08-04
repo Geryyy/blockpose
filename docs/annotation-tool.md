@@ -68,12 +68,14 @@ to. Two keys in `config/pzs100_gripper_filter.yaml` control it:
 | `above_exclusion_margin_m` | lateral margin added to the rail-to-rail gap |
 
 The payload hangs *below* the jaws, so the volume only ever extrudes upward
-from the top of the jaw boxes and cannot reach the gripped block. "Up" is taken
-from the first rail's structural cross-axis and checked against world +Z: if
-the rig is tilted more than 60° from upright, inverted, or its rails are
-supplied in the wrong order, the filter **refuses to build the volume** and
-reports itself disabled rather than risk inverting the exclusion onto the
-payload. Both the jaw boxes and the above-gripper volume are drawn in 3D as
+from the top of the jaw boxes and cannot reach the gripped block. "Up" is world
++Z, deliberately not a structural axis of the rig: which side the payload is on
+is gravitational rather than structural, so world +Z separates boom from block
+under any rig attitude and under either rail convention (rails running along
+the jaw or across it). If the two jaws are not horizontally separated the
+volume cannot be built; the jaw boxes still apply and the status line names the
+reason, because an enhancement that cannot describe a rig must not disable the
+core filter. Both the jaw boxes and the above-gripper volume are drawn in 3D as
 read-only outlines so you can see what was masked.
 
 This filter needs the gripper's FK frames (`K9`/`K10_left_rail`,

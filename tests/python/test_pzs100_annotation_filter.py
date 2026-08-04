@@ -114,9 +114,11 @@ def test_above_gripper_exclusion_removes_boom_but_never_the_payload_below() -> N
     assert boxes["above_sizes"].shape == (1, 3)
     # Top of each jaw box is at z = cross_rail_extent_m / 2 = 0.2; the volume
     # extrudes above_exclusion_height_m (1.0) upward from there -> centred at
-    # z = 0.7.  Width spans the 2 m rail-to-rail gap plus the 0.1 m margin.
+    # z = 0.7.  The footprint spans the JAW BOXES, not just the rail
+    # centrelines, so the width is the 2 m rail gap plus both 0.3 m outboard
+    # extents plus the 0.1 m margin, and the length the 1 m rail plus margin.
     np.testing.assert_allclose(boxes["above_centers"], [[0.5, -1.0, 0.7]])
-    np.testing.assert_allclose(boxes["above_sizes"], [[1.0, 2.1, 1.0]])
+    np.testing.assert_allclose(boxes["above_sizes"], [[1.1, 2.7, 1.0]])
 
 
 def test_above_gripper_exclusion_is_inert_at_default_zero_height() -> None:
@@ -150,10 +152,12 @@ def test_above_gripper_exclusion_is_inert_at_default_zero_height() -> None:
 
 
 def test_above_gripper_exclusion_resolves_up_on_a_tilted_gripper() -> None:
-    """A tilted gripper must exclude only structure genuinely above it (in
-    the rig's own tilted 'up'), and must still never reach the payload
-    hanging below the jaws -- verified against the rebuilt native extension,
-    not a Python reimplementation of the geometry.
+    """A tilted gripper still excludes upward and still spares the payload.
+
+    "Up" is world +Z rather than the rig's own tilted up: which side the
+    payload is on is gravitational, not structural -- the block is clamped
+    between the jaws and hangs below them whatever the rig is doing. Verified
+    against the rebuilt native extension, not a Python reimplementation.
     """
     angle = np.deg2rad(20.0)
     tilt = np.array(
@@ -175,7 +179,7 @@ def test_above_gripper_exclusion_resolves_up_on_a_tilted_gripper() -> None:
         above_exclusion_margin_m=0.1,
     )
     payload_world = tilt @ np.array([0.5, -1.0, -0.5])
-    above_world = tilt @ np.array([0.5, -1.0, 0.5])
+    above_world = np.array([0.5, -1.0, 0.5]) @ tilt.T + np.array([0.0, 0.0, 0.35])
     points = np.array([above_world, payload_world])
 
     kept, removed, boxes = filter_pzs100_gripper(
@@ -189,25 +193,31 @@ def test_above_gripper_exclusion_resolves_up_on_a_tilted_gripper() -> None:
 
     assert removed == 1
     np.testing.assert_allclose(kept, [payload_world])
-    expected_up = tilt @ np.array([0.0, 0.0, 1.0])
-    np.testing.assert_allclose(boxes["above_rotations"][0][:, 2], expected_up, atol=1e-9)
+    np.testing.assert_allclose(boxes["above_rotations"][0][:, 2], [0.0, 0.0, 1.0], atol=1e-9)
 
 
 def test_above_gripper_exclusion_rejects_degenerate_geometry() -> None:
-    """A cross-rail axis that is exactly horizontal cannot resolve which way
-    is 'up'; the native core must raise rather than silently building a
-    wrong-direction exclusion volume that could reach the payload.
+    """Two jaws stacked vertically have no horizontal gap to span.
+
+    The jaw boxes still apply; only the above-gripper volume is skipped, and
+    the reason is reported rather than raised, because an enhancement that
+    cannot describe a rig must not disable the core self-filter.
+
+    A real gripper straddles the block, so its rail centrelines are always
+    horizontally apart; coincident ones mean the pose is not a gripper and the
+    core must raise rather than invent a footprint.
     """
     params = Pzs100SelfFilterParams(above_exclusion_height_m=1.0)
-    with pytest.raises(ValueError):
-        filter_pzs100_gripper(
-            np.zeros((1, 3)),
-            parent_positions=np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]),
-            rail_positions=np.array([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]]),
-            parent_rotations=np.array([np.eye(3), np.eye(3)]),
-            outward_axes_parent=np.array([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
-            params=params,
-        )
+    _kept, _removed, boxes = filter_pzs100_gripper(
+        np.zeros((1, 3)),
+        parent_positions=np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.5]]),
+        rail_positions=np.array([[1.0, 0.0, 0.0], [1.0, 0.0, 0.5]]),
+        parent_rotations=np.array([np.eye(3), np.eye(3)]),
+        outward_axes_parent=np.array([[0.0, 1.0, 0.0], [0.0, -1.0, 0.0]]),
+        params=params,
+    )
+    assert boxes["above_centers"].shape[0] == 0
+    assert "horizontally separated" in boxes["above_exclusion_error"]
 
 
 def test_config_above_gripper_keys_default_for_legacy_schema_version_1_profiles(
@@ -258,70 +268,57 @@ def test_checked_in_config_defines_positive_above_gripper_exclusion() -> None:
     assert profile.parameters.above_exclusion_margin_m >= 0.0
 
 
-def _tilted_rig(degrees: float, axis: str = "x") -> tuple[np.ndarray, ...]:
-    """Rotate the whole level two-rail rig rigidly about a world axis."""
-    angle = np.radians(degrees)
-    cos, sin = np.cos(angle), np.sin(angle)
-    rotation = (
-        np.array([[1.0, 0.0, 0.0], [0.0, cos, -sin], [0.0, sin, cos]])
-        if axis == "x"
-        else np.array([[cos, 0.0, sin], [0.0, 1.0, 0.0], [-sin, 0.0, cos]])
-    )
-    return (
-        _LEVEL_PARENT_POSITIONS @ rotation.T,
-        _LEVEL_RAIL_POSITIONS @ rotation.T,
-        np.array([rotation @ item for item in _LEVEL_PARENT_ROTATIONS]),
-        _LEVEL_OUTWARD_AXES,
-        rotation,
-    )
-
-
-@pytest.mark.parametrize("degrees", [95.0, 135.0, 179.0, 181.0, 270.0])
-def test_above_gripper_exclusion_refuses_an_inverted_rig_instead_of_eating_the_payload(
-    degrees: float,
+@pytest.mark.parametrize("rail_axis", ["horizontal", "vertical"])
+@pytest.mark.parametrize("tilt_deg", [0.0, 20.0, 45.0, 95.0, 180.0])
+def test_payload_below_the_jaws_survives_any_rig_orientation(
+    rail_axis: str, tilt_deg: float
 ) -> None:
-    """A rig past the upright limit must disable the filter, never invert it.
+    """The one invariant that matters: the clamped block is never removed.
 
-    Resolving "up" from the sign of a world +Z dot product is ambiguous: the
-    two rails' cross-axes are antiparallel by construction, so an inverted rig
-    is indistinguishable from an upright one and the volume would extrude
-    straight down through the gripped block. Refusing is the only safe answer
-    the available inputs support.
+    An earlier version resolved "up" from a rail's own cross-axis and guarded
+    it against world +Z. That rejected an ordinary upright gripper whose rails
+    run vertically -- `col(2)` comes out horizontal for that convention -- and
+    it solved the wrong problem: which side the payload is on is gravitational,
+    not structural. Both rail conventions and any rig attitude are covered here
+    because the real rig's convention is not ours to assume.
     """
-    parents, rails, rotations, outward, rig = _tilted_rig(degrees)
-    parameters = Pzs100SelfFilterParams(
+    angle = np.deg2rad(tilt_deg)
+    cos, sin = np.cos(angle), np.sin(angle)
+    tilt = np.array([[1.0, 0.0, 0.0], [0.0, cos, -sin], [0.0, sin, cos]])
+    if rail_axis == "horizontal":
+        parents = np.array([[0.0, 0.35, 2.0], [0.0, -0.35, 2.0]])
+        tips = np.array([[0.8, 0.35, 2.0], [0.8, -0.35, 2.0]])
+        rotations = np.array(
+            [[[1.0, 0, 0], [0, 0, 1.0], [0, -1.0, 0]], [[1.0, 0, 0], [0, 0, -1.0], [0, 1.0, 0]]]
+        )
+    else:
+        parents = np.array([[0.0, 0.35, 1.6], [0.0, -0.35, 1.6]])
+        tips = np.array([[0.0, 0.35, 2.4], [0.0, -0.35, 2.4]])
+        rotations = np.array(
+            [[[0.0, 1.0, 0], [0, 0, 1.0], [1.0, 0, 0]], [[0.0, -1.0, 0], [0, 0, -1.0], [1.0, 0, 0]]]
+        )
+    parents, tips = parents @ tilt.T, tips @ tilt.T
+    rotations = np.array([tilt @ item for item in rotations])
+    params = Pzs100SelfFilterParams(
         outboard_extent_m=0.3,
         cross_rail_extent_m=0.9,
         rail_end_margin_m=0.0,
         above_exclusion_height_m=1.2,
         above_exclusion_margin_m=0.15,
     )
-    payload = (np.array([[0.5, -1.0, -0.8]]) @ rig.T).copy()
-    with pytest.raises((ValueError, RuntimeError)):
-        filter_pzs100_gripper(payload, parents, rails, rotations, outward, parameters)
+    # Below the lowest jaw geometry in WORLD terms, which is where a clamped
+    # block hangs whatever the rig is doing.
+    lowest = min(parents[:, 2].min(), tips[:, 2].min())
+    payload = np.array([[parents[:, 0].mean(), parents[:, 1].mean(), lowest - 1.5]])
 
+    kept, removed, _boxes = filter_pzs100_gripper(
+        payload,
+        parent_positions=parents,
+        rail_positions=tips,
+        parent_rotations=rotations,
+        outward_axes_parent=np.array([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]]),
+        params=params,
+    )
 
-@pytest.mark.parametrize("degrees", [0.0, 30.0, 55.0])
-def test_above_gripper_exclusion_still_works_within_the_upright_limit(degrees: float) -> None:
-    parents, rails, rotations, outward, rig = _tilted_rig(degrees)
-    parameters = Pzs100SelfFilterParams(
-        outboard_extent_m=0.3,
-        cross_rail_extent_m=0.9,
-        rail_end_margin_m=0.0,
-        above_exclusion_height_m=1.2,
-        above_exclusion_margin_m=0.15,
-    )
-    payload = np.array([[0.5, -1.0, -0.8]]) @ rig.T
-    boom = np.array([[0.5, -1.0, 1.2]]) @ rig.T
-    kept, removed, _ = filter_pzs100_gripper(
-        np.ascontiguousarray(np.vstack([payload, boom])),
-        parents,
-        rails,
-        rotations,
-        outward,
-        parameters,
-    )
-    kept = np.asarray(kept)
-    assert removed == 1
-    assert any(np.allclose(point, payload[0]) for point in kept), "payload must survive"
-    assert not any(np.allclose(point, boom[0]) for point in kept), "boom must be removed"
+    assert removed == 0, "the clamped payload must never be removed"
+    np.testing.assert_allclose(kept, payload)

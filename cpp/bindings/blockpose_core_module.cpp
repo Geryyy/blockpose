@@ -386,6 +386,7 @@ nb::dict filter_pzs100_gripper_from_numpy(
   bool has_above = false;
   blockpose::core::Points kept;
   std::size_t removed = 0U;
+  std::string above_error;
   {
     nb::gil_scoped_release release;
     detailed_boxes = blockpose::core::make_pzs100_gripper_filter_boxes(rails, parameters);
@@ -396,9 +397,18 @@ nb::dict filter_pzs100_gripper_from_numpy(
     // configured: default parameters (height 0.0) must reproduce the
     // pre-existing rail-only filtering behaviour exactly.
     if (parameters.above_exclusion_height_m > 0.0) {
-      above_box = blockpose::core::make_pzs100_above_gripper_exclusion_box(rails, parameters);
-      has_above = true;
-      boxes.push_back(above_box);
+      // The above-gripper volume is an enhancement over the jaw boxes, so a
+      // rig it cannot describe must cost only that volume. Letting the throw
+      // escape here would disable the whole self-filter -- including the jaw
+      // masking, which needs none of this geometry and was working before the
+      // volume existed. Report the reason instead of failing the call.
+      try {
+        above_box = blockpose::core::make_pzs100_above_gripper_exclusion_box(rails, parameters);
+        has_above = true;
+        boxes.push_back(above_box);
+      } catch (const std::invalid_argument & error) {
+        above_error = error.what();
+      }
     }
     kept = blockpose::core::remove_points_inside_oriented_boxes(input, boxes, &removed);
   }
@@ -406,6 +416,7 @@ nb::dict filter_pzs100_gripper_from_numpy(
   output["points"] = points_to_numpy(kept);
   output["input_count"] = input.size();
   output["removed_count"] = removed;
+  output["above_exclusion_error"] = above_error;
   return output;
 }
 
