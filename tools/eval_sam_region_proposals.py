@@ -45,7 +45,7 @@ import argparse
 import json
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -57,7 +57,9 @@ if str(REPO_ROOT) not in sys.path:
 
 from blockpose.annotation_candidates import _run_detection  # noqa: E402
 from blockpose.annotation_tool import AnnotationDocument, EditableTarget  # noqa: E402
+from blockpose.core_types import DetectionParameters  # noqa: E402
 from blockpose.evaluate import match_detections  # noqa: E402
+from blockpose.experiment_record import experiment_stamp  # noqa: E402
 from blockpose.io import (  # noqa: E402
     CameraModel,
     load_camera_model,
@@ -219,6 +221,7 @@ def sam_candidates_for_snapshot(
     mask_min_area_px: int,
     mask_max_area_frac: float,
     mask_params: MaskSelectionParams,
+    detection_params: DetectionParameters | None = None,
 ) -> tuple[list[PooledCandidate], dict]:
     """Run the SAM2-grid-proposal -> mask-select -> existing-fitter pipeline.
 
@@ -245,7 +248,7 @@ def sam_candidates_for_snapshot(
         if not selection.success:
             continue
         survived_projection += 1
-        hypotheses = _run_detection(points[selection.indices], sensor_origin)
+        hypotheses = _run_detection(points[selection.indices], sensor_origin, detection_params)
         for hypothesis in hypotheses:
             if hypothesis.fate != "final":
                 continue
@@ -334,6 +337,7 @@ def evaluate_snapshot(
     dedup_radius: float,
     match_dist: float,
     mask_params: MaskSelectionParams,
+    detection_params: DetectionParameters | None = None,
 ) -> SnapshotResult:
     d = dataset_root / name
     tf = load_tf_snapshot(d / "tf.yaml")
@@ -348,7 +352,7 @@ def evaluate_snapshot(
     # Equivalent to `compute_candidate_sources(...).pcl` with no gripper-exclusion
     # geometry: that helper's `pcl` output is exactly `_run_detection` filtered to
     # `fate == "final"`, gripper-rejection is a no-op when no boxes are supplied.
-    raw_hypotheses = _run_detection(points, sensor_origin)
+    raw_hypotheses = _run_detection(points, sensor_origin, detection_params)
     baseline_candidates = [
         PooledCandidate(h.id, h.pose.position, h.pose.rotation, h.pose.dims, float(h.score), "pcl")
         for h in raw_hypotheses
@@ -367,6 +371,7 @@ def evaluate_snapshot(
         mask_min_area_px=mask_min_area_px,
         mask_max_area_frac=mask_max_area_frac,
         mask_params=mask_params,
+        detection_params=detection_params,
     )
     sam_wall_time_s = time.perf_counter() - started
 
@@ -584,6 +589,22 @@ def main() -> int:
         "--dedup-radius", type=float, default=0.25, help="pooling de-dup radius, meters"
     )
     parser.add_argument("--match-dist", type=float, default=0.30, help="GT match radius, meters")
+    # Pinned, not inherited: this tool used to call `_run_detection`, which
+    # hardcoded `DetectionParameters()`. When cluster_max_extent_xy shipped at
+    # 2.25 the recorded report stopped reproducing from its own command and
+    # nothing said why. Defaults here track the shipped values.
+    parser.add_argument(
+        "--cluster-max-extent-xy",
+        type=float,
+        default=DetectionParameters().cluster_max_extent_xy,
+        help="pinned detector gate; record it with any result",
+    )
+    parser.add_argument(
+        "--dbscan-eps",
+        type=float,
+        default=DetectionParameters().dbscan_eps,
+        help="pinned detector clustering radius",
+    )
     parser.add_argument("--model-id", type=str, default="facebook/sam2.1-hiera-small")
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument(
@@ -598,6 +619,11 @@ def main() -> int:
     if args.limit is not None:
         manifest = manifest[: args.limit]
 
+    detection_params = replace(
+        DetectionParameters(),
+        cluster_max_extent_xy=args.cluster_max_extent_xy,
+        dbscan_eps=args.dbscan_eps,
+    )
     proposer = Sam2GridProposer(model_id=args.model_id, device=args.device)
     mask_params = MaskSelectionParams()
 
@@ -617,10 +643,25 @@ def main() -> int:
                 dedup_radius=args.dedup_radius,
                 match_dist=args.match_dist,
                 mask_params=mask_params,
+                detection_params=detection_params,
             )
         )
 
+    stamp = experiment_stamp(
+        detector=detection_params,
+        grid=args.grid,
+        match_dist=args.match_dist,
+        dedup_radius=args.dedup_radius,
+        mask_min_area_px=args.mask_min_area_px,
+        mask_max_area_frac=args.mask_max_area_frac,
+        model_id=args.model_id,
+    )
     report = build_report(results, args)
+    report = (
+        f"<!-- provenance: commit {stamp['git_commit']}, "
+        f"cluster_max_extent_xy={detection_params.cluster_max_extent_xy}, "
+        f"dbscan_eps={detection_params.dbscan_eps} -->\n" + report
+    )
     print(report)
     if args.report_out is not None:
         args.report_out.write_text(report)
@@ -629,6 +670,7 @@ def main() -> int:
         args.json_out.write_text(
             json.dumps(
                 {
+                    "provenance": stamp,
                     "overall": overall,
                     "snapshots": [
                         {

@@ -9,8 +9,10 @@ import pytest
 from blockpose.annotation_candidates import (
     CandidateSourcesResult,
     SourceCandidate,
+    _run_detection,
     compute_candidate_sources,
 )
+from blockpose.core_types import DetectionParameters
 from blockpose.io import CameraModel
 from blockpose.synth import BlockSpec, SynthParams, generate_scene
 
@@ -337,3 +339,39 @@ def test_stubbed_dino_verifier_populates_reranked_field(tmp_path, monkeypatch) -
     # head always predicts a strong positive, confident score.
     assert all(item.reason == "ok" for item in result.dino_verifier_reranked)
     assert all(item.score == pytest.approx(0.2, abs=1e-3) for item in result.dino_verifier_reranked)
+
+
+def test_run_detection_honours_pinned_parameters_and_defaults_to_shipped() -> None:
+    """Experiments must be able to pin the detector, and `None` must not drift.
+
+    This function hardcoded `DetectionParameters()`. When cluster_max_extent_xy
+    shipped at 2.25, an experiment recorded at 1.5 silently stopped reproducing
+    from its own documented command and nothing in the artifact said why. The
+    parameter is what makes a recorded result re-derivable.
+
+    Synthetic rather than dataset-backed so it runs anywhere: a single wide,
+    flat slab exceeds the 1.5 m gate but not the 2.25 m one, which is exactly
+    the touching-wall geometry the gate governs.
+    """
+    from dataclasses import replace
+
+    rng = np.random.default_rng(0)
+    # Ground, so the pipeline's ground stage has a plane to find.
+    ground = np.column_stack([rng.uniform(-3, 3, 4000), rng.uniform(-3, 3, 4000), np.zeros(4000)])
+    # One slab 1.9 m across: over the 1.5 m gate, under 2.25.
+    slab = np.column_stack(
+        [rng.uniform(-0.95, 0.95, 3000), rng.uniform(-0.3, 0.3, 3000), rng.uniform(0.0, 0.6, 3000)]
+    )
+    points = np.ascontiguousarray(np.vstack([ground, slab]))
+    origin = np.array([0.0, -6.0, 3.0])
+
+    narrow = _run_detection(
+        points, origin, replace(DetectionParameters(), cluster_max_extent_xy=1.5)
+    )
+    wide = _run_detection(points, origin, replace(DetectionParameters(), cluster_max_extent_xy=3.0))
+    assert len(wide) > len(narrow), "the pinned gate must change what the detector proposes"
+
+    # `None` must follow the shipped default, not a frozen historical value.
+    shipped = _run_detection(points, origin)
+    expected = _run_detection(points, origin, DetectionParameters())
+    assert len(shipped) == len(expected)
