@@ -105,3 +105,22 @@ def test_score_matches_empty_inputs() -> None:
     gt_hit, cand_hit = score_matches([np.zeros(3)], [])
     assert gt_hit == [False]
     assert cand_hit == []
+
+
+def test_cluster_gate_ships_the_measured_value_in_both_cores() -> None:
+    """Guard the gate: at 1.5 it silently costs 11 points of recall.
+
+    `pipeline.hpp` drops any unsplit component wider than this BEFORE fitting a
+    plane to it, so blocks touching in a wall were discarded wholesale. 2.25 is
+    the knee of a plateau running to 3.5, not a tuned peak -- see
+    experiments/detector_cluster_failures.md. The Python dataclass and the C++
+    header must not drift apart, or a Python-side sweep would measure something
+    the native detector never runs.
+    """
+    from pathlib import Path
+
+    from blockpose.core_types import DetectionParameters
+
+    assert DetectionParameters().cluster_max_extent_xy == pytest.approx(2.25)
+    header = Path("cpp/include/blockpose/core/proposals.hpp").read_text(encoding="utf-8")
+    assert "cluster_max_extent_xy{2.25}" in header, "C++ default drifted from the Python one"

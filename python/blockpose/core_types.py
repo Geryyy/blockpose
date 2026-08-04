@@ -3,6 +3,7 @@
 These classes are transport values only; all discovery, scoring, and
 refinement are implemented by :mod:`blockpose._core`.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -16,6 +17,7 @@ from blockpose.pose import BLOCK_DIMS, BlockPose
 @dataclass
 class DetectionParameters:
     """Compatibility input for the explicitly supported native parameters."""
+
     voxel_size: float = 0.04
     ground_thickness: float = 0.15
     ground_ransac_dist: float = 0.05
@@ -26,7 +28,15 @@ class DetectionParameters:
     cluster_min_size: int = 30
     cluster_max_size: int = 50000
     cluster_min_extent_xy: float = 0.3
-    cluster_max_extent_xy: float = 1.5
+    # 2.25, not 1.5: pipeline.hpp drops any unsplit component wider than this
+    # BEFORE fitting a plane to it, and blocks touching in a wall merge into
+    # exactly such a component -- measured over 62 annotated blocks, one in an
+    # over-gate component was missed 91% of the time against 25% otherwise.
+    # Raising it to 2.25 gives recall 62.9% -> 74.2% AND precision 75.0% ->
+    # 78.0%, losing no previously-detected block. The result is flat from 2.25
+    # to 3.5, so this is the knee: the gate was rejecting valid clusters rather
+    # than guarding against merged ones. See experiments/detector_cluster_failures.md.
+    cluster_max_extent_xy: float = 2.25
     region_max_extent_xy: float = 3.0
     cluster_min_extent_z: float = 0.3
     cluster_max_extent_z: float = 3.5

@@ -104,6 +104,49 @@ real signal to work with, and well below the 0.9 m block length, so the blocks g
 Purely geometric splitting is hard at this spacing; RGB (mortar lines, edges, colour discontinuity)
 separates these visually even where the point cloud is one continuous surface.
 
+## Applied
+
+`cluster_max_extent_xy` is now 2.25 in both `python/blockpose/core_types.py` and
+`cpp/include/blockpose/core/proposals.hpp`, guarded by a test that fails if either drifts.
+Re-measured after the change: recall 46/62 (74%), precision 46/59 (78%).
+
+## Which fitter, and where the remaining gap is
+
+A follow-up disambiguated two things that were being conflated. On the SAME perfect (GT-box) crop
+of each missed block:
+
+| regions | fitter | recovers |
+| --- | --- | --- |
+| perfect crop | `snap_block_to_cloud` (seeded) | 17/23 |
+| perfect crop | `_run_detection` (full pipeline) | 11/23 |
+| SAM grid-6 mask | `snap_block_to_cloud` | 7/23 |
+| SAM grid-8 mask | `_run_detection` | 6/23 |
+
+Two conclusions, one of which corrects an earlier reading of the mask-funnel numbers:
+
+- The seeded fitter is the better one for region-based fitting, but only by ~1 block once the
+  regions come from SAM rather than ground truth.
+- **Region quality dominates.** Going from SAM regions to perfect regions is worth 10 blocks;
+  swapping the fitter is worth 1. An earlier note claiming "the bottleneck is the fitter's
+  strictness, not proposal quality" was wrong, and is retracted here.
+
+Notably the detector produces ZERO raw hypotheses on 12 of 23 perfect single-block crops, despite
+a median 617 points and 76% of them surviving the ground stage. Cropping is not the problem
+(`cluster_min_size` is never breached) and adding a 1.6 m skirt of context makes it worse, 7/23.
+Whatever suppresses the proposal stage on an isolated block is unexplained and worth its own study.
+
+## Combined configuration
+
+| configuration | recall | precision |
+| --- | --- | --- |
+| original baseline | 63% | 75% |
+| gate 2.25 (shipped) | 74% | 78% |
+| gate 2.25 + SAM regions -> seeded fitter | 79% | 70% |
+
+The gate alone is the only change that improves both metrics, which is why it is the one applied.
+Pooling SAM regions buys 3 more blocks for 8 points of precision; worth enabling when recall
+matters more, but it is not a default.
+
 ## What was not tested
 
 - **No held-out split.** The grid was scored on the same 62 blocks it is recommended from. With one
