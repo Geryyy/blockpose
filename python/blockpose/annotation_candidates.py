@@ -76,7 +76,9 @@ class CandidateSourcesResult:
 
 
 def _run_detection(
-    points: np.ndarray, sensor_origin: np.ndarray | None
+    points: np.ndarray,
+    sensor_origin: np.ndarray | None,
+    params: DetectionParameters | None = None,
 ) -> tuple[TraceHypothesis, ...]:
     """Raw hypotheses for one point set, or `()` for degenerate/failing input.
 
@@ -86,6 +88,12 @@ def _run_detection(
     the total score weight, formerly in `detection.py::_SCORE_WEIGHTS`) are
     computed instead of hard-zeroed. Falls back to `sensor_context=None` only
     when no origin is available at all -- callers should always pass one.
+
+    `params` defaults to `DetectionParameters()`. Experiments MUST pass it
+    explicitly: this function used to hardcode the defaults, so when
+    `cluster_max_extent_xy` shipped at 2.25 an already-written report measured
+    at 1.5 silently stopped reproducing from its own documented command. A
+    recorded result is only meaningful next to the parameters that produced it.
     """
     if len(points) < _MIN_POINTS_FOR_DETECTION:
         return ()
@@ -94,7 +102,7 @@ def _run_detection(
     )
     try:
         result = detect_blocks_detailed_cpp(
-            points, params=DetectionParameters(), sensor_context=sensor_context
+            points, params=params or DetectionParameters(), sensor_context=sensor_context
         )
     except (RuntimeError, ValueError):
         return ()
@@ -455,6 +463,7 @@ def compute_candidate_sources(
     dino_proposer_checkpoint: Path | None = None,
     dino_verifier_checkpoint: Path | None = None,
     above_gripper_boxes: dict[str, np.ndarray] | None = None,
+    detection_params: DetectionParameters | None = None,
 ) -> CandidateSourcesResult:
     """Compute candidate blocks from all four sources for one snapshot.
 
@@ -490,7 +499,7 @@ def compute_candidate_sources(
         )
 
     raw_hypotheses = _reject_hypotheses_above_gripper(
-        _run_detection(points, sensor_origin), above_gripper_boxes
+        _run_detection(points, sensor_origin, detection_params), above_gripper_boxes
     )
     pcl = _pcl_candidates(raw_hypotheses)
 
