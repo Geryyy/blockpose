@@ -58,7 +58,10 @@ def _evaluation_targets(snapshot: Path):
 
 
 def _raw_candidates(snapshot: Path, T_world_cloud: np.ndarray) -> list[tuple[str, object]]:
-    points, _ = load_snapshot(snapshot, T_world_cloud=T_world_cloud)
+    # Ground truth for this export comes from annotations.yaml (_evaluation_targets),
+    # never from this call's discarded second return value, so a snapshot with no
+    # legacy registrations.yaml (e.g. data/seibersdorf_dataset) is not a gate here.
+    points, _ = load_snapshot(snapshot, T_world_cloud=T_world_cloud, require_registrations=False)
     result = detect_blocks_detailed_cpp(
         points,
         params=DetectionParameters(),

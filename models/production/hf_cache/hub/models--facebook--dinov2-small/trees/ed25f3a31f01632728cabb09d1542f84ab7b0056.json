@@ -1,0 +1,35 @@
+{
+ "format_version": 1,
+ "files": {
+  ".gitattributes": {
+   "size": 1519,
+   "blob_id": "a6344aac8c09253b3b630fb776ae94478aa0275b"
+  },
+  "README.md": {
+   "size": 3033,
+   "blob_id": "6b3380957df44ed203ec1d5102e1245accbbbba9"
+  },
+  "config.json": {
+   "size": 547,
+   "blob_id": "5664b325e6258d3960fad8c4c1cff958f3cc2272"
+  },
+  "model.safetensors": {
+   "size": 88249960,
+   "blob_id": "e13b8fec08e8dd9ac531165e7c8c0ec7d467952a",
+   "lfs_sha256": "ae1e99fcefd534ed978cdeb8326f08030c96e28b7a81ffcbc98a857c84d14be1",
+   "lfs_size": 88249960,
+   "xet_hash": "58591664a535b604df1061ec047ff77f564b950071c0f9045f4bb6bbea71c30f"
+  },
+  "preprocessor_config.json": {
+   "size": 436,
+   "blob_id": "ff5b47c2edcd1d3556d63c01a65d93b58b9efce1"
+  },
+  "pytorch_model.bin": {
+   "size": 88297097,
+   "blob_id": "83d462dfc3bd45696fe8a94381a605a069a47862",
+   "lfs_sha256": "1051e25b2ed69ddad24f3c41e7b6eed6e7f7d012103ea227e47eb82e87dc2050",
+   "lfs_size": 88297097,
+   "xet_hash": "e3c1db83916c336fa676a11460ba1a8e41a24bb6cf84e89ae91b960ff00b985a"
+  }
+ }
+}
