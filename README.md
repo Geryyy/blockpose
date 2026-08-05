@@ -9,7 +9,12 @@ trains and evaluates optional RGB evidence modules against captured rosbags.
 
 - [`docs/dino-rgb-prior-ros-integration.md`](docs/dino-rgb-prior-ros-integration.md)
   is the authoritative architecture and integration contract for the optional
-  DINO RGB proposer and verifier.
+  DINO RGB proposer and verifier. **Its `ScoreRgbCandidates` contract is known
+  to encode a falsified usage of `dino_verifier` — see Phase 4 of the
+  readiness plan below before implementing against it.**
+- [`docs/production-readiness-plan.md`](docs/production-readiness-plan.md) is
+  the current plan for getting those RGB priors production-ready, with the
+  measured state, the open defects, and explicit exit gates and kill criteria.
 - [`docs/annotation-tool.md`](docs/annotation-tool.md) explains how to review
   scene-discovery captures and create ground truth.
 - [`docs/ENVIRONMENT.md`](docs/ENVIRONMENT.md) explains the Docker and local
