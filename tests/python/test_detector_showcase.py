@@ -41,7 +41,11 @@ def test_showcase_is_executed_and_covers_every_evidence_stage() -> None:
         "Retired as a candidate",
         "Composed pipeline",
         "eval_dino_proposer_pooled",
-        "uniform",  # the dino_verifier non-discrimination finding, not swept under the rug
+        # The two bugs that invalidated the first version of this panel, and the
+        # instance-separation finding -- all kept visible, never quietly amended.
+        "arithmetic no-op",
+        "strictly monotonic",
+        "gap-only",
     ):
         assert required in flat_text
 
