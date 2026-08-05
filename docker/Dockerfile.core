@@ -95,6 +95,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   # image/video dataset preparation
   ffmpeg \
   \
+  # blockpose_core (cpp/) build dependencies
+  #
+  # libeigen3-dev provides the CMake package cpp/CMakeLists.txt requires
+  # unconditionally -- find_package(Eigen3 3.3 REQUIRED NO_MODULE) fails the
+  # configure step for every build of the core, with or without Python or
+  # vision, when it is absent. That in turn means tools/check_cpp_consumer.sh
+  # (the pre-ship gate for the ROS-facing surface) cannot run at all, and the
+  # gitignored python/blockpose/_core*.so cannot be rebuilt from a clean
+  # clone. This package is header-only (no .so to link at runtime), so unlike
+  # libopencv-dev below there is no separate "pip package doesn't provide the
+  # system lib" failure mode to guard against -- just the missing headers.
+  libeigen3-dev \
+  # libgtest-dev provides the CMake package cpp/CMakeLists.txt's
+  # find_package(GTest REQUIRED) needs, which cpp/'s unit tests
+  # (BLOCKPOSE_CORE_BUILD_TESTING=ON, the default) link against -- the `ctest`
+  # workflow README.md documents under "Portable C++ core" needs this to
+  # configure at all. tools/check_cpp_consumer.sh deliberately builds with
+  # testing OFF and does not need this package (see that script's own
+  # comment), so this is about being able to run the unit tests locally, not
+  # about the ship-check gate.
+  libgtest-dev \
+  \
   # Open3D / OpenCV / X11 / OpenGL runtime
   #
   # libopencv-dev (not just pip's opencv-python) is required: the compiled
@@ -103,6 +125,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   # bundled, privately-namespaced runtime does not provide. Without this,
   # `import blockpose._core` fails with a bare "libopencv_calib3d.so.406:
   # cannot open shared object file" -- see models/production/README.md.
+  # It is also what cpp/CMakeLists.txt's optional blockpose::vision target
+  # (BLOCKPOSE_VISION_BUILD, find_package(OpenCV COMPONENTS core imgproc
+  # calib3d)) needs to build at all -- without it, that target is silently
+  # skipped ("OpenCV not found: blockpose::vision will not be built") rather
+  # than failing the configure, which made the gap easy to miss.
   libopencv-dev \
   libdbus-1-3 \
   libegl1 \

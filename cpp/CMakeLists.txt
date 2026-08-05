@@ -1,5 +1,26 @@
+# VERSION 0.2.0: bumped from 0.1.0 because the core's behaviour and public
+# surface changed materially since that tag was implied -- the cluster gate
+# moved 1.5 -> 2.25 (a detection-behaviour change, see
+# experiments/detector_cluster_failures.md), the PZS100 gripper self-filter,
+# annotation_snap and per-stage diagnostics were added. All additive/behaviour
+# changes, no removed or renamed symbols on the blockpose::core interface, so
+# this is a minor bump, not a major one -- and it stays below 1.0.0 because
+# the shipped detector (46/62 centre recall, 78% precision on the
+# Seibersdorf set, see docs/production-readiness-plan.md) is not yet claiming
+# production-grade accuracy; 1.0.0 would overstate that.
+#
+# Do NOT read this bump as a machine-enforced incompatibility signal. Measured,
+# not assumed: write_basic_package_version_file() below uses SameMajorVersion,
+# and CMake's generated SameMajorVersion file compares only the major field
+# with no 0.x special case, so a downstream `find_package(blockpose_core 0.1
+# REQUIRED)` still resolves happily against 0.2.0 (verified against a real
+# install of this package: it configured and reported
+# blockpose_core_VERSION=0.2.0). The version string is therefore documentation
+# for a human re-pinning after the parameter defaults moved, not a build-time
+# guard. If we ever want the build to refuse an out-of-date pin, that requires
+# changing COMPATIBILITY here -- it is not what the bump alone buys.
 cmake_minimum_required(VERSION 3.16)
-project(blockpose_core VERSION 0.1.0 LANGUAGES CXX)
+project(blockpose_core VERSION 0.2.0 LANGUAGES CXX)
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
