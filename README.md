@@ -7,6 +7,9 @@ trains and evaluates optional RGB evidence modules against captured rosbags.
 
 ## Start here
 
+- [`docs/STATUS.md`](docs/STATUS.md) — **read this first.** Current measured
+  state, what ships, what is deliberately excluded, and the pick-up point for
+  ROS 2 integration.
 - [`docs/dino-rgb-prior-ros-integration.md`](docs/dino-rgb-prior-ros-integration.md)
   is the authoritative architecture and integration contract for the optional
   DINO RGB proposer and verifier. **Its `ScoreRgbCandidates` contract is known
