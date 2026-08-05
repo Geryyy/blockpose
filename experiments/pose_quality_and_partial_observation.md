@@ -318,3 +318,54 @@ enough to pose it.** That is the region-proposal problem, measured earlier at
 7 of 23 recovered with SAM grid regions. The gripper prior does not shortcut
 it. The orientation correlation is still real and may still be useful as a
 tie-breaker once a candidate exists, but it cannot generate the candidate.
+
+## The occluded-visibilities choice, resolved: include them
+
+The previous commit made `--occluded-visibilities` a real flag on
+`export.py` but did not run training -- the GPU was unavailable mid-session.
+It now is. Both arms (default: exclude `heavy_occlusion`/`unknown`; `none`:
+include every approved block) were trained on the identical 19-fold
+leave-one-scenario-out split (folds 12/13/14/16/20 have no exported snapshot
+at all -- annotation-incomplete, unrelated to occlusion -- and are excluded
+from both arms identically), pooled to one held-out prediction per block
+across all folds.
+
+**A measurement bug made the first pass of this comparison meaningless, and
+is worth recording.** `report.py` computed each snapshot's recall denominator
+via `approved_targets(annotations)` with no override, so it silently used
+`export.py`'s own default (exclude `heavy_occlusion`/`unknown`) regardless of
+which arm's checkpoint was being scored. Both arms therefore first measured
+identical recall (0.85 vs 0.83) on the same 47 easy blocks -- the 15 blocks
+either arm was actually trying to move never entered the denominator. Fixed
+by giving `report.py` the same `--occluded-visibilities` flag as `export.py`,
+threaded into `_block_masks_for_sample`, plus a `recall_by_visibility`
+breakdown in the report so this class of result is visible directly instead
+of requiring a second bug to notice its absence.
+
+Rescored both checkpoints against the full 62-block set:
+
+| visibility | blocks | excluded-arm recall | inclusive-arm recall |
+| --- | ---: | ---: | ---: |
+| full | 23 | 22/23 (0.96) | 22/23 (0.96) |
+| partial | 24 | 18/24 (0.75) | 17/24 (0.71) |
+| heavy_occlusion | 10 | 2/10 (0.20) | **4/10 (0.40)** |
+| unknown | 5 | 4/5 (0.80) | 3/5 (0.60) |
+| **overall** | 62 | 46/62 (0.742) | 46/62 (0.742) |
+| false positives (pooled) | -- | 8 | **2** |
+
+Overall recall is identical -- both arms recover 46 of 62 -- because the
+inclusive arm's gain on `heavy_occlusion` (+2 blocks) is offset by a loss of
+one `partial` and one `unknown` block. But `heavy_occlusion` is exactly the
+class the region head exists to rescue (the geometric detector's own gate
+already handles `full`/`partial` reasonably), and there recall doubles. False
+positives fall from 8 to 2 across the same 19 folds, a larger and cleaner
+effect than the recall swing.
+
+Both counts are small (10 and 5 blocks) and this is one dataset of 24 scenes,
+so treat the exact ratios as noisy. But the direction is consistent with the
+hypothesis that motivated the flag: excluding `heavy_occlusion`/`unknown` from
+the union target means the head never sees a positive example of the one
+class it is meant to rescue. **Decision: switch the default to
+`--occluded-visibilities none`** and re-export/retrain the deployed checkpoint
+on that basis; keep the old default available for anyone re-running this
+comparison.

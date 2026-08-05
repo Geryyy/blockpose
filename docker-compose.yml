@@ -17,6 +17,13 @@ services:
       # checkpoint lands in the container's writable layer, which --rm deletes,
       # so every annotator launch re-downloads ~180 MB.
       - model-cache:/opt/model-cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     environment:
       - BLOCKPOSE_DATASET=/data
       # Hugging Face and torch.hub both honour these; pointing them at the

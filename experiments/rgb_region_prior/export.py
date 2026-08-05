@@ -22,20 +22,18 @@ convex approximation of each block's silhouette (a loose box, not a tight
 segmentation) -- consistent with ``dino_proposer`` being a high-recall *region*
 proposer, never a precise mask.
 
-**Occlusion filtering.** By default, blocks annotated ``heavy_occlusion`` or
-``unknown`` visibility are excluded from the union, on the v1 grounds that
-their registered pose is least reliable exactly where RGB evidence is worst,
-so folding an uncertain box into a *hard* union target risks teaching the
-region head an incorrect footprint.
-
-That default is now a decision, not a constant: ``--occluded-visibilities``
-controls it, and ``--occluded-visibilities none`` includes every approved
-block. The trade-off is real in both directions. Excluding them removes the
-noisiest labels -- but heavily occluded blocks are precisely the ones the
-geometric detector cannot find, so excluding them means the region head never
-sees a positive example of the class it exists to rescue. On this corpus the
-choice moves 15 of 62 blocks. Run both arms and compare held-out recall rather
-than assuming either way.
+**Occlusion filtering, resolved.** ``--occluded-visibilities`` controls
+whether blocks annotated ``heavy_occlusion``/``unknown`` enter the union
+target; ``--occluded-visibilities none`` includes every approved block, and
+that is now the default. The two arms were measured against each other on
+19-fold leave-one-scenario-out cross-validation over
+``data/seibersdorf_dataset`` (see
+``experiments/pose_quality_and_partial_observation.md``): excluding them held
+overall recall flat (46/62 either way) but halved recall on exactly the class
+this head exists to rescue (``heavy_occlusion`` 4/10 including them vs. 2/10
+excluding), and excluding them roughly quadrupled false positives (8 vs. 2).
+Pass ``--occluded-visibilities heavy_occlusion,unknown`` to reproduce the old
+default.
 
 Run inside the core devcontainer (no torch needed):
 
@@ -303,10 +301,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--snapshots-dir", type=Path, default=DEFAULT_SNAPSHOTS)
     parser.add_argument(
         "--occluded-visibilities",
-        default=",".join(OCCLUDED_VISIBILITIES),
+        default="none",
         help="Comma-separated visibility labels to EXCLUDE from the union target, or "
-        "'none' to include every approved block. Default preserves v1 behaviour; "
-        "'none' is the arm that lets the head learn the occluded class it exists to rescue.",
+        "'none' (the default) to include every approved block -- measured better in "
+        "experiments/pose_quality_and_partial_observation.md. Pass "
+        f"'{','.join(OCCLUDED_VISIBILITIES)}' to reproduce the old (v1) default.",
     )
     parser.add_argument("--calibration", type=Path, default=DEFAULT_CALIBRATION)
     parser.add_argument("--export-root", type=Path, required=True)
