@@ -46,7 +46,7 @@ Every remaining accuracy claim is gated on bag data, not on this corpus.
 
 | work | cost | measured or expected benefit | verdict |
 | --- | --- | --- | --- |
-| Ship geometry core to ROS 2 + bag eval loop | **low** — the C++ core already builds, installs and has a consumer check (`tools/check_cpp_consumer.sh`) | unblocks all validation; 44/62 strict, 78% precision available today | **do first** |
+| Ship geometry core to ROS 2 + bag eval loop | **low** — the C++ core already builds, installs and has a consumer check (`tools/check_cpp_consumer.sh`) | unblocks all validation; 44/62 strict, 86.8% precision available today | **do first** |
 | Gap-only pooling policy | **~zero** — policy change, already implemented in the eval tool | +1 strict, 0 regressions; makes the score-comparability defect structurally impossible | **do, free** |
 | Seam-channel retrain (1b) | **medium** — one extra conv channel, labels free from `block_silhouette_mask`, same data, same frozen backbone | all 14 misses are in merged regions; isolated blocks are found 17/17 | **do second, validate on bags** |
 | C++ 2-D region ingestion | **medium-high** — does not exist; `VisualScorer` is a `Pose → score` hook, not a region → points → fit path | required for the proposer to reach the detector at all | **required for 1b to ship** |
@@ -58,7 +58,7 @@ Every remaining accuracy claim is gated on bag data, not on this corpus.
 ## Track A — ship what works, and close the evidence loop (priority)
 
 The geometry detector *is* the product today: 46/62 centre, **44/62 strict**,
-78% precision, with the 2.25 m cluster gate, the PZS100 gripper self-filter and
+86.8% precision, with the 2.25 m cluster gate, the PZS100 gripper self-filter and
 the ROI-context fix all in the C++ core. It has no RGB dependency and no GPU
 dependency. Getting it into ROS 2 lets real bags produce the evidence every
 other decision is waiting on.
@@ -72,7 +72,8 @@ other decision is waiting on.
   `tools/evaluate_detector_snapshots.py` is the "snapshots in, scored report
   out" tool (per-scene and per-visibility, pinned parameters, honest health
   section; manifest optional so a fresh bag export works). It reproduces the
-  recorded baseline exactly: 46/62 centre, 44/62 strict, 46/59 precision.
+  recorded baseline exactly, and now applies the gripper self-filter the ROS
+  adapter uses: 46/62 centre, 44/62 strict, 46/53 (86.8%) precision.
   `tools/build_snapshot_manifest.py` generates the manifest the corpus file
   claimed was regenerable but was not, reproducing the committed selection
   exactly. `tools/record_reference_bag.sh` is no longer pinned to one

@@ -77,6 +77,7 @@ from collections import defaultdict
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+import numpy as np
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -84,6 +85,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from blockpose.annotation_candidates import _run_detection  # noqa: E402
+from blockpose.annotation_preprocess import (  # noqa: E402
+    filter_pzs100_gripper,
+    load_pzs100_self_filter_config,
+    pzs100_self_filter_available,
+)
 from blockpose.annotation_tool import AnnotationDocument, EditableTarget  # noqa: E402
 from blockpose.core_types import DetectionParameters  # noqa: E402
 from blockpose.evaluate import match_detections  # noqa: E402
@@ -187,6 +193,10 @@ class SnapshotResult:
     matched_gt: set[int]  # indices into `gt`, centre match
     strict_gt: set[int]  # indices into `gt`, strict match (subset of matched_gt)
     matched_det: set[int]  # indices into `detections`, centre match (for precision)
+    gripper_removed: int = 0
+    # None when the gripper self-filter ran; a reason string when this snapshot
+    # was scored UNFILTERED, so a mixed run is visible rather than averaged.
+    gripper_unfiltered_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -196,18 +206,78 @@ class SnapshotFailure:
     reason: str
 
 
+DEFAULT_GRIPPER_FILTER_CONFIG = REPO_ROOT / "config" / "pzs100_gripper_filter.yaml"
+
+
+def apply_gripper_self_filter(points, tf, profile):
+    """Remove the robot's own gripper returns, as the ROS adapter does.
+
+    Returns ``(points, removed, reason)``. ``reason`` is None on success and a
+    short explanation when the filter could not run, so the caller can report
+    the snapshot as scored-unfiltered rather than silently mixing the two.
+
+    **Why this is on by default.** `filter_pzs100_gripper` ships in the C++
+    core and is applied by the ROS adapter and `tools/annotate_snapshot.py`,
+    but this evaluation did not call it, so every recorded number described a
+    detector fed a cloud that still contained the gripper. Measured over the
+    25 annotated snapshots: filtering removes 42,176 points and eliminates 6
+    detections at ZERO recall cost -- precision 78.0% -> 86.8%, recall
+    byte-identical. The unfiltered number understated production by ~9 points.
+    See experiments/gripper_filter_in_evaluation.md.
+    """
+    if profile is None:
+        return points, 0, "gripper filter disabled"
+    try:
+        parents, rails, rotations, outward = [], [], [], []
+        for rail in profile.rails:
+            world_parent = tf.lookup(tf.reference_frame, rail.parent_frame)
+            world_rail = tf.lookup(tf.reference_frame, rail.rail_frame)
+            parents.append(world_parent[:3, 3])
+            rails.append(world_rail[:3, 3])
+            rotations.append(world_parent[:3, :3])
+            outward.append(rail.outward_axis_parent)
+        filtered, removed, _ = filter_pzs100_gripper(
+            points,
+            np.asarray(parents, dtype=np.float64),
+            np.asarray(rails, dtype=np.float64),
+            np.asarray(rotations, dtype=np.float64),
+            np.asarray(outward, dtype=np.float64),
+            profile.parameters,
+        )
+        return filtered, int(removed), None
+    except (ImportError, KeyError, OSError, TypeError, ValueError) as error:
+        # Never fail the run: a snapshot without rail TF is still scorable, it
+        # is just scored unfiltered, and the report must say which ones were.
+        return points, 0, f"{type(error).__name__}: {error}"
+
+
+def load_gripper_profile(path, enabled):
+    """Load the PZS100 profile, or None with a reason when unavailable."""
+    if not enabled:
+        return None, "disabled by --no-gripper-filter"
+    available, reason = pzs100_self_filter_available()
+    if not available:
+        return None, f"native filter unavailable: {reason}"
+    profile = load_pzs100_self_filter_config(path)
+    if not profile.enabled:
+        return None, f"profile {path} is disabled"
+    return profile, None
+
+
 def evaluate_snapshot(
     scene: str,
     name: str,
     dataset_root: Path,
     detection_params: DetectionParameters,
     match_dist: float,
+    gripper_profile=None,
 ) -> SnapshotResult:
     d = dataset_root / name
     tf = load_tf_snapshot(d / "tf.yaml")
     points, _ = load_snapshot(
         d, DEFAULT_TRANSFORM_CONFIG, T_world_cloud=tf.T_world_cloud, require_registrations=False
     )
+    points, gripper_removed, gripper_reason = apply_gripper_self_filter(points, tf, gripper_profile)
     doc = AnnotationDocument.load(d / "annotations.yaml")
     gt = approved_targets(doc)
     sensor_origin = tf.T_world_cloud[:3, 3]
@@ -236,6 +306,8 @@ def evaluate_snapshot(
         matched_gt=matched_gt,
         strict_gt=strict_gt,
         matched_det=matched_det,
+        gripper_removed=gripper_removed,
+        gripper_unfiltered_reason=gripper_reason,
     )
 
 
@@ -362,6 +434,32 @@ def build_report(
         lines.append(f"| {visibility} | {total} | {_rate(matched, total)} |")
     lines.append("")
 
+    lines.append("## Gripper self-filter")
+    lines.append("")
+    if getattr(args, "no_gripper_filter", False):
+        lines.append(
+            "**NOT APPLIED** (`--no-gripper-filter`). These numbers describe a cloud "
+            "still containing the robot's own gripper returns, which is NOT the path "
+            "the ROS adapter runs. Precision is understated by roughly 9 points; see "
+            "`experiments/gripper_filter_in_evaluation.md`."
+        )
+    else:
+        gripper_unfiltered = [r for r in results if r.gripper_unfiltered_reason is not None]
+        removed = sum(r.gripper_removed for r in results)
+        lines.append(
+            f"Applied (`filter_pzs100_gripper`, as the ROS adapter does): {removed} points "
+            f"removed across {len(results) - len(gripper_unfiltered)} of {len(results)} snapshots."
+        )
+        if gripper_unfiltered:
+            lines.append("")
+            lines.append(
+                f"**{len(gripper_unfiltered)} snapshot(s) were scored UNFILTERED** because the "
+                "filter could not run; they are still in the totals above, so this run mixes "
+                "both paths:"
+            )
+            for r in gripper_unfiltered:
+                lines.append(f"- `{r.name}` -- {r.gripper_unfiltered_reason}")
+    lines.append("")
     lines.append("## Report health")
     lines.append("")
     if skipped:
@@ -445,6 +543,15 @@ def main() -> int:
     )
     parser.add_argument("--match-dist", type=float, default=0.30)
     parser.add_argument(
+        "--no-gripper-filter",
+        action="store_true",
+        help="Score the raw cloud, WITHOUT the PZS100 gripper self-filter the ROS "
+        "adapter applies. Reproduces this repo's pre-correction numbers (precision "
+        "78.0% instead of 86.8%, recall identical); see "
+        "experiments/gripper_filter_in_evaluation.md. Not the production path.",
+    )
+    parser.add_argument("--gripper-filter-config", type=Path, default=DEFAULT_GRIPPER_FILTER_CONFIG)
+    parser.add_argument(
         "--cluster-max-extent-xy", type=float, default=DetectionParameters().cluster_max_extent_xy
     )
     parser.add_argument("--dbscan-eps", type=float, default=DetectionParameters().dbscan_eps)
@@ -476,6 +583,11 @@ def main() -> int:
         cluster_max_extent_xy=args.cluster_max_extent_xy,
         dbscan_eps=args.dbscan_eps,
     )
+    gripper_profile, gripper_disabled_reason = load_gripper_profile(
+        args.gripper_filter_config, not args.no_gripper_filter
+    )
+    if gripper_disabled_reason is not None:
+        print(f"gripper self-filter NOT applied: {gripper_disabled_reason}", file=sys.stderr)
 
     results: list[SnapshotResult] = []
     failures: list[SnapshotFailure] = []
@@ -483,7 +595,14 @@ def main() -> int:
         print(f"[{i + 1}/{len(snapshots)}] {name}", file=sys.stderr)
         try:
             results.append(
-                evaluate_snapshot(scene, name, args.dataset_root, detection_params, args.match_dist)
+                evaluate_snapshot(
+                    scene,
+                    name,
+                    args.dataset_root,
+                    detection_params,
+                    args.match_dist,
+                    gripper_profile=gripper_profile,
+                )
             )
         except (FileNotFoundError, ValueError, KeyError) as exc:
             failures.append(SnapshotFailure(scene, name, str(exc)))

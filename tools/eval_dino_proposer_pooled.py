@@ -101,6 +101,15 @@ from blockpose.rgb_verifier import load_dino_verifier, score_candidate_with_dino
 
 from experiments.rgb_candidate_prior import render  # noqa: E402
 
+# Single source of truth for the gripper self-filter, rather than a second
+# copy of the rail-resolution logic: see that module's docstring for why this
+# is applied by default (the ROS adapter applies it; not applying it
+# understated precision by ~9 points).
+from tools.evaluate_detector_snapshots import (  # noqa: E402
+    apply_gripper_self_filter,
+    load_gripper_profile,
+)
+
 DEFAULT_DATASET_ROOT = REPO_ROOT / "data" / "seibersdorf_dataset"
 DEFAULT_MANIFEST = REPO_ROOT / "config" / "annotated_snapshots_seibersdorf.yaml"
 DEFAULT_TRANSFORM_CONFIG = REPO_ROOT / "config" / "transforms_pzs100_initial_pose_1.yaml"
@@ -387,12 +396,14 @@ def evaluate_snapshot(
     mask_params: MaskSelectionParams,
     detection_params: DetectionParameters | None = None,
     score_context: str = "full",
+    gripper_profile=None,
 ) -> SnapshotResult:
     d = dataset_root / name
     tf = load_tf_snapshot(d / "tf.yaml")
     points, _ = load_snapshot(
         d, DEFAULT_TRANSFORM_CONFIG, T_world_cloud=tf.T_world_cloud, require_registrations=False
     )
+    points, _removed, _unfiltered_reason = apply_gripper_self_filter(points, tf, gripper_profile)
     doc = AnnotationDocument.load(d / "annotations.yaml")
     gt = approved_targets(doc)
     rgb = load_rgb(d / "rgb.png")
@@ -610,6 +621,12 @@ def main() -> int:
         "them (60%% of the score is ray evidence a small crop cannot accrue violations against) "
         "and is kept only to reproduce the original, invalid measurement.",
     )
+    parser.add_argument(
+        "--no-gripper-filter",
+        action="store_true",
+        help="Score the raw cloud, without the PZS100 gripper self-filter the ROS "
+        "adapter applies. Reproduces this tool's pre-correction numbers.",
+    )
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--report-out", type=Path, default=None)
@@ -631,6 +648,11 @@ def main() -> int:
         args.verifier_checkpoint
     )
     mask_params = MaskSelectionParams()
+    gripper_profile, gripper_reason = load_gripper_profile(
+        REPO_ROOT / "config" / "pzs100_gripper_filter.yaml", not args.no_gripper_filter
+    )
+    if gripper_reason is not None:
+        print(f"gripper self-filter NOT applied: {gripper_reason}", file=sys.stderr)
 
     results: list[SnapshotResult] = []
     for scene, name in manifest:
@@ -652,6 +674,7 @@ def main() -> int:
                 mask_params=mask_params,
                 detection_params=detection_params,
                 score_context=args.score_context,
+                gripper_profile=gripper_profile,
             )
         )
 

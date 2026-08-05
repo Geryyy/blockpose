@@ -36,10 +36,19 @@ On 25 hand-annotated snapshots / 62 approved blocks (`data/seibersdorf_dataset`)
 | --- | --- |
 | recall, centre (0.30 m Hungarian match) | 46/62 (74.2%) |
 | **recall, strict** (adds symmetry-aware rotation ≤ 30° and oriented-box IoU ≥ 0.25) | **44/62 (71.0%)** |
-| precision (centre) | 46/59 (78.0%) |
+| precision (centre) | 46/53 (**86.8%**) |
 
 **Quote strict, not centre.** Centre-only counts a box 88° out of alignment as
 a hit; strict is the number that says whether a pose is usable by a gripper.
+
+**The precision figure changed on 2026-08-05 and older numbers in this repo are
+stale.** The evaluation did not apply `filter_pzs100_gripper`, which the ROS
+adapter does, so it scored a cloud still containing the robot's own gripper
+returns. Filtering removes 42,176 points across the corpus and eliminates 6
+false detections at **zero** recall cost: precision 78.0% -> 86.8%, recall
+byte-identical. Any figure quoting 78.0% / 46/59 predates the fix. See
+`experiments/gripper_filter_in_evaluation.md`; reproduce the old number with
+`evaluate_detector_snapshots.py --no-gripper-filter`.
 
 Shipped detector parameters, which the behaviour depends on:
 `cluster_max_extent_xy = 2.25`, `dbscan_eps = 0.07`. Record them with any
