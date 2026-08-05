@@ -6,8 +6,10 @@ their detection or scoring logic:
 
 - ``pcl``: pure PCL geometry -- the raw hypotheses from
   ``blockpose.detection.detect_blocks_detailed``.
-- ``rgb_edge_prior``: the classical RGB edge prior
-  (``blockpose.rgb_edge_prior``) scoring those same raw hypotheses.
+- ``rgb_edge_prior``: the classical RGB edge validator/reranker
+  (``blockpose.rgb_edge_prior``), scoring the same raw PCL hypotheses. It does
+  not seed or detect blocks independently; the internal key is retained for
+  API and on-disk compatibility.
 - ``dino_proposer``: proposal-driven 3-D candidates from the learned
   full-image DINOv2 region proposer (``blockpose.rgb_region_proposer`` /
   ``blockpose.rgb_proposals``).
@@ -31,6 +33,7 @@ from pathlib import Path
 
 import numpy as np
 
+from blockpose.annotation_preprocess import filter_exclusion_boxes
 from blockpose.core_bridge import detect_blocks_detailed_cpp
 from blockpose.core_types import DetectionParameters, SensorContext, TraceHypothesis
 from blockpose.io import CameraModel
@@ -53,13 +56,34 @@ _DEFAULT_DINO_MARGIN = 0.08
 
 @dataclass(frozen=True)
 class SourceCandidate:
-    """One candidate block as seen by a single detection/scoring source."""
+    """One candidate block as seen by a single detection/scoring source.
+
+    `accepted` means one thing everywhere in this module: the detector
+    accepted the underlying hypothesis (`TraceHypothesis.fate == "final"`),
+    optionally narrowed by a source's own additional evidence gate (e.g.
+    `rgb_edge_prior` also requires its evidence to have been available). It
+    is what `tools/annotate_snapshot.py::_promote_accepted_candidates` reads
+    to decide what to auto-promote, so it must never mean anything softer
+    than "this is fit to become a pending ground-truth target" -- it used to
+    also mean "evidence was available" (rgb_edge_prior) and "DINO reranking
+    picked this within a band and did not abstain" (dino_verifier_reranked)
+    depending on the source, and the second of those meant EVERY reranked
+    candidate came back `accepted=False` whenever a verifier checkpoint was
+    supplied (measured across 6 snapshots), silently dropping auto-promotion
+    to zero while the status label kept reporting success.
+
+    `rank_boosted` carries what `accepted` used to conflate for
+    `dino_verifier_reranked`: whether DINO evidence moved this candidate
+    within its geometry score band (a display/ordering fact, not an
+    acceptance fact). It is `False` for every other source.
+    """
 
     id: str
     pose: BlockPose
     score: float
     accepted: bool
     reason: str
+    rank_boosted: bool = False
 
 
 @dataclass(frozen=True)
@@ -73,7 +97,9 @@ class CandidateSourcesResult:
 
 
 def _run_detection(
-    points: np.ndarray, sensor_origin: np.ndarray | None
+    points: np.ndarray,
+    sensor_origin: np.ndarray | None,
+    params: DetectionParameters | None = None,
 ) -> tuple[TraceHypothesis, ...]:
     """Raw hypotheses for one point set, or `()` for degenerate/failing input.
 
@@ -83,6 +109,12 @@ def _run_detection(
     the total score weight, formerly in `detection.py::_SCORE_WEIGHTS`) are
     computed instead of hard-zeroed. Falls back to `sensor_context=None` only
     when no origin is available at all -- callers should always pass one.
+
+    `params` defaults to `DetectionParameters()`. Experiments MUST pass it
+    explicitly: this function used to hardcode the defaults, so when
+    `cluster_max_extent_xy` shipped at 2.25 an already-written report measured
+    at 1.5 silently stopped reproducing from its own documented command. A
+    recorded result is only meaningful next to the parameters that produced it.
     """
     if len(points) < _MIN_POINTS_FOR_DETECTION:
         return ()
@@ -91,12 +123,60 @@ def _run_detection(
     )
     try:
         result = detect_blocks_detailed_cpp(
-            points, params=DetectionParameters(), sensor_context=sensor_context
+            points, params=params or DetectionParameters(), sensor_context=sensor_context
         )
     except (RuntimeError, ValueError):
         return ()
     assert result.trace is not None
     return result.trace.raw_hypotheses
+
+
+def _reject_hypotheses_above_gripper(
+    hypotheses: tuple[TraceHypothesis, ...],
+    above_gripper_boxes: dict[str, np.ndarray] | None,
+) -> tuple[TraceHypothesis, ...]:
+    """Drop raw hypotheses centred inside the above-gripper exclusion volume.
+
+    The point-cloud self-filter (`annotation_preprocess.filter_pzs100_gripper`)
+    already removes points above the jaws before detection ever runs, but a
+    partial geometric fit can still be built almost entirely from points
+    outside that volume (e.g. hugging a boom edge) and end up CENTRED inside
+    it -- the point filter alone cannot catch that. This is a second,
+    independent guard: reject any hypothesis whose pose centre falls inside
+    the same above-gripper volume.
+
+    Reuses the native oriented-box point test (via `filter_exclusion_boxes`)
+    rather than reimplementing the box geometry in Python, per the
+    single-source-of-geometry-truth convention -- the C++ core owns what
+    "inside the box" means.
+
+    `above_gripper_boxes` is the `above_centers`/`above_rotations`/
+    `above_sizes` triple returned by `filter_pzs100_gripper`. `None`, or zero
+    boxes (feature off, or no gripper geometry available), is a no-op --
+    callers that don't have gripper geometry are unaffected.
+    """
+    if not hypotheses or above_gripper_boxes is None:
+        return hypotheses
+    # `.get()`, not indexing: callers pass the whole `filter_pzs100_gripper`
+    # diagnostics dict, and an older compiled `_core` predates these keys.
+    # `compute_candidate_sources` documents that it never raises, so a stale
+    # extension must degrade to "no above-gripper rejection", not KeyError.
+    above_centers = np.asarray(above_gripper_boxes.get("above_centers", ()), dtype=np.float64)
+    if above_centers.shape[0] == 0:
+        return hypotheses
+    above_rotations = np.asarray(above_gripper_boxes.get("above_rotations", ()), dtype=np.float64)
+    above_sizes = np.asarray(above_gripper_boxes.get("above_sizes", ()), dtype=np.float64)
+    if above_rotations.shape != (above_centers.shape[0], 3, 3) or (
+        above_sizes.shape != above_centers.shape
+    ):
+        return hypotheses
+    kept = []
+    for hypothesis in hypotheses:
+        position = np.ascontiguousarray(hypothesis.pose.position, dtype=np.float64).reshape(1, 3)
+        _, removed = filter_exclusion_boxes(position, above_centers, above_rotations, above_sizes)
+        if removed == 0:
+            kept.append(hypothesis)
+    return tuple(kept)
 
 
 def _pcl_candidates(raw_hypotheses: tuple[TraceHypothesis, ...]) -> tuple[SourceCandidate, ...]:
@@ -113,13 +193,15 @@ def _rgb_edge_prior_candidates(
     camera: CameraModel,
 ) -> tuple[SourceCandidate, ...]:
     from blockpose import _core
+
     if not getattr(_core, "vision_enabled", False):
-        raise RuntimeError("C++ RGB edge prior is not enabled in blockpose._core")
+        raise RuntimeError("C++ RGB edge validator/reranker is not enabled in blockpose._core")
     gray = np.ascontiguousarray(
         np.mean(np.asarray(rgb, dtype=np.float64)[..., :3], axis=2).clip(0, 255), dtype=np.uint8
     )
     scorer = _core.RgbEdgePrior(
-        gray, np.ascontiguousarray(camera.K, dtype=np.float64),
+        gray,
+        np.ascontiguousarray(camera.K, dtype=np.float64),
         np.ascontiguousarray(camera.D, dtype=np.float64),
         np.ascontiguousarray(T_world_camera, dtype=np.float64),
     )
@@ -130,9 +212,17 @@ def _rgb_edge_prior_candidates(
             np.ascontiguousarray(h.pose.rotation, dtype=np.float64),
             np.ascontiguousarray(h.pose.dims, dtype=np.float64),
         )
-        candidates.append(
-            SourceCandidate(h.id, h.pose, score["score"], score["available"], "native_rgb")
-        )
+        # `accepted` is the intersection of "the detector accepted this
+        # hypothesis" (fate == "final") and "the RGB edge evidence was even
+        # available" (score["available"]), not either alone. The
+        # availability gate is a measured, real precision filter on its own
+        # -- docs/annotation-tool.md: pcl 55 accepted/84% precision vs
+        # rgb_edge_prior 52/88% at equal recall -- so dropping it in favour
+        # of `fate == "final"` alone would throw that away; using it alone
+        # (the old behaviour) instead conflated "evidence available" with
+        # "the detector accepted this", which is a different claim.
+        accepted = h.fate == "final" and bool(score["available"])
+        candidates.append(SourceCandidate(h.id, h.pose, score["score"], accepted, "native_rgb"))
     return tuple(candidates)
 
 
@@ -143,6 +233,8 @@ def _dino_proposer_candidates(
     camera: CameraModel,
     checkpoint: Path,
     sensor_origin: np.ndarray | None,
+    above_gripper_boxes: dict[str, np.ndarray] | None,
+    params: DetectionParameters | None,
 ) -> tuple[tuple[SourceCandidate, ...], str | None]:
     """Proposal-driven 3-D candidates, or `((), warning)` if the source fails.
 
@@ -151,6 +243,13 @@ def _dino_proposer_candidates(
     checkpoint, ...); catching broadly here is deliberate so that any such
     failure degrades to a warning instead of preventing the other three
     sources from being computed.
+
+    `params` is the caller's `DetectionParameters` (the same ones the
+    whole-cloud pass in `compute_candidate_sources` uses), not a hardcoded
+    default: this function used to run every per-region fit against
+    `DetectionParameters()` regardless of what the whole-cloud pass was
+    given, so a swept/tuned parameter set silently applied to only 3/4 of
+    the sources shown side by side in the same GUI session.
     """
     try:
         provider = DinoRegionProposalProvider(checkpoint=checkpoint)
@@ -158,17 +257,36 @@ def _dino_proposer_candidates(
     except Exception as error:  # noqa: BLE001 - see docstring
         return (), f"dino_proposer unavailable: {error!r}"
 
-    params = MaskAssociationParams()
+    association_params = MaskAssociationParams()
     candidates: list[SourceCandidate] = []
     for proposal_index, proposal in enumerate(batch.proposals):
         try:
-            association = associate_mask_to_lidar(points, T_world_camera, camera, proposal, params)
+            association = associate_mask_to_lidar(
+                points, T_world_camera, camera, proposal, association_params
+            )
             indices = proposal_point_indices(np.empty(0, dtype=int), association, mode="union")
         except ValueError:
             # A malformed single proposal (e.g. mask shape mismatch) must not
             # discard every other proposal's candidates.
             continue
-        for hypothesis in _run_detection(points[indices], sensor_origin):
+        # TODO(annotation_candidates): this rebuilds/reuses a SensorContext
+        # from only the region's point subset (via `_run_detection` below),
+        # not the whole cloud, so `visibility_evidence`'s free-space-violation
+        # term cannot see anything the region crop excluded and the score is
+        # systematically INFLATED relative to the whole-cloud pass -- measured
+        # identical crop/fit/pose: 0.7714 against its own crop context vs
+        # 0.7205 against the full cloud (see docs/production-readiness-plan.md,
+        # experiments/dino_proposer_pooled_ablation.md). Deliberately not
+        # fixed here: it needs a real SensorContext built ONCE (in
+        # `compute_candidate_sources`, from the whole cloud) and threaded
+        # down to every proposal, not rebuilt per proposal -- rebuilding a
+        # 114k-ray context per region, per refinement iteration, inside the
+        # interactive "compute suggestions" button is a perf problem in its
+        # own right and needs a measured decision, not a reflexive fix.
+        proposal_hypotheses = _reject_hypotheses_above_gripper(
+            _run_detection(points[indices], sensor_origin, params), above_gripper_boxes
+        )
+        for hypothesis in proposal_hypotheses:
             candidates.append(
                 SourceCandidate(
                     f"dino_proposer:{proposal_index}:{hypothesis.id}",
@@ -264,12 +382,18 @@ def _dino_verifier_views(
     `geometry_only` needs no RGB/checkpoint at all -- it is the same raw
     hypotheses in the band-bounded rank order with no DINO contribution,
     i.e. what `reranked` degrades to whenever DINO evidence is unavailable.
+
+    In both, `SourceCandidate.accepted` means `TraceHypothesis.fate ==
+    "final"`, same as every other source in this module -- never the
+    band/rerank decision (see `SourceCandidate.rank_boosted` for that, on
+    `reranked` only).
     """
     records = [
         {
             "id": h.id,
             "pose": h.pose,
             "geometry_score": float(h.score),
+            "fate": h.fate,
             "dino_contribution": 0.0,
             "dino_abstained": True,
             "dino_reason": "not_scored",
@@ -283,7 +407,13 @@ def _dino_verifier_views(
         [dict(r) for r in records], score_band=score_band, dino_bands=None
     )
     geometry_only = tuple(
-        SourceCandidate(item["id"], item["pose"], item["geometry_score"], True, "geometry_only")
+        SourceCandidate(
+            item["id"],
+            item["pose"],
+            item["geometry_score"],
+            item["fate"] == "final",
+            "geometry_only" if item["fate"] == "final" else item["fate"],
+        )
         for item in geometry_ranked
     )
 
@@ -380,8 +510,19 @@ def _dino_verifier_views(
             item["id"],
             item["pose"],
             item["dino_contribution"],
-            item["geometry_band"] in dino_bands and not item["dino_abstained"],
-            item["dino_reason"],
+            # `accepted` is "the detector accepted this hypothesis", same as
+            # every other source -- NOT the band/rerank decision below. It
+            # used to be `geometry_band in dino_bands and not dino_abstained`,
+            # which meant "DINO evidence was decisive for this band and did
+            # not abstain"; on all 6 snapshots tested that condition was
+            # `False` for every single reranked candidate whenever a
+            # verifier checkpoint was supplied, so auto-promotion silently
+            # dropped to zero. The band/rerank decision itself is real
+            # information, so it survives as `rank_boosted`, not folded back
+            # into `accepted`.
+            item["fate"] == "final",
+            item["fate"] if item["fate"] != "final" else item["dino_reason"],
+            rank_boosted=item["geometry_band"] in dino_bands and not item["dino_abstained"],
         )
         for item in reranked_order
     )
@@ -397,6 +538,8 @@ def compute_candidate_sources(
     T_world_cloud: np.ndarray | None = None,
     dino_proposer_checkpoint: Path | None = None,
     dino_verifier_checkpoint: Path | None = None,
+    above_gripper_boxes: dict[str, np.ndarray] | None = None,
+    detection_params: DetectionParameters | None = None,
 ) -> CandidateSourcesResult:
     """Compute candidate blocks from all four sources for one snapshot.
 
@@ -410,6 +553,16 @@ def compute_candidate_sources(
     `camera` together; DINO sources additionally require their checkpoint.
     Any unmet requirement or failure degrades to an empty tuple plus an
     explanatory entry in `warnings`, never an exception.
+
+    `above_gripper_boxes` is the optional `above_centers`/`above_rotations`/
+    `above_sizes` diagnostics triple from `annotation_preprocess.
+    filter_pzs100_gripper` (the PZS100 above-jaws exclusion volume covering
+    the carrier/boom/arm). When given, any raw hypothesis whose pose centre
+    falls inside that volume is rejected before scoring, on top of whatever
+    the point-cloud self-filter already removed -- a partial fit can be built
+    from points outside the volume yet still land centred inside it. `None`
+    (the default) keeps every source's behaviour unchanged for callers with
+    no gripper geometry available.
     """
     warnings: list[str] = []
     points = np.asarray(points, dtype=np.float64)
@@ -421,7 +574,9 @@ def compute_candidate_sources(
             "evidence terms are zeroed, PCL/derived scores are not comparable to production"
         )
 
-    raw_hypotheses = _run_detection(points, sensor_origin)
+    raw_hypotheses = _reject_hypotheses_above_gripper(
+        _run_detection(points, sensor_origin, detection_params), above_gripper_boxes
+    )
     pcl = _pcl_candidates(raw_hypotheses)
 
     if have_rgb_context:
@@ -431,15 +586,15 @@ def compute_candidate_sources(
         # geometry-only build (or any failure while constructing/scoring the
         # prior) must not discard the already-computed PCL candidates.
         try:
-            rgb_edge_prior = _rgb_edge_prior_candidates(
-                raw_hypotheses, rgb, T_world_camera, camera
-            )
+            rgb_edge_prior = _rgb_edge_prior_candidates(raw_hypotheses, rgb, T_world_camera, camera)
         except Exception as error:  # noqa: BLE001 - optional backend boundary
             rgb_edge_prior = ()
-            warnings.append(f"rgb_edge_prior unavailable: {error!r}")
+            warnings.append(f"RGB edge validator/reranker unavailable: {error!r}")
     else:
         rgb_edge_prior = ()
-        warnings.append("rgb_edge_prior unavailable: rgb/T_world_camera/camera not all provided")
+        warnings.append(
+            "RGB edge validator/reranker unavailable: rgb/T_world_camera/camera not all provided"
+        )
 
     dino_proposer: tuple[SourceCandidate, ...]
     if dino_proposer_checkpoint is None:
@@ -451,7 +606,14 @@ def compute_candidate_sources(
     else:
         assert rgb is not None and T_world_camera is not None and camera is not None
         dino_proposer, proposer_warning = _dino_proposer_candidates(
-            points, rgb, T_world_camera, camera, dino_proposer_checkpoint, sensor_origin
+            points,
+            rgb,
+            T_world_camera,
+            camera,
+            dino_proposer_checkpoint,
+            sensor_origin,
+            above_gripper_boxes,
+            detection_params,
         )
         if proposer_warning is not None:
             warnings.append(proposer_warning)

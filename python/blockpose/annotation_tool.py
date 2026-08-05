@@ -22,7 +22,7 @@ import yaml
 from scipy.spatial.transform import Rotation
 
 from blockpose.annotations import AnnotationTarget, load_annotations
-from blockpose.pose import BLOCK_DIMS, frame_alignments, rotmat_to_quat_xyzw, symmetry_equivalents
+from blockpose.pose import BLOCK_DIMS, frame_alignments, rotmat_to_quat_xyzw
 
 VISIBILITIES = ("unknown", "full", "partial", "heavy_occlusion")
 AUTO_FIT_PROVENANCE_PREFIX = "auto_fit:"
@@ -85,22 +85,58 @@ def canonicalize_block_frame(
     return np.asarray(rotation, dtype=float) @ alignments[0]
 
 
-def next_symmetry_rotation(
-    base_rotation: np.ndarray,
-    cycle_index: int,
-    dimensions: tuple[float, float, float] = BLOCK_DIMS,
-) -> np.ndarray:
-    """Cycle through the alternative ways to label a symmetric box's faces.
+def pca_oriented_block_pose(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Centroid + PCA-aligned orientation for a canonical block, as an operator aid.
 
-    `base_rotation` is the pose the cycle started from (typically the rotation
-    at the moment a target was selected, before any Rotate-90 presses).
-    `symmetry_equivalents` already enumerates every rotation describing the
-    same physical placement -- the 90 degree relabelings about the long axis
-    and the 180 degree end-for-end flips -- so this only indexes into it
-    rather than constructing any new rotation matrix.
+    This is NOT a detector and deliberately does not live in
+    `annotation_snap.py` -- that module's docstring reserves geometry for the
+    native C++ fitter as the single source of truth. This function only backs
+    the "create a pending block from this RGB/SAM selection" fallback the GUI
+    uses when `snap_block_to_cloud` cannot find a supported placement (e.g. a
+    partial or heavily occluded view): a human immediately corrects the result
+    through the normal pose controls before approving it, so an approximate
+    PCA placement is an acceptable starting point here in a way it would not
+    be for the fitter itself. It lives alongside this module's other
+    GUI-independent geometry helpers (`pick_oriented_box`, `camera_ray`, ...)
+    rather than in the fitter adapter.
     """
-    alternatives = symmetry_equivalents(base_rotation, dimensions)
-    return alternatives[cycle_index % len(alternatives)]
+    cloud = np.asarray(points, dtype=float)
+    if cloud.ndim != 2 or cloud.shape[1] != 3 or not len(cloud) or not np.all(np.isfinite(cloud)):
+        raise ValueError("points must be a non-empty finite (N, 3) cloud")
+    centroid = cloud.mean(axis=0)
+    # Decompose the 3x3 covariance rather than the (N, 3) cloud: `vh` is the
+    # only output used, and asking SVD for it directly off the cloud with
+    # `full_matrices=True` also materialises an unused (N, N) `U`. That cost
+    # is not theoretical -- a real mask selection reaches ~17k points, which
+    # measured at 4.7 s and 6.3 GB of peak RSS here, freezing the GUI, and
+    # 60k points needed 29 GB. The covariance is 3x3 for any N, and its
+    # eigenvectors are exactly the right singular vectors of the centred
+    # cloud, so this keeps a full orthonormal basis for the degenerate
+    # len(cloud) == 1 or 2 cases too. `eigh` returns ascending eigenvalues;
+    # reverse so row 0 is the dominant spread direction, as before.
+    centred = cloud - centroid
+    _, eigenvectors = np.linalg.eigh(centred.T @ centred)
+    vh = eigenvectors[:, ::-1].T
+    # Local +X is the block's long axis (see `BLOCK_DIMS`), so the dominant
+    # spread direction becomes local +X.
+    x_axis = vh[0] / np.linalg.norm(vh[0])
+    y_axis = vh[1] - np.dot(vh[1], x_axis) * x_axis
+    y_norm = np.linalg.norm(y_axis)
+    if y_norm < 1e-9:
+        # Points spread along a single line (or a single point): vh[1] carries
+        # no useful signal, so fall back to any axis not parallel to x_axis
+        # rather than returning a degenerate/non-orthonormal rotation.
+        fallback = np.array([0.0, 0.0, 1.0]) if abs(x_axis[2]) < 0.9 else np.array([0.0, 1.0, 0.0])
+        y_axis = fallback - np.dot(fallback, x_axis) * x_axis
+        y_norm = np.linalg.norm(y_axis)
+    y_axis /= y_norm
+    z_axis = np.cross(x_axis, y_axis)
+    # Columns are the local frame's axes expressed in world coordinates (the
+    # same convention as every other rotation in this module), and
+    # cross(x, y) with orthonormal x/y guarantees det == +1: a proper,
+    # right-handed rotation as `apply_snapped_pose`/`adopt_candidates` require.
+    rotation = np.column_stack([x_axis, y_axis, z_axis])
+    return centroid, rotation
 
 
 def orientation_summary(rotation: np.ndarray) -> str:
@@ -109,14 +145,13 @@ def orientation_summary(rotation: np.ndarray) -> str:
     # The long axis is unoriented. Pick its upper hemisphere, then a stable
     # horizontal half-plane at zero elevation, so symmetric frames agree.
     if axis[2] < -1e-12 or (
-        abs(axis[2]) <= 1e-12
-        and (axis[0] < -1e-12 or (abs(axis[0]) <= 1e-12 and axis[1] < 0))
+        abs(axis[2]) <= 1e-12 and (axis[0] < -1e-12 or (abs(axis[0]) <= 1e-12 and axis[1] < 0))
     ):
         axis = -axis
     elevation = float(np.degrees(np.arctan2(axis[2], np.hypot(axis[0], axis[1]))))
     azimuth = float(np.degrees(np.arctan2(axis[1], axis[0]))) % 180.0
     orientation_class = "Standing" if elevation >= 45.0 else "Laying"
-    return f"{orientation_class} — long-axis azimuth {azimuth:.1f}°, elevation {elevation:.1f}°"
+    return f"{orientation_class} - long-axis azimuth {azimuth:.1f}°, elevation {elevation:.1f}°"
 
 
 @dataclass
@@ -305,9 +340,7 @@ class AnnotationController:
 
     def mark_saved(self) -> None:
         """Make the successfully persisted document the new reset/abort checkpoint."""
-        self._baselines = {
-            target.id: copy.deepcopy(target) for target in self.document.targets
-        }
+        self._baselines = {target.id: copy.deepcopy(target) for target in self.document.targets}
         self._initial_ids = set(self._baselines)
         self._undo.clear()
         self._redo.clear()
@@ -329,6 +362,39 @@ class AnnotationController:
                     "rotation",
                     Rotation.from_euler("xyz", angles, degrees=True).as_matrix(),
                 ),
+            )
+        )
+
+    def set_pose_matrix(self, position: np.ndarray, rotation: np.ndarray) -> None:
+        """Apply a full pose from a rotation matrix directly, with no Euler round-trip.
+
+        `set_pose` reconstructs the rotation from "xyz" Euler angles, which is
+        exactly the gimbal-lock singularity for a STANDING block (whose
+        canonical long axis is vertical, i.e. pitch = +/-90 degrees). A caller
+        that already has the exact target rotation matrix (e.g.
+        `_rotate_selected_90`, which only ever right-multiplies by a known
+        90-degree rotation) should apply it here instead of detouring through
+        `as_euler`/`from_euler`, which can hit that singularity and needlessly
+        risks drift.
+        """
+        if self.target is None:
+            return
+        position = np.asarray(position, dtype=float)
+        rotation = np.asarray(rotation, dtype=float)
+        valid = (
+            position.shape == (3,)
+            and rotation.shape == (3, 3)
+            and np.all(np.isfinite(position))
+            and np.all(np.isfinite(rotation))
+            and np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-5)
+            and np.linalg.det(rotation) > 0.0
+        )
+        if not valid:
+            raise ValueError("pose must contain a finite position and a proper rotation matrix")
+        self._change(
+            lambda: (
+                setattr(self.target, "position", position.copy()),
+                setattr(self.target, "rotation", rotation.copy()),
             )
         )
 
@@ -390,6 +456,42 @@ class AnnotationController:
             return
         self._change(lambda: setattr(self.target, "ignore_reason", normalized))
 
+    def set_visibility(self, value: str) -> None:
+        """Commit the visibility selector through the same public-method path as every
+        other mutation (see `_metadata_changed`, which used to reach into
+        `_change` directly). No-op on an unchanged value or an invalid choice,
+        mirroring `set_ignore_reason`'s guard.
+        """
+        if self.target is None or value not in VISIBILITIES:
+            return
+        if self.target.visibility == value:
+            return
+        self._change(lambda: setattr(self.target, "visibility", value))
+
+    def set_notes(self, text: str) -> None:
+        """Commit the snapshot-level notes field.
+
+        Committing as soon as the GUI calls this -- rather than only at save
+        time -- means an Approve/Reject/Undo/etc in between cannot silently
+        discard whatever the operator had typed. This no-op guard alone does
+        NOT prevent one undo entry per keystroke: it only catches a redundant
+        re-commit of an already-current value (e.g. clicking Save twice). What
+        actually keeps a whole typing burst to one undo entry is the GUI
+        wiring this to `TextEdit.set_on_value_changed`, which fires once per
+        completed edit rather than per character -- see
+        `AnnotatorWindow._notes_changed`.
+        """
+        if self.document.notes == text:
+            return
+        self._change(lambda: setattr(self.document, "notes", text))
+
+    def set_annotation_complete(self, complete: bool) -> None:
+        """Commit the ROI-complete checkbox immediately; see `set_notes`."""
+        complete = bool(complete)
+        if self.document.annotation_complete == complete:
+            return
+        self._change(lambda: setattr(self.document, "annotation_complete", complete))
+
     def abort_selected(self) -> None:
         """Retract a manual draft, or restore an imported prior to pending."""
         target = self.target
@@ -403,8 +505,23 @@ class AnnotationController:
                 min(index, len(self.document.targets) - 1) if self.document.targets else None
             )
             return
-        self.reset_selected()
-        self.set_review("pending")
+        # One button press must be one undo step. Restoring the baseline pose
+        # and returning the block to pending used to be two separate
+        # `_change` calls, so Undo left the operator in a state they never
+        # asked for -- pose restored but still approved -- and needed a second
+        # press to actually reverse the button.
+        match = self._baselines.get(target.id)
+
+        def restore() -> None:
+            assert self.target is not None
+            if match is not None:
+                self.target.position = match.position.copy()
+                self.target.rotation = match.rotation.copy()
+                self.target.dimensions = match.dimensions
+            self.target.review_status = "pending"
+            self.target.rejection_reason = None
+
+        self._change(restore)
 
     def delete_selected(
         self,
@@ -457,26 +574,28 @@ class AnnotationController:
         index = 0
         while f"manual_{index}" in used:
             index += 1
-        target = EditableTarget(
-            f"manual_{index}", position.copy(), np.eye(3), provenance="manual"
-        )
+        target = EditableTarget(f"manual_{index}", position.copy(), np.eye(3), provenance="manual")
         self._change(lambda: self.document.targets.append(target))
         self._baselines[target.id] = copy.deepcopy(target)
         self.selected = len(self.document.targets) - 1
 
-    def adopt_candidate(
+    def add_manual_with_pose(
         self,
-        candidate_id: str,
         position: np.ndarray,
         rotation: np.ndarray,
         dimensions: tuple[float, float, float],
-    ) -> str:
-        """Promote an auto-fit suggestion to one undoable pending target."""
-        candidate_id = str(candidate_id).strip()
-        if not candidate_id:
-            raise ValueError("candidate_id must be non-empty")
-        if candidate_id in self.adopted_candidate_ids:
-            raise ValueError(f"candidate {candidate_id!r} is already adopted")
+        *,
+        provenance: str = "manual",
+    ) -> None:
+        """Create a target with its final pose in a single undoable change.
+
+        `add_manual` followed by `apply_snapped_pose` used to be how the GUI
+        did this, but that is two separate `_change` calls: one Undo only
+        unwinds the second, leaving an orphan identity-rotation block behind
+        at the seed point instead of removing what the operator just created.
+        This performs both effects -- append plus final pose -- inside one
+        `_change`, so a single Undo removes the created block entirely.
+        """
         position = np.asarray(position, dtype=float)
         rotation = np.asarray(rotation, dtype=float)
         dims = tuple(float(value) for value in dimensions)
@@ -492,24 +611,97 @@ class AnnotationController:
             and np.linalg.det(rotation) > 0.0
         )
         if not valid:
-            raise ValueError("candidate pose must contain a finite rigid transform and dimensions")
+            raise ValueError("pose must contain a finite rigid transform and dimensions")
+        rotation = canonicalize_block_frame(rotation, dims)
         used = {target.id for target in self.document.targets}
         index = 0
-        while f"auto_{index}" in used:
+        while f"manual_{index}" in used:
             index += 1
-        target_id = f"auto_{index}"
         target = EditableTarget(
-            target_id,
+            f"manual_{index}",
             position.copy(),
-            canonicalize_block_frame(rotation, dims),
+            rotation,
             dimensions=BLOCK_DIMS,
-            review_status="pending",
-            provenance=f"{AUTO_FIT_PROVENANCE_PREFIX}{candidate_id}",
+            provenance=provenance,
         )
         self._change(lambda: self.document.targets.append(target))
         self._baselines[target.id] = copy.deepcopy(target)
         self.selected = len(self.document.targets) - 1
-        return target_id
+
+    def adopt_candidates(
+        self,
+        candidates: list[tuple[str, np.ndarray, np.ndarray, tuple[float, float, float]]],
+    ) -> list[str]:
+        """Promote several auto-fit suggestions in one undoable change.
+
+        Auto-fit is an operator action: every accepted suggestion becomes a
+        normal pending target immediately.  Validate the complete batch before
+        touching the document so a malformed proposal cannot leave a partial
+        adoption behind.  Candidate identities are stable across recomputes;
+        attempting to adopt one already represented in the document is an
+        error.
+        """
+        if not candidates:
+            return []
+        existing = self.adopted_candidate_ids
+        prepared: list[tuple[str, np.ndarray, np.ndarray]] = []
+        seen: set[str] = set()
+        for candidate_id, position, rotation, dimensions in candidates:
+            candidate_id = str(candidate_id).strip()
+            if not candidate_id:
+                raise ValueError("candidate_id must be non-empty")
+            if candidate_id in existing or candidate_id in seen:
+                raise ValueError(f"candidate {candidate_id!r} is already adopted")
+            position = np.asarray(position, dtype=float)
+            rotation = np.asarray(rotation, dtype=float)
+            dims = tuple(float(value) for value in dimensions)
+            valid = (
+                position.shape == (3,)
+                and rotation.shape == (3, 3)
+                and len(dims) == 3
+                and np.all(np.isfinite(position))
+                and np.all(np.isfinite(rotation))
+                and np.all(np.isfinite(dims))
+                and np.all(np.asarray(dims) > 0)
+                and np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-5)
+                and np.linalg.det(rotation) > 0.0
+            )
+            if not valid:
+                raise ValueError(
+                    "candidate pose must contain a finite rigid transform and dimensions"
+                )
+            seen.add(candidate_id)
+            prepared.append(
+                (candidate_id, position.copy(), canonicalize_block_frame(rotation, dims))
+            )
+
+        used = {target.id for target in self.document.targets}
+        target_ids: list[str] = []
+        for _candidate_id, _position, _rotation in prepared:
+            index = 0
+            while f"auto_{index}" in used:
+                index += 1
+            target_id = f"auto_{index}"
+            used.add(target_id)
+            target_ids.append(target_id)
+
+        targets = [
+            EditableTarget(
+                target_id,
+                position,
+                rotation,
+                dimensions=BLOCK_DIMS,
+                review_status="pending",
+                provenance=f"{AUTO_FIT_PROVENANCE_PREFIX}{candidate_id}",
+            )
+            for target_id, (candidate_id, position, rotation) in zip(
+                target_ids, prepared, strict=True
+            )
+        ]
+        self._change(lambda: self.document.targets.extend(targets))
+        self._baselines.update({target.id: copy.deepcopy(target) for target in targets})
+        self.selected = len(self.document.targets) - 1
+        return target_ids
 
 
 def pick_oriented_box(
@@ -543,20 +735,6 @@ def pick_oriented_box(
         if near <= far and far >= 0 and (best is None or distance < best[0]):
             best = (distance, index)
     return None if best is None else best[1]
-
-
-def nearest_point_to_ray(
-    ray_origin: np.ndarray,
-    ray_direction: np.ndarray,
-    points: np.ndarray,
-    max_distance: float,
-) -> np.ndarray | None:
-    """Pick a forward cloud point only when it lies close enough to the view ray."""
-    candidate = nearest_point_to_ray_with_distance(ray_origin, ray_direction, points)
-    if candidate is None or not np.isfinite(max_distance) or max_distance < 0:
-        return None
-    point, distance = candidate
-    return point if distance <= max_distance else None
 
 
 def nearest_point_to_ray_with_distance(

@@ -92,21 +92,32 @@ _FIXTURE_RESULT: dict[str, Any] = {
         },
     ],
     "timings_ms": {"total": 12.5, "refinement": 3.0},
-    "diagnostics": [{
-        "evidence": {
-            "support_points": 55, "top_height_error_m": 0.02, "score": 0.42,
-            "expected_visible_faces": 2, "covered_visible_faces": 2,
-            "free_space_violations": 0, "supported_rays": 4,
-            "observed_geometry_faces": 2, "incident_rays": 5,
-        },
-        "features": {
-            "support": 0.1375, "height_consistency": 0.9,
-            "visible_face_coverage": 1.0, "free_space_consistency": 1.0,
-            "surface_explained": 0.8,
-        },
-        "observability": "partial", "calibrated_confidence": None,
-        "proposal_scale_m": None, "support_height_m": 0.02,
-    }],
+    "diagnostics": [
+        {
+            "evidence": {
+                "support_points": 55,
+                "top_height_error_m": 0.02,
+                "score": 0.42,
+                "expected_visible_faces": 2,
+                "covered_visible_faces": 2,
+                "free_space_violations": 0,
+                "supported_rays": 4,
+                "observed_geometry_faces": 2,
+                "incident_rays": 5,
+            },
+            "features": {
+                "support": 0.1375,
+                "height_consistency": 0.9,
+                "visible_face_coverage": 1.0,
+                "free_space_consistency": 1.0,
+                "surface_explained": 0.8,
+            },
+            "observability": "partial",
+            "calibrated_confidence": None,
+            "proposal_scale_m": None,
+            "support_height_m": 0.02,
+        }
+    ],
 }
 
 
@@ -267,7 +278,7 @@ def test_detect_blocks_detailed_cpp_maps_shared_params_and_rejects_python_only(
     calls: list[tuple[object, ...]] = []
     module = types.ModuleType("blockpose._core")
     module.DetectionParameters = NativeParameters  # type: ignore[attr-defined]
-    module.discover = lambda *args: (calls.append(args) or _FIXTURE_RESULT)  # type: ignore[attr-defined]
+    module.discover = lambda *args: calls.append(args) or _FIXTURE_RESULT  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "blockpose._core", module)
 
     detect_blocks_detailed_cpp(_points(), params=DetectionParameters(min_score=0.25))
@@ -295,7 +306,7 @@ def test_detect_blocks_detailed_cpp_converts_sensor_context(
     module = types.ModuleType("blockpose._core")
     module.DetectionParameters = NativeParameters  # type: ignore[attr-defined]
     module.SensorContext = NativeContext  # type: ignore[attr-defined]
-    module.discover = lambda *args: (calls.append(args) or _FIXTURE_RESULT)  # type: ignore[attr-defined]
+    module.discover = lambda *args: calls.append(args) or _FIXTURE_RESULT  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "blockpose._core", module)
     context = SensorContext(
         origin=np.zeros(3), ray_directions=np.array([[0.0, 0.0, 1.0]]), ranges=np.array([1.0])
@@ -364,10 +375,76 @@ def test_detect_blocks_detailed_cpp_live_round_trip() -> None:
     ],
 )
 def test_native_detection_parameters_reject_invalid_scalar_domains(
-    field: str, value: object, message: str,
+    field: str,
+    value: object,
+    message: str,
 ) -> None:
     core = pytest.importorskip("blockpose._core")
     params = core.DetectionParameters()
     setattr(params, field, value)
     with pytest.raises(ValueError, match=message):
         core.discover(np.empty((0, 3), dtype=np.float64), params)
+
+
+def test_trace_exposes_per_stage_diagnostics_for_offline_analysis() -> None:
+    """The detector records per-stage diagnostics; Python must be able to read them.
+
+    Without these, "which stage dropped this block?" can only be answered by
+    re-running the detector on a stand-in probe, and two separate
+    investigations drew wrong conclusions that way -- a cropped cloud makes
+    components look undersized, and an sklearn DBSCAN stand-in does not
+    reproduce the pipeline's own clustering. The real records settle it.
+    """
+    rng = np.random.default_rng(0)
+    ground = np.column_stack([rng.uniform(-2, 2, 3000), rng.uniform(-2, 2, 3000), np.zeros(3000)])
+    block = np.column_stack(
+        [rng.uniform(-0.45, 0.45, 800), rng.uniform(-0.3, 0.3, 800), rng.uniform(0.0, 0.6, 800)]
+    )
+    points = np.ascontiguousarray(np.vstack([ground, block]))
+    result = detect_blocks_detailed_cpp(points, params=DetectionParameters())
+    trace = result.trace
+
+    assert trace.proposal_diagnostics, "clustering must report the components it formed"
+    component = trace.proposal_diagnostics[0]
+    # The gate verdict has to be decomposable, not just pass/fail: knowing it
+    # was the Z extent rather than the point count is the whole point.
+    for key in (
+        "dbscan_label",
+        "point_count",
+        "extent",
+        "centroid",
+        "size_gate_ok",
+        "extent_xy_gate_ok",
+        "extent_z_gate_ok",
+        "center_z_gate_ok",
+        "gate_passed",
+    ):
+        assert key in component, f"proposal diagnostics missing {key}"
+    assert len(component["extent"]) == 3
+
+    # The remaining stages are exposed too, so a block can be followed from
+    # component through plane fitting and pairing to a hypothesis.
+    for stage in (
+        trace.wide_proposal_skips,
+        trace.plane_region_diagnostics,
+        trace.plane_patch_diagnostics,
+        trace.pairing_diagnostics,
+    ):
+        assert isinstance(stage, tuple)
+
+
+def test_proposal_diagnostics_report_the_gate_that_actually_rejected() -> None:
+    """A component too short in Z must be reported as failing Z, not merely 'rejected'."""
+    rng = np.random.default_rng(1)
+    ground = np.column_stack([rng.uniform(-2, 2, 3000), rng.uniform(-2, 2, 3000), np.zeros(3000)])
+    # A wide but very thin slab: passes the XY minimum, fails the Z minimum --
+    # the shape a gripper leaves when it hides all but a band of a block.
+    slab = np.column_stack(
+        [rng.uniform(-0.3, 0.3, 400), rng.uniform(-0.2, 0.2, 400), rng.uniform(0.5, 0.62, 400)]
+    )
+    points = np.ascontiguousarray(np.vstack([ground, slab]))
+    result = detect_blocks_detailed_cpp(points, params=DetectionParameters())
+    thin = [c for c in result.trace.proposal_diagnostics if c["extent"][2] < 0.3]
+    assert thin, "the thin slab should appear as a component"
+    assert not thin[0]["extent_z_gate_ok"]
+    assert not thin[0]["gate_passed"]

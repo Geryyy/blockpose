@@ -13,8 +13,23 @@ services:
       - .:/workspace
       - ${BLOCKPOSE_DATASET:?set BLOCKPOSE_DATASET to your dataset dir}:/data
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # Model weights survive `docker compose run --rm`. Without this the SAM2
+      # checkpoint lands in the container's writable layer, which --rm deletes,
+      # so every annotator launch re-downloads ~180 MB.
+      - model-cache:/opt/model-cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     environment:
       - BLOCKPOSE_DATASET=/data
+      # Hugging Face and torch.hub both honour these; pointing them at the
+      # named volume above is what makes the download a one-time cost.
+      - HF_HOME=/opt/model-cache/huggingface
+      - TORCH_HOME=/opt/model-cache/torch
       - DISPLAY=${DISPLAY:-}
       - QT_X11_NO_MITSHM=1
       - XDG_SESSION_TYPE=x11
@@ -29,3 +44,8 @@ services:
     # viewer running on the host.
     network_mode: host
     ipc: host
+
+volumes:
+  # Named rather than a bind mount so it is owned by uid 1000 (the container's
+  # `ubuntu` user) without needing a matching directory on the host.
+  model-cache:

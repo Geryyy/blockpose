@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "model_id": "facebook/dinov2-small",
+  "hidden_dim": 128,
+  "max_image_side": 896,
+  "foreground_threshold": 0.5,
+  "min_component_area_px": 64
+}

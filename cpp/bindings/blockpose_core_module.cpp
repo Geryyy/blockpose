@@ -313,7 +313,8 @@ std::vector<blockpose::core::Pzs100RailPose> pzs100_rails_from_numpy(
 }
 
 nb::dict pzs100_filter_boxes_to_dict(
-  const std::vector<blockpose::core::Pzs100GripperFilterBox> & boxes)
+  const std::vector<blockpose::core::Pzs100GripperFilterBox> & boxes,
+  const blockpose::core::OrientedBox * above_exclusion_box)
 {
   auto numpy = nb::module_::import_("numpy");
   auto centers = nb::cast<nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig>>(
@@ -326,17 +327,34 @@ nb::dict pzs100_filter_boxes_to_dict(
     numpy.attr("empty")(nb::make_tuple(boxes.size(), 3), numpy.attr("float64")));
   auto rail_ends = nb::cast<nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig>>(
     numpy.attr("empty")(nb::make_tuple(boxes.size(), 3), numpy.attr("float64")));
-  auto outward_normals = nb::cast<nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig>>(
-    numpy.attr("empty")(nb::make_tuple(boxes.size(), 3), numpy.attr("float64")));
   for (std::size_t index = 0; index < boxes.size(); ++index) {
     for (std::size_t axis = 0; axis < 3; ++axis) {
       centers(index, axis) = boxes[index].box.center(axis);
       sizes(index, axis) = boxes[index].box.size(axis);
       rail_starts(index, axis) = boxes[index].rail_start(axis);
       rail_ends(index, axis) = boxes[index].rail_end(axis);
-      outward_normals(index, axis) = boxes[index].outward_normal(axis);
       for (std::size_t column = 0; column < 3; ++column) {
         rotations(index, axis, column) = boxes[index].box.rotation(axis, column);
+      }
+    }
+  }
+  // The above-gripper exclusion volume is returned under separate keys
+  // (rather than appended to centers/rotations/sizes) so existing callers --
+  // in particular the GUI overlay -- keep seeing only the two jaw boxes
+  // there, and can render this new volume with its own colour/label instead.
+  const std::size_t above_count = above_exclusion_box != nullptr ? 1U : 0U;
+  auto above_centers = nb::cast<nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig>>(
+    numpy.attr("empty")(nb::make_tuple(above_count, 3), numpy.attr("float64")));
+  auto above_rotations = nb::cast<nb::ndarray<nb::numpy, double, nb::ndim<3>, nb::c_contig>>(
+    numpy.attr("empty")(nb::make_tuple(above_count, 3, 3), numpy.attr("float64")));
+  auto above_sizes = nb::cast<nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig>>(
+    numpy.attr("empty")(nb::make_tuple(above_count, 3), numpy.attr("float64")));
+  if (above_exclusion_box != nullptr) {
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      above_centers(0, axis) = above_exclusion_box->center(axis);
+      above_sizes(0, axis) = above_exclusion_box->size(axis);
+      for (std::size_t column = 0; column < 3; ++column) {
+        above_rotations(0, axis, column) = above_exclusion_box->rotation(axis, column);
       }
     }
   }
@@ -346,22 +364,10 @@ nb::dict pzs100_filter_boxes_to_dict(
   output["sizes"] = sizes;
   output["rail_starts"] = rail_starts;
   output["rail_ends"] = rail_ends;
-  output["outward_normals"] = outward_normals;
+  output["above_centers"] = above_centers;
+  output["above_rotations"] = above_rotations;
+  output["above_sizes"] = above_sizes;
   return output;
-}
-
-nb::dict pzs100_filter_boxes_from_numpy(
-  const nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig> & parent_positions,
-  const nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig> & rail_positions,
-  const nb::ndarray<nb::numpy, double, nb::ndim<3>, nb::c_contig> & parent_rotations,
-  const nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig> & outward_axes_parent,
-  const blockpose::core::Pzs100SelfFilterParameters & parameters)
-{
-  const auto rails = pzs100_rails_from_numpy(
-    parent_positions, rail_positions, parent_rotations, outward_axes_parent);
-  std::vector<blockpose::core::Pzs100GripperFilterBox> boxes;
-  {nb::gil_scoped_release release; boxes = blockpose::core::make_pzs100_gripper_filter_boxes(rails, parameters);}
-  return pzs100_filter_boxes_to_dict(boxes);
 }
 
 nb::dict filter_pzs100_gripper_from_numpy(
@@ -376,20 +382,41 @@ nb::dict filter_pzs100_gripper_from_numpy(
   const auto rails = pzs100_rails_from_numpy(
     parent_positions, rail_positions, parent_rotations, outward_axes_parent);
   std::vector<blockpose::core::Pzs100GripperFilterBox> detailed_boxes;
+  blockpose::core::OrientedBox above_box;
+  bool has_above = false;
   blockpose::core::Points kept;
   std::size_t removed = 0U;
+  std::string above_error;
   {
     nb::gil_scoped_release release;
     detailed_boxes = blockpose::core::make_pzs100_gripper_filter_boxes(rails, parameters);
     std::vector<blockpose::core::OrientedBox> boxes;
-    boxes.reserve(detailed_boxes.size());
+    boxes.reserve(detailed_boxes.size() + 1U);
     for (const auto & box : detailed_boxes) {boxes.push_back(box.box);}
+    // Only build/apply the above-gripper volume when it is actually
+    // configured: default parameters (height 0.0) must reproduce the
+    // pre-existing rail-only filtering behaviour exactly.
+    if (parameters.above_exclusion_height_m > 0.0) {
+      // The above-gripper volume is an enhancement over the jaw boxes, so a
+      // rig it cannot describe must cost only that volume. Letting the throw
+      // escape here would disable the whole self-filter -- including the jaw
+      // masking, which needs none of this geometry and was working before the
+      // volume existed. Report the reason instead of failing the call.
+      try {
+        above_box = blockpose::core::make_pzs100_above_gripper_exclusion_box(rails, parameters);
+        has_above = true;
+        boxes.push_back(above_box);
+      } catch (const std::invalid_argument & error) {
+        above_error = error.what();
+      }
+    }
     kept = blockpose::core::remove_points_inside_oriented_boxes(input, boxes, &removed);
   }
-  auto output = pzs100_filter_boxes_to_dict(detailed_boxes);
+  auto output = pzs100_filter_boxes_to_dict(detailed_boxes, has_above ? &above_box : nullptr);
   output["points"] = points_to_numpy(kept);
   output["input_count"] = input.size();
   output["removed_count"] = removed;
+  output["above_exclusion_error"] = above_error;
   return output;
 }
 
@@ -600,6 +627,97 @@ nb::dict evidence_to_dict(const blockpose::core::HypothesisEvidence & evidence)
   return result;
 }
 
+
+// Per-stage diagnostics. The detector already records all of these; without
+// them on the Python side a question like "which stage dropped this block?"
+// has to be answered by re-running the detector on a stand-in probe, and two
+// separate investigations reached wrong conclusions that way -- a cropped
+// cloud makes components look under-sized when the whole cloud's do not.
+nb::dict proposal_component_to_dict(const blockpose::core::ProposalComponentDiagnostics & d)
+{
+  nb::dict out;
+  out["dbscan_label"] = d.dbscan_label;
+  out["point_count"] = d.point_count;
+  out["extent"] = d.extent;
+  out["centroid"] = point_to_tuple(d.centroid);
+  out["center_ground_height"] = d.center_ground_height;
+  out["size_gate_ok"] = d.size_gate_ok;
+  out["extent_xy_gate_ok"] = d.extent_xy_gate_ok;
+  out["extent_z_gate_ok"] = d.extent_z_gate_ok;
+  out["center_z_gate_ok"] = d.center_z_gate_ok;
+  out["gate_passed"] = d.gate_passed;
+  out["truncated_by_max_components"] = d.truncated_by_max_components;
+  out["accepted_rank"] = d.accepted_rank ? nb::cast(*d.accepted_rank) : nb::none();
+  return out;
+}
+
+nb::dict wide_skip_to_dict(const blockpose::core::WideProposalSkipDiagnostics & d)
+{
+  nb::dict out;
+  out["proposal_component"] = d.proposal_component;
+  out["point_count"] = d.point_count;
+  out["region_count"] = d.region_count;
+  out["extent"] = d.extent;
+  return out;
+}
+
+nb::dict plane_region_to_dict(const blockpose::core::PlaneRegionDiagnostics & d)
+{
+  nb::dict out;
+  out["proposal_component"] = d.proposal_component;
+  out["region"] = d.region;
+  out["plane_count"] = d.plane_count;
+  out["leftover_points"] = d.leftover_points;
+  out["stop_reason"] = d.stop_reason;
+  return out;
+}
+
+nb::dict plane_patch_to_dict(const blockpose::core::PlanePatchDiagnostics & d)
+{
+  nb::dict out;
+  out["proposal_component"] = d.proposal_component;
+  out["region"] = d.region;
+  out["plane_index"] = d.plane_index;
+  out["point_count"] = d.point_count;
+  out["normal"] = point_to_tuple(d.normal);
+  out["centroid"] = point_to_tuple(d.centroid);
+  out["residual_mad"] = d.residual_mad;
+  return out;
+}
+
+nb::dict pairing_to_dict(const blockpose::core::RegionPairingDiagnostics & d)
+{
+  nb::dict out;
+  out["proposal_component"] = d.proposal_component;
+  out["region"] = d.region;
+  out["dims_index"] = d.dims_index;
+  nb::list planes;
+  for (const auto & plane : d.planes) {
+    nb::dict entry;
+    entry["plane_index"] = plane.plane_index;
+    entry["is_top"] = plane.is_top;
+    entry["is_side"] = plane.is_side;
+    nb::list attempts;
+    for (const auto & attempt : plane.side_attempts) {
+      nb::dict a;
+      a["side_plane_index"] = attempt.side_plane_index;
+      a["drop_m"] = attempt.drop_m;
+      a["gap_m"] = attempt.gap_m;
+      a["tangential_overlap_m"] = attempt.tangential_overlap_m;
+      a["drop_range_ok"] = attempt.drop_range_ok;
+      a["support_band_ok"] = attempt.support_band_ok;
+      a["tangential_overlap_ok"] = attempt.tangential_overlap_ok;
+      a["gap_ok"] = attempt.gap_ok;
+      a["selected"] = attempt.selected;
+      attempts.append(std::move(a));
+    }
+    entry["side_attempts"] = std::move(attempts);
+    planes.append(std::move(entry));
+  }
+  out["planes"] = std::move(planes);
+  return out;
+}
+
 nb::dict lineage_to_dict(const blockpose::core::RawHypothesisLineage & lineage)
 {
   nb::dict result;
@@ -704,6 +822,16 @@ nb::dict result_to_dict(const blockpose::core::DetectionResult & detection)
     raw_lineage.append(lineage_to_dict(entry));
   }
   result["raw_lineage"] = std::move(raw_lineage);
+  const auto to_list = [](const auto & source, auto converter) {
+    nb::list out;
+    for (const auto & item : source) {out.append(converter(item));}
+    return out;
+  };
+  result["proposal_diagnostics"] = to_list(detection.proposal_diagnostics, proposal_component_to_dict);
+  result["wide_proposal_skips"] = to_list(detection.wide_proposal_skips, wide_skip_to_dict);
+  result["plane_region_diagnostics"] = to_list(detection.plane_region_diagnostics, plane_region_to_dict);
+  result["plane_patch_diagnostics"] = to_list(detection.plane_patch_diagnostics, plane_patch_to_dict);
+  result["pairing_diagnostics"] = to_list(detection.pairing_diagnostics, pairing_to_dict);
   return result;
 }
 
@@ -845,12 +973,10 @@ NB_MODULE(_core, module)
   pzs100_parameters.def(nb::init<>())
     .def_rw("outboard_extent_m", &blockpose::core::Pzs100SelfFilterParameters::outboard_extent_m)
     .def_rw("cross_rail_extent_m", &blockpose::core::Pzs100SelfFilterParameters::cross_rail_extent_m)
-    .def_rw("rail_end_margin_m", &blockpose::core::Pzs100SelfFilterParameters::rail_end_margin_m);
-  module.def("pzs100_filter_boxes", &pzs100_filter_boxes_from_numpy,
-    nb::arg("parent_positions"), nb::arg("rail_positions"), nb::arg("parent_rotations"),
-    nb::arg("outward_axes_parent"),
-    nb::arg("parameters") = blockpose::core::Pzs100SelfFilterParameters{},
-    "Build PZS100 K9/K11 to K10/K12 outward exclusion boxes from world-frame FK poses.");
+    .def_rw("rail_end_margin_m", &blockpose::core::Pzs100SelfFilterParameters::rail_end_margin_m)
+    .def_rw("above_exclusion_height_m", &blockpose::core::Pzs100SelfFilterParameters::above_exclusion_height_m)
+    .def_rw("above_exclusion_margin_m", &blockpose::core::Pzs100SelfFilterParameters::above_exclusion_margin_m)
+    .def_rw("inner_clearance_m", &blockpose::core::Pzs100SelfFilterParameters::inner_clearance_m);
   module.def("filter_pzs100_gripper", &filter_pzs100_gripper_from_numpy,
     nb::arg("points"), nb::arg("parent_positions"), nb::arg("rail_positions"),
     nb::arg("parent_rotations"), nb::arg("outward_axes_parent"),

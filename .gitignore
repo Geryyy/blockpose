@@ -65,6 +65,7 @@ htmlcov/
 .pypirc
 .idea/
 .vscode/
+notes/.obsidian/
 *.swp
 *~
 

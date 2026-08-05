@@ -23,7 +23,7 @@ struct DetectionParameters
   std::size_t ground_ransac_iterations{500};
   double local_ground_cell_size{0.5}, local_ground_clearance{0.05};
   std::size_t dbscan_min_points{5}, cluster_min_size{30}, cluster_max_size{50000};
-  double cluster_min_extent_xy{0.3}, cluster_max_extent_xy{1.5}, region_max_extent_xy{3.0};
+  double cluster_min_extent_xy{0.3}, cluster_max_extent_xy{2.25}, region_max_extent_xy{3.0};
   double cluster_min_extent_z{0.3}, cluster_max_extent_z{3.5}, cluster_max_center_z{3.0};
   double ransac_distance{0.02}; std::size_t ransac_iterations{1000}, ransac_search_max_points{2048}; std::uint64_t ransac_seed{0};
   std::size_t max_planes{5}, min_inliers{40}; double top_plane_angle_deg{30.0}, side_plane_angle_deg{20.0};

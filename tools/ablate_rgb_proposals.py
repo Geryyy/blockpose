@@ -10,6 +10,19 @@ status.
 Examples:
     uv run python tools/ablate_rgb_proposals.py --fold 0 --metrics-out rgb_fold0.json
     uv run python tools/ablate_rgb_proposals.py --fold 1 --mode geometry --mode union
+
+**Staleness note:** the `hard`/`soft`/`union` modes used to fit each proposal's
+point subset and then score/accept that fit against a SensorContext built from
+those same few points, instead of the whole cloud (see `_run_geometry` and
+`--score-context`, added to fix this). That inflated the score -- and
+therefore acceptance -- of proposal-sourced candidates relative to the
+whole-cloud `geometry` candidates `union` pools them with, for reasons that
+have nothing to do with fit quality (measured elsewhere: 0.7714 vs 0.7205 for
+an identical crop/fit/pose scored against its own crop vs the full cloud; see
+`tools/eval_dino_proposer_pooled.py`'s docstring). Any previously generated
+`--metrics-out` JSON for the `hard`/`soft`/`union` modes predates this fix and
+is stale; re-run to get numbers scored against the whole cloud (`geometry`
+mode was always whole-cloud and is unaffected).
 """
 
 from __future__ import annotations
@@ -136,15 +149,40 @@ def _dedupe_poses(poses: list, *, minimum_separation_m: float = 0.25) -> list:
     return kept
 
 
-def _run_geometry(points: np.ndarray, origin: np.ndarray) -> tuple[list, float, str | None]:
+def _run_geometry(
+    points: np.ndarray,
+    origin: np.ndarray,
+    *,
+    sensor_context: SensorContext | None = None,
+) -> tuple[list, float, str | None]:
+    """Fit on `points`; score against `sensor_context` if given, else against `points` itself.
+
+    Pass an explicit `sensor_context` whenever `points` is a region crop (an RGB-proposal
+    point subset) that will be pooled or compared against whole-cloud geometry candidates --
+    see `--score-context` in `main()` and `tools/eval_dino_proposer_pooled.py`'s
+    `fit_region_scored_against`, which this mirrors. The detector's hypothesis score is 60%
+    ray-based evidence (`evidence.hpp::normalized_evidence_features` features 2/3/4: covered
+    vs expected faces, supported rays vs free-space violations, supported vs incident rays).
+    Every one of those terms is computed against whatever SensorContext is handed in. Build
+    that context from a small proposal-mask point subset instead of the whole cloud and the
+    hypothesis cannot accrue the free-space violations the whole cloud would have charged it --
+    so its score (and therefore whether it clears the detector's own internal acceptance
+    threshold) comes out systematically inflated relative to a whole-cloud candidate, for
+    reasons that have nothing to do with which is the better fit. Measured on one snapshot
+    (see `tools/eval_dino_proposer_pooled.py`'s docstring): identical crop, identical fit,
+    identical pose, score 0.7714 against its own crop context vs 0.7205 against the full cloud.
+    """
     if len(points) < 30:
         return [], 0.0, "too_few_points"
     started = perf_counter()
+    context = (
+        sensor_context if sensor_context is not None else SensorContext.from_points(origin, points)
+    )
     try:
         result = detect_blocks_detailed_cpp(
             points,
             params=DetectionParameters(),
-            sensor_context=SensorContext.from_points(origin, points),
+            sensor_context=context,
         )
     except (RuntimeError, ValueError) as error:
         return [], (perf_counter() - started) * 1000.0, str(error)
@@ -221,6 +259,7 @@ def evaluate_snapshot(
     provider: ImageProposalProvider | None = None,
     provider_name: str = "stored_mask_replay",
     provider_config: dict | None = None,
+    score_context: str = "full",
 ) -> dict:
     """Run an inference-only proposal replay; target poses are loaded afterward.
 
@@ -228,6 +267,13 @@ def evaluate_snapshot(
     ``StoredMaskProposalProvider`` oracle/replay baseline; pass a different
     ``ImageProposalProvider`` (e.g. ``DinoRegionProposalProvider``) plus its own
     name/config to ablate a real model the same way.
+
+    ``score_context`` selects which SensorContext the ``hard``/``soft``/``union``
+    modes' proposal-point fits are SCORED against -- ``"full"`` (the whole cloud,
+    default; makes their scores/acceptance comparable with the whole-cloud
+    ``geometry`` candidates ``union`` pools them with) or ``"crop"`` (each
+    proposal's own point subset, reproducing the original, invalid behaviour).
+    See ``_run_geometry``.
     """
     tf = load_tf_snapshot(snapshot / "tf.yaml")
     points, targets = load_snapshot(snapshot, T_world_cloud=tf.T_world_cloud)
@@ -260,7 +306,10 @@ def evaluate_snapshot(
             save_proposal_cache(cache_path, batch, cache_key=key, provenance=provenance)
 
     origin = tf.T_world_cloud[:3, 3]
-    geometry_poses, geometry_runtime_ms, geometry_error = _run_geometry(points, origin)
+    full_context = SensorContext.from_points(origin, points)
+    geometry_poses, geometry_runtime_ms, geometry_error = _run_geometry(
+        points, origin, sensor_context=full_context
+    )
     associations = [
         associate_mask_to_lidar(points, tf.T_world_camera, camera, proposal, association_params)
         for proposal in batch.proposals
@@ -296,9 +345,12 @@ def evaluate_snapshot(
             rgb_poses: list = []
             runtime_ms = 0.0
             errors: list[str | None] = []
+            proposal_context = full_context if score_context == "full" else None
             for association in associations:
                 indices = proposal_point_indices(np.empty(0, dtype=int), association, mode)
-                proposal_poses, elapsed_ms, error = _run_geometry(points[indices], origin)
+                proposal_poses, elapsed_ms, error = _run_geometry(
+                    points[indices], origin, sensor_context=proposal_context
+                )
                 rgb_poses.extend(proposal_poses)
                 runtime_ms += elapsed_ms
                 errors.append(error)
@@ -348,6 +400,17 @@ def main() -> int:
     parser.add_argument(
         "--checkpoint", type=Path, help="dino_region_proposer checkpoint dir (see train.py)"
     )
+    parser.add_argument(
+        "--score-context",
+        choices=("full", "crop"),
+        default="full",
+        help="SensorContext used to SCORE hard/soft/union proposal-point fits. 'full' (default) "
+        "scores them against the whole cloud so their scores/acceptance are comparable with the "
+        "whole-cloud 'geometry' candidates 'union' pools them with; 'crop' scores each against "
+        "its own proposal points, which inflates them (60%% of the score is ray evidence a small "
+        "crop cannot accrue violations against) and is kept only to reproduce the original, "
+        "invalid measurement.",
+    )
     args = parser.parse_args()
     if args.provider == "dino_region_proposer" and args.checkpoint is None:
         parser.error("--provider dino_region_proposer requires --checkpoint")
@@ -396,6 +459,7 @@ def main() -> int:
             provider=provider,
             provider_name=provider_name,
             provider_config=provider_config,
+            score_context=args.score_context,
         )
         for snapshot in snapshots
     ]
@@ -426,6 +490,7 @@ def main() -> int:
         "split_manifest": str(args.splits),
         "grouping_evidence": manifest.get("grouping_evidence"),
         "modes": modes,
+        "score_context": args.score_context,
         "association_params": asdict(params),
         "provenance": {
             "calibration": str(args.calibration),

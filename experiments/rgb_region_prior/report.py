@@ -51,6 +51,7 @@ from experiments.rgb_region_prior.dataset import (  # noqa: E402
     select_development_groups,
 )
 from experiments.rgb_region_prior.export import (  # noqa: E402
+    OCCLUDED_VISIBILITIES,
     approved_targets,
     block_silhouette_mask,
 )
@@ -116,7 +117,13 @@ def _load_image(path: Path) -> np.ndarray:
     return np.asarray(Image.open(path).convert("RGB"))
 
 
-def _block_masks_for_sample(sample: RegionSample, *, snapshots_dir: Path, camera) -> dict:
+def _block_masks_for_sample(
+    sample: RegionSample,
+    *,
+    snapshots_dir: Path,
+    camera,
+    occluded_visibilities: tuple[str, ...],
+) -> tuple[dict, dict]:
     """Recompute each approved block's own silhouette fresh from annotations.yaml.
 
     The exported record only stores the *union* mask (what the head trains
@@ -124,6 +131,14 @@ def _block_masks_for_sample(sample: RegionSample, *, snapshots_dir: Path, camera
     directly from the source snapshot using the exact same construction
     ``export.py`` used to build that union, so train-time and eval-time
     targets can never silently diverge.
+
+    ``occluded_visibilities`` must mirror whatever the checkpoint's export
+    used -- this is the eval-side half of that same choice, and its default
+    matching ``export.py``'s is what previously made this evaluation silently
+    exclude heavy_occlusion/unknown blocks from recall regardless of which
+    arm trained the checkpoint.
+
+    Returns ``(masks, visibility_by_block_id)``.
     """
     from blockpose.annotations import load_annotations
 
@@ -131,11 +146,13 @@ def _block_masks_for_sample(sample: RegionSample, *, snapshots_dir: Path, camera
     annotations = load_annotations(snapshot / "annotations.yaml")
     tf = load_tf_snapshot(snapshot / "tf.yaml")
     masks = {}
-    for target in approved_targets(annotations):
+    visibility = {}
+    for target in approved_targets(annotations, occluded_visibilities):
         mask = block_silhouette_mask(target.pose, tf.T_world_camera, camera)
         if mask is not None:
             masks[target.id] = mask
-    return masks
+            visibility[target.id] = target.visibility
+    return masks, visibility
 
 
 def parse_args() -> argparse.Namespace:
@@ -146,6 +163,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--splits", type=Path, default=DEFAULT_SPLITS)
     parser.add_argument("--iou-threshold", type=float, default=0.3)
+    parser.add_argument(
+        "--occluded-visibilities",
+        default="none",
+        help="Comma-separated visibility labels to EXCLUDE from the recall denominator, or "
+        "'none' (the default) to score every approved block. Must match whatever the "
+        "checkpoint's `export.py --occluded-visibilities` used -- this script cannot verify "
+        f"that from the checkpoint and trusts the caller's assertion, same as --held-out-fold. "
+        f"Pass '{','.join(OCCLUDED_VISIBILITIES)}' to reproduce the old (v1) default.",
+    )
     parser.add_argument(
         "--held-out-fold",
         type=int,
@@ -164,6 +190,11 @@ def main() -> int:
     from blockpose.rgb_region_proposer import extract_region_proposals, load_dino_region_proposer
 
     args = parse_args()
+    occluded_visibilities = (
+        ()
+        if args.occluded_visibilities.strip().lower() == "none"
+        else tuple(v.strip() for v in args.occluded_visibilities.split(",") if v.strip())
+    )
     head, config = load_dino_region_proposer(args.checkpoint)
     camera = load_camera_model(args.calibration)
 
@@ -205,12 +236,16 @@ def main() -> int:
         "predicted_regions": 0,
         "false_positives": 0,
     }
+    by_visibility: dict[str, dict[str, int]] = {}
     for sample in eval_samples:
         image = _load_image(sample.image_path)
         probability_map = np.asarray(head.predict_proposal_map(image))
         predicted_regions = extract_regions(probability_map)
-        block_masks = _block_masks_for_sample(
-            sample, snapshots_dir=args.snapshots_dir, camera=camera
+        block_masks, visibility_by_block = _block_masks_for_sample(
+            sample,
+            snapshots_dir=args.snapshots_dir,
+            camera=camera,
+            occluded_visibilities=occluded_visibilities,
         )
         result = evaluate_snapshot_recall(
             predicted_regions, block_masks, iou_threshold=args.iou_threshold
@@ -220,6 +255,11 @@ def main() -> int:
         totals["blocks_recovered"] += result["blocks_recovered"]
         totals["predicted_regions"] += result["predicted_regions"]
         totals["false_positives"] += result["false_positives"]
+        for block_id, recovered in result["recovered_by_block"].items():
+            visibility = visibility_by_block[block_id]
+            bucket = by_visibility.setdefault(visibility, {"blocks_total": 0, "blocks_recovered": 0})
+            bucket["blocks_total"] += 1
+            bucket["blocks_recovered"] += int(recovered)
 
     groups_evaluated = sorted({sample.split_group for sample in eval_samples})
     warnings = []
@@ -238,6 +278,7 @@ def main() -> int:
         "export_root": str(args.export_root),
         "checkpoint": str(args.checkpoint),
         "iou_threshold": args.iou_threshold,
+        "occluded_visibilities": list(occluded_visibilities),
         "snapshot_groups_evaluated": groups_evaluated,
         "warnings": warnings,
         "aggregate": {
@@ -248,6 +289,15 @@ def main() -> int:
             "false_positives_per_snapshot": totals["false_positives"] / len(eval_samples)
             if eval_samples
             else None,
+        },
+        "recall_by_visibility": {
+            visibility: {
+                **counts,
+                "recall": counts["blocks_recovered"] / counts["blocks_total"]
+                if counts["blocks_total"]
+                else None,
+            }
+            for visibility, counts in sorted(by_visibility.items())
         },
         "snapshots": per_snapshot,
     }
