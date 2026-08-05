@@ -142,3 +142,32 @@ a per-candidate hypothesis set, not as a scalar. (3) Pool gap-only -- region
 candidates may only fill blocks geometry found nothing for; this also makes Bug 1
 structurally impossible. Measured gap-only: 48/62 centre, **45/62 strict (72.6%)**,
 +1 over baseline with zero regressions.
+
+## Correction (2026-08-05): every number above was measured without the gripper filter
+
+The evaluation did not apply `filter_pzs100_gripper`, which the ROS adapter
+does — so all of the above scored a cloud still containing the robot's own
+gripper returns. Re-run with the filter applied (now the tool's default):
+
+| stage | centre | precision | strict |
+| --- | ---: | ---: | ---: |
+| geometry | 46/62 (74.2%) | 46/53 (**86.8%**) | 44/62 (71.0%) |
+| + `dino_proposer` (pooled) | 48/62 (77.4%) | 48/55 (**87.3%**) | **45/62 (72.6%)** |
+
+Two conclusions above are overturned:
+
+1. **Pooling no longer costs precision** — it *gains* it slightly (86.8% →
+   87.3%), where the unfiltered measurement showed 78.0% → 76.2%. The precision
+   cost was never the RGB regions; it was gripper returns being fitted as
+   blocks, which the RGB path surfaced more of.
+2. **Score-arbitrated pooling no longer regresses strict recall.** Unfiltered it
+   went 44/62 → 43/62, which motivated the gap-only policy. Filtered it goes
+   44/62 → **45/62**. The regressions this document attributed to score
+   arbitration were substantially gripper artefacts.
+
+Gap-only pooling remains the safer policy — it makes cross-source score
+comparison structurally impossible rather than merely currently-harmless — but
+it is no longer the only configuration that avoids a regression.
+
+Reproduce the old numbers with `--no-gripper-filter`. See
+`experiments/gripper_filter_in_evaluation.md`.
