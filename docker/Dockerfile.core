@@ -108,13 +108,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   # system lib" failure mode to guard against -- just the missing headers.
   libeigen3-dev \
   # libgtest-dev provides the CMake package cpp/CMakeLists.txt's
-  # find_package(GTest REQUIRED) needs, which cpp/'s unit tests
-  # (BLOCKPOSE_CORE_BUILD_TESTING=ON, the default) link against -- the `ctest`
-  # workflow README.md documents under "Portable C++ core" needs this to
-  # configure at all. tools/check_cpp_consumer.sh deliberately builds with
-  # testing OFF and does not need this package (see that script's own
-  # comment), so this is about being able to run the unit tests locally, not
-  # about the ship-check gate.
+  # find_package(GTest REQUIRED) needs, which cpp/'s unit tests (built when
+  # -DBLOCKPOSE_CORE_BUILD_TESTING=ON is passed explicitly; OFF by default)
+  # link against -- the `ctest` workflow README.md documents under "Portable
+  # C++ core" passes this flag and needs this to configure at all.
+  # tools/check_cpp_consumer.sh deliberately builds with testing OFF and does
+  # not need this package (see that script's own comment), so this is about
+  # being able to run the unit tests locally, not about the ship-check gate.
   libgtest-dev \
   \
   # Open3D / OpenCV / X11 / OpenGL runtime
