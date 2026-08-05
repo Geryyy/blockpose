@@ -75,6 +75,39 @@ blocks are within 0.6 m of the TCP).
 **Five scene classes have no annotated snapshot at all** — `stacking`, `wet`,
 `pre_stack`, `stacked`, `static_occluded`. Nothing is known about them.
 
+## Concluded: the RGB prior is off the roadmap
+
+**Decision (2026-08-05): ship the geometry detector; do not pursue the DINO RGB
+path.** Recorded here so it is not restarted from scratch.
+
+The measured gain from `dino_proposer`, on a correctly filtered cloud with
+gap-only pooling, is **+2 centre / +1 strict out of 62 blocks** and +0.5
+precision points. At n=62 that is inside the noise, and this corpus cannot
+resolve it (one annotated snapshot per scene; five scene classes with none).
+
+The cost is real and mostly unbuilt: C++ 2-D region ingestion does not exist, it
+introduces a **permanent GPU dependency** into a detector that is currently
+GPU-free, and it adds a whole failure surface (model load, TF/timestamp gating,
+fallback paths) with a latency budget that has never been measured.
+
+And the capability it was bought for is unrealised. `dino_proposer` genuinely
+sees 62/62 blocks including 10/10 `heavy_occlusion` -- nothing else in the
+system sees those -- but seeing is not posing: the fits land a median 1.12 m
+away and occluded recall moved only 3/10 -> 4/10.
+
+Worth stating plainly: **every material improvement in this work came from
+fixing defects, not from RGB.** The gripper self-filter was worth +8.8 precision
+points, the `engine.py` ROI-context fix corrected production scoring, the
+annotation de-dup stopped axis-swapped twins entering ground truth, and the
+2.25 m cluster gate (earlier) was worth +11 recall points. The RGB investigation
+earned its keep by exposing those, not by its own result.
+
+**Revisit only if field data shows gripper-occluded blocks limit the
+wall-assembly task.** That is the worst scene class by a distance -- 24 blocks
+at 62% strict, holding every heavy-occlusion case -- and RGB is the only
+mechanism that sees them. That decision needs operational evidence, not 62
+annotated blocks.
+
 ## What is deliberately NOT in the ROS path
 
 - **`dino_verifier` — dropped.** Measured three independent ways (scalar
