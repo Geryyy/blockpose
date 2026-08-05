@@ -1,4 +1,10 @@
-"""Structural smoke tests for the checked-in detector-mode showcase."""
+"""Structural smoke tests for the checked-in detector evidence-stage showcase.
+
+The notebook compares the four evidence stages (PCL geometric detector, FK/
+gripper prior, dino_proposer, dino_verifier) and is regenerated from
+committed snapshot data and calibration only -- no trained checkpoint or GPU
+required. See `notebooks/blockpose_detector_showcase.ipynb`.
+"""
 
 from __future__ import annotations
 
@@ -8,28 +14,28 @@ from pathlib import Path
 NOTEBOOK = Path(__file__).parents[2] / "notebooks" / "blockpose_detector_showcase.ipynb"
 
 
-def test_showcase_is_executed_and_reports_all_modes_honestly() -> None:
+def test_showcase_is_executed_and_covers_every_evidence_stage() -> None:
     notebook = json.loads(NOTEBOOK.read_text())
     text = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
-    rendered_notebook = json.dumps(notebook)
+    # Markdown hard-wraps within a sentence, so compare against whitespace-
+    # collapsed text rather than requiring exact line breaks to match.
+    flat_text = " ".join(text.split())
 
-    # These are review-critical claims, not marketing language.  Keep all
-    # modes, full-cloud/ROI semantics, provenance, and withheld evidence
-    # visible whenever the notebook is regenerated.
+    # Review-critical claims, not marketing language: keep every evidence
+    # stage, its honesty caveats, and the wiring status visible whenever the
+    # notebook is regenerated.
     for required in (
-        "SCENE_DISCOVERY",
-        "REFINE_BLOCK",
-        "REFINE_GRASPED",
-        "full cloud",
-        "scoring boundary only",
-        "baseline_comparison",
-        "source_worktree_dirty",
-        "timeout/query-failure details",
-        "seamless touching row",
-        "buried lower stack block",
+        "PCL geometric detector",
+        "dino_proposer",
+        "dino_verifier",
+        "FK / gripper",
+        "cluster_max_extent_xy",
+        "heavy_occlusion",
+        "not yet wired into the C++ detector",
+        "in-sample",
+        "Retired as a candidate",
     ):
-        assert required in text
-    assert "NotRun" in rendered_notebook
+        assert required in flat_text
 
     code_cells = [cell for cell in notebook["cells"] if cell["cell_type"] == "code"]
     assert all(cell.get("execution_count") is not None for cell in code_cells)
@@ -48,6 +54,6 @@ def test_showcase_retains_rendered_review_figures() -> None:
         for output in cell.get("outputs", [])
         if "image/png" in output.get("data", {})
     ]
-    # Discovery aggregate + one discovery overlay + two refine overlays + two
-    # retained synthetic limits.  This ensures a reader can inspect evidence.
-    assert len(rendered) >= 6
+    # Architecture diagram, the 4-panel metrics comparison, the wall-scene 3-D
+    # plot, and the occluded-block RGB overlay.
+    assert len(rendered) >= 4
