@@ -68,13 +68,32 @@ other decision is waiting on.
   against the installed package. Tag a version; the detector's behaviour is
   parameterised by `DetectionParameters`, so record the shipped values
   (`cluster_max_extent_xy=2.25`, `dbscan_eps=0.07`) with the tag.
-- **A2. Bag → snapshot → annotate → evaluate loop.** The pieces exist and were
+- **A2. Bag → snapshot → annotate → evaluate loop. DONE.**
+  `tools/evaluate_detector_snapshots.py` is the "snapshots in, scored report
+  out" tool (per-scene and per-visibility, pinned parameters, honest health
+  section; manifest optional so a fresh bag export works). It reproduces the
+  recorded baseline exactly: 46/62 centre, 44/62 strict, 46/59 precision.
+  `tools/build_snapshot_manifest.py` generates the manifest the corpus file
+  claimed was regenerable but was not, reproducing the committed selection
+  exactly. `tools/record_reference_bag.sh` is no longer pinned to one
+  workspace. Original description follows.
+
+  **A2 (original).** The pieces exist and were
   just repaired: capture/replay, the annotation tool (now de-duplicating
   properly, so it no longer writes axis-swapped twins into ground truth), and
   the scoring rules (`match_detections` at 0.30 m centre, `strict_match` for
   rotation + oriented-box IoU). Wire them into one documented path so a bag in
   gives a scored report out.
-- **A3. Reserve a promotion-gate set.** Nominate whole recording sessions that
+- **A3. Reserve a promotion-gate set. TOOLING DONE, DATA OUTSTANDING.**
+  `tools/build_promotion_splits.py` builds a splits manifest from an
+  operator-supplied session mapping instead of a directory-name prefix, so a
+  reserved set is genuinely held back; it refuses to emit a split that cannot
+  gate (session in both halves, or an empty reserve) and its output is
+  consumed unmodified by `experiments/fold_safety.py`. What remains is not
+  code: independent recording sessions must actually be captured and
+  annotated. Original description follows.
+
+  **A3 (original).** Nominate whole recording sessions that
   are annotated and then *never* used for tuning or selection. Without this
   there is no honest way to accept or reject anything later.
 
