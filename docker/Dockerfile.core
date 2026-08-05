@@ -96,6 +96,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   ffmpeg \
   \
   # Open3D / OpenCV / X11 / OpenGL runtime
+  #
+  # libopencv-dev (not just pip's opencv-python) is required: the compiled
+  # blockpose._core nanobind extension links against the SYSTEM
+  # libopencv_{core,imgproc,calib3d}.so at import time, which opencv-python's
+  # bundled, privately-namespaced runtime does not provide. Without this,
+  # `import blockpose._core` fails with a bare "libopencv_calib3d.so.406:
+  # cannot open shared object file" -- see models/production/README.md.
+  libopencv-dev \
   libdbus-1-3 \
   libegl1 \
   libglib2.0-0 \

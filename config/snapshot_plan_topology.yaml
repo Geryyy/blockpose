@@ -1,6 +1,0 @@
-schema_version: 1
-search_window_m: 0.10
-prior_source: config/snapshot_plan_priors.yaml
-# No snapshot course is asserted yet: the current 15 LOSO priors do not contain
-# enough same-snapshot topology to add a constraint without consulting GT.
-courses: []

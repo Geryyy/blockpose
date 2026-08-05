@@ -264,7 +264,7 @@ add_local_generated() {
 
 add_editor_state() {
   local rel
-  for rel in .idea .vscode; do
+  for rel in .idea .vscode notes/.obsidian; do
     if [[ -e "$REPO_ROOT/$rel" || -L "$REPO_ROOT/$rel" ]]; then
       require_untracked "$rel"
       add_candidate editor-state "$rel"

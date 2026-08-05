@@ -120,21 +120,36 @@ CMAKE_PREFIX_PATH=<blockpose-core-prefix>:$CMAKE_PREFIX_PATH \
 
 The optional `blockpose._core` nanobind module exposes the same geometry core
 to standalone Python tools. It is intentionally separate from the pure Python
-annotation/training package while packaging is being consolidated:
+annotation/training package while packaging is being consolidated (see
+[`docs/cpp-nanobind-consolidation.md`](docs/cpp-nanobind-consolidation.md)
+for the full migration plan and current gaps):
 
 ```bash
 python3 -m pip install nanobind
-cmake -S cpp -B .build/blockpose-python \
-  -DBLOCKPOSE_CORE_BUILD_PYTHON=ON \
+cmake -S cpp -B build/blockpose-python -DBLOCKPOSE_CORE_BUILD_PYTHON=ON \
+  -DBLOCKPOSE_CORE_BUILD_TESTING=OFF -DBLOCKPOSE_VISION_BUILD=OFF \
   -Dnanobind_DIR="$(python3 -m nanobind --cmake_dir)"
-cmake --build .build/blockpose-python --parallel
-cmake --install .build/blockpose-python \
-  --prefix "$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["platlib"])')"
+cmake --build build/blockpose-python --parallel
+cp build/blockpose-python/_core.*.so python/blockpose/
 ```
 
-`blockpose._core.discover(points)` currently provides the geometry-only
-baseline. Parity-critical FK, gripper, RGB, and trace inputs remain exposed
-first through the standalone capture runner while the Python DTOs are added.
+The `.so` must be copied into `python/blockpose/` directly, not installed via
+`cmake --install` into `site-packages/blockpose/` — this repo's `blockpose`
+package is an editable install that resolves via
+`_editable_impl_blockpose.pth` straight to `python/blockpose/`, so anything
+installed into `site-packages/blockpose/` is dead and never imported.
+
+The compiled extension links against the system OpenCV runtime
+(`libopencv-dev`, not just pip's `opencv-python`) — see
+`docker/Dockerfile.core` and `models/production/README.md` if
+`import blockpose._core` fails with a missing `libopencv_*.so`.
+
+`blockpose._core.discover(points)` now also returns `refined_candidate_trace`
+and the full `PipelineCounts`, beyond the original geometry-only baseline;
+`discover()` still only runs with C++ defaults (no custom
+`DetectionParameters` from Python yet). See
+[`docs/cpp-nanobind-consolidation.md`](docs/cpp-nanobind-consolidation.md)
+for exactly what is and isn't bound today.
 
 ## Label a replay scene-discovery capture
 
