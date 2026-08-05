@@ -1,9 +1,14 @@
 """Structural smoke tests for the checked-in detector evidence-stage showcase.
 
 The notebook compares the four evidence stages (PCL geometric detector, FK/
-gripper prior, dino_proposer, dino_verifier) and is regenerated from
-committed snapshot data and calibration only -- no trained checkpoint or GPU
-required. See `notebooks/blockpose_detector_showcase.ipynb`.
+gripper prior, dino_proposer, dino_verifier), a real composed pooled ablation
+of geometry + dino_proposer + dino_verifier, and a SAM2-vs-dino_proposer
+comparison. Regenerated from committed snapshot data and calibration only --
+no trained checkpoint or GPU required to run the notebook itself (the
+composed-ablation numbers it prints are hardcoded from
+`experiments/dino_proposer_pooled_ablation.md`, produced separately by
+`tools/eval_dino_proposer_pooled.py`, which does need the checkpoints and
+compiled C++ core). See `notebooks/blockpose_detector_showcase.ipynb`.
 """
 
 from __future__ import annotations
@@ -34,6 +39,9 @@ def test_showcase_is_executed_and_covers_every_evidence_stage() -> None:
         "not yet wired into the C++ detector",
         "in-sample",
         "Retired as a candidate",
+        "Composed pipeline",
+        "eval_dino_proposer_pooled",
+        "uniform",  # the dino_verifier non-discrimination finding, not swept under the rug
     ):
         assert required in flat_text
 
@@ -55,5 +63,6 @@ def test_showcase_retains_rendered_review_figures() -> None:
         if "image/png" in output.get("data", {})
     ]
     # Architecture diagram, the 4-panel metrics comparison, the wall-scene 3-D
-    # plot, and the occluded-block RGB overlay.
-    assert len(rendered) >= 4
+    # plot, the occluded-block RGB overlay, the SAM2-vs-dino_proposer
+    # comparison, and the composed-pipeline ablation.
+    assert len(rendered) >= 6
