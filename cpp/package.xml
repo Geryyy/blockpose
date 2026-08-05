@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>blockpose_core</name>
+  <version>0.2.0</version>
+  <description>
+    ROS-free C++ core of the blockpose concrete-block detector (geometry,
+    proposals, refinement, RGB edge prior). Consumed by concrete_block_detector
+    via find_package(blockpose_core CONFIG REQUIRED). This package.xml exists
+    solely so a plain `colcon build` discovers, builds and installs it in the
+    right order ahead of its ROS consumers -- it is not itself a ROS package
+    (no ament_package(), no message/service generation).
+  </description>
+  <maintainer email="gerald.ebmer@gmail.com">Gerald Ebmer</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>cmake</buildtool_depend>
+  <depend>eigen</depend>
+
+  <export>
+    <build_type>cmake</build_type>
+  </export>
+</package>

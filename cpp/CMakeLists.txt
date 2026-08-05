@@ -57,7 +57,12 @@ if(BLOCKPOSE_VISION_BUILD)
   endif()
 endif()
 
-option(BLOCKPOSE_CORE_BUILD_TESTING "Build standalone blockpose_core tests" ON)
+# OFF by default so a consumer that only wants to configure/build/install the
+# library (e.g. a colcon workspace building this as concrete_block_detector's
+# dependency) has no GTest dependency, mirroring BLOCKPOSE_CORE_BUILD_PYTHON's
+# reasoning below. README.md's own ctest workflow and tools/check_cpp_consumer.sh
+# both already pass this flag explicitly either way, so neither is affected.
+option(BLOCKPOSE_CORE_BUILD_TESTING "Build standalone blockpose_core tests" OFF)
 if(BLOCKPOSE_CORE_BUILD_TESTING)
   enable_testing()
   find_package(GTest REQUIRED)
