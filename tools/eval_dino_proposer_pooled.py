@@ -315,7 +315,9 @@ def verifier_adjusted_scores(
         rgb_crop = conditioning = None
         if bbox is not None:
             rgb_crop = render.render_crop(rgb, bbox, out_size=out_size)
-            conditioning = render.render_conditioning(pose, T_world_camera, camera, bbox, out_size=out_size)
+            conditioning = render.render_conditioning(
+                pose, T_world_camera, camera, bbox, out_size=out_size
+            )
         result = score_candidate_with_dino(
             verifier_head,
             verifier_config,
@@ -514,10 +516,22 @@ def build_report(results: list[SnapshotResult], args: argparse.Namespace) -> str
     lines.append("")
     lines.append("| Stage | Recall (centre) | Precision (centre) | Recall (strict) |")
     lines.append("|---|---|---|---|")
-    lines.append(_row("geometry (whole-cloud PCL)", baseline_matched, gt_total, baseline_det, baseline_strict))
-    lines.append(_row("+ dino_proposer (pooled)", pooled_matched, gt_total, pooled_det, pooled_strict))
     lines.append(
-        _row("+ dino_proposer + dino_verifier (reranked)", reranked_matched, gt_total, reranked_det, reranked_strict)
+        _row(
+            "geometry (whole-cloud PCL)", baseline_matched, gt_total, baseline_det, baseline_strict
+        )
+    )
+    lines.append(
+        _row("+ dino_proposer (pooled)", pooled_matched, gt_total, pooled_det, pooled_strict)
+    )
+    lines.append(
+        _row(
+            "+ dino_proposer + dino_verifier (reranked)",
+            reranked_matched,
+            gt_total,
+            reranked_det,
+            reranked_strict,
+        )
     )
     lines.append("")
     lines.append(
@@ -531,17 +545,6 @@ def build_report(results: list[SnapshotResult], args: argparse.Namespace) -> str
     ]
     recovered_pooled = [(r, gi) for r, gi in baseline_misses if gi in r.pooled_matched_gt]
     recovered_reranked = [(r, gi) for r, gi in baseline_misses if gi in r.reranked_matched_gt]
-
-    def new_fps(matched_det_attr: str, candidates_attr: str) -> int:
-        count = 0
-        for r in results:
-            candidates = getattr(r, candidates_attr)
-            matched_det = getattr(r, matched_det_attr)
-            matched_ids = {candidates[di].id for di in matched_det}
-            for c in candidates:
-                if c.source == "dino_proposer" and c.id not in matched_ids:
-                    count += 1
-        return count
 
     lines.append("## Miss recovery")
     lines.append("")
@@ -624,7 +627,9 @@ def main() -> int:
         dbscan_eps=args.dbscan_eps,
     )
     proposer = DinoProposerRegions(args.proposer_checkpoint, device=args.device)
-    verifier_head, verifier_config, verifier_temperature = load_dino_verifier(args.verifier_checkpoint)
+    verifier_head, verifier_config, verifier_temperature = load_dino_verifier(
+        args.verifier_checkpoint
+    )
     mask_params = MaskSelectionParams()
 
     results: list[SnapshotResult] = []

@@ -1,6 +1,8 @@
 """Fast, GPU-free tests for the SAM2 region-proposal eval tool's pure logic.
 
-Covers mask-area filtering and centre-distance pooling/de-duplication with
+Covers mask-area filtering, centre-distance pooling/de-duplication, and the
+`--score-context` flag's plumbing (`fit_region_scored_against`'s min-point
+guard, and that `full` is threaded through as the default end-to-end) with
 synthetic inputs -- no model download, no GPU, no dataset. `tools/` has no
 `__init__.py`; it is importable as an implicit namespace package once the
 repo root is on `sys.path` (mirrors `tests/python/test_refinement_benchmark.py`).
@@ -10,6 +12,8 @@ repo root is on `sys.path` (mirrors `tests/python/test_refinement_benchmark.py`)
 
 from __future__ import annotations
 
+import inspect
+import subprocess
 import sys
 from pathlib import Path
 
@@ -22,9 +26,12 @@ if str(REPO_ROOT) not in sys.path:
 from tools.eval_sam_region_proposals import (
     PooledCandidate,
     dedupe_candidates,
+    evaluate_snapshot,
+    fit_region_scored_against,
     grid_points,
     mask_passes_area_filter,
     provenance_bucket,
+    sam_candidates_for_snapshot,
 )
 
 
@@ -83,6 +90,37 @@ def test_dedupe_no_duplicates_returns_everything() -> None:
     candidates = [_candidate(f"c{i}", [float(i) * 10.0, 0.0, 0.0], score=0.5) for i in range(5)]
     kept = dedupe_candidates(candidates, radius_m=0.25)
     assert len(kept) == 5
+
+
+def test_fit_region_scored_against_below_min_points_returns_empty() -> None:
+    # _MIN_POINTS_FOR_DETECTION is 30; well below that with any context (including
+    # None) must short-circuit before ever touching the C++ detector or its
+    # SensorContext argument.
+    region_points = np.zeros((5, 3), dtype=np.float64)
+    assert fit_region_scored_against(region_points, None, None) == ()
+
+
+def test_score_context_defaults_to_full_in_function_signatures() -> None:
+    # The whole point of Phase 0.4: 'full' -- not 'crop' -- must be what every
+    # caller gets if it doesn't ask for the historical, invalid behaviour.
+    sam_params = inspect.signature(sam_candidates_for_snapshot).parameters
+    eval_params = inspect.signature(evaluate_snapshot).parameters
+    assert sam_params["score_context"].default == "full"
+    assert eval_params["score_context"].default == "full"
+
+
+def test_cli_score_context_flag_defaults_to_full() -> None:
+    # Exercises the actual argparse wiring in main(), not just the function
+    # defaults above -- catches a mismatched --default= even if the function
+    # signature default were kept correct.
+    result = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "tools" / "eval_sam_region_proposals.py"), "--help"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "--score-context {full,crop}" in result.stdout
+    assert "'full' (default)" in result.stdout
 
 
 def test_provenance_bucket_collapses_unique_auto_fit_lineage_strings() -> None:

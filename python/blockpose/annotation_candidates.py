@@ -56,13 +56,34 @@ _DEFAULT_DINO_MARGIN = 0.08
 
 @dataclass(frozen=True)
 class SourceCandidate:
-    """One candidate block as seen by a single detection/scoring source."""
+    """One candidate block as seen by a single detection/scoring source.
+
+    `accepted` means one thing everywhere in this module: the detector
+    accepted the underlying hypothesis (`TraceHypothesis.fate == "final"`),
+    optionally narrowed by a source's own additional evidence gate (e.g.
+    `rgb_edge_prior` also requires its evidence to have been available). It
+    is what `tools/annotate_snapshot.py::_promote_accepted_candidates` reads
+    to decide what to auto-promote, so it must never mean anything softer
+    than "this is fit to become a pending ground-truth target" -- it used to
+    also mean "evidence was available" (rgb_edge_prior) and "DINO reranking
+    picked this within a band and did not abstain" (dino_verifier_reranked)
+    depending on the source, and the second of those meant EVERY reranked
+    candidate came back `accepted=False` whenever a verifier checkpoint was
+    supplied (measured across 6 snapshots), silently dropping auto-promotion
+    to zero while the status label kept reporting success.
+
+    `rank_boosted` carries what `accepted` used to conflate for
+    `dino_verifier_reranked`: whether DINO evidence moved this candidate
+    within its geometry score band (a display/ordering fact, not an
+    acceptance fact). It is `False` for every other source.
+    """
 
     id: str
     pose: BlockPose
     score: float
     accepted: bool
     reason: str
+    rank_boosted: bool = False
 
 
 @dataclass(frozen=True)
@@ -191,9 +212,17 @@ def _rgb_edge_prior_candidates(
             np.ascontiguousarray(h.pose.rotation, dtype=np.float64),
             np.ascontiguousarray(h.pose.dims, dtype=np.float64),
         )
-        candidates.append(
-            SourceCandidate(h.id, h.pose, score["score"], score["available"], "native_rgb")
-        )
+        # `accepted` is the intersection of "the detector accepted this
+        # hypothesis" (fate == "final") and "the RGB edge evidence was even
+        # available" (score["available"]), not either alone. The
+        # availability gate is a measured, real precision filter on its own
+        # -- docs/annotation-tool.md: pcl 55 accepted/84% precision vs
+        # rgb_edge_prior 52/88% at equal recall -- so dropping it in favour
+        # of `fate == "final"` alone would throw that away; using it alone
+        # (the old behaviour) instead conflated "evidence available" with
+        # "the detector accepted this", which is a different claim.
+        accepted = h.fate == "final" and bool(score["available"])
+        candidates.append(SourceCandidate(h.id, h.pose, score["score"], accepted, "native_rgb"))
     return tuple(candidates)
 
 
@@ -205,6 +234,7 @@ def _dino_proposer_candidates(
     checkpoint: Path,
     sensor_origin: np.ndarray | None,
     above_gripper_boxes: dict[str, np.ndarray] | None,
+    params: DetectionParameters | None,
 ) -> tuple[tuple[SourceCandidate, ...], str | None]:
     """Proposal-driven 3-D candidates, or `((), warning)` if the source fails.
 
@@ -213,6 +243,13 @@ def _dino_proposer_candidates(
     checkpoint, ...); catching broadly here is deliberate so that any such
     failure degrades to a warning instead of preventing the other three
     sources from being computed.
+
+    `params` is the caller's `DetectionParameters` (the same ones the
+    whole-cloud pass in `compute_candidate_sources` uses), not a hardcoded
+    default: this function used to run every per-region fit against
+    `DetectionParameters()` regardless of what the whole-cloud pass was
+    given, so a swept/tuned parameter set silently applied to only 3/4 of
+    the sources shown side by side in the same GUI session.
     """
     try:
         provider = DinoRegionProposalProvider(checkpoint=checkpoint)
@@ -220,18 +257,34 @@ def _dino_proposer_candidates(
     except Exception as error:  # noqa: BLE001 - see docstring
         return (), f"dino_proposer unavailable: {error!r}"
 
-    params = MaskAssociationParams()
+    association_params = MaskAssociationParams()
     candidates: list[SourceCandidate] = []
     for proposal_index, proposal in enumerate(batch.proposals):
         try:
-            association = associate_mask_to_lidar(points, T_world_camera, camera, proposal, params)
+            association = associate_mask_to_lidar(
+                points, T_world_camera, camera, proposal, association_params
+            )
             indices = proposal_point_indices(np.empty(0, dtype=int), association, mode="union")
         except ValueError:
             # A malformed single proposal (e.g. mask shape mismatch) must not
             # discard every other proposal's candidates.
             continue
+        # TODO(annotation_candidates): this rebuilds/reuses a SensorContext
+        # from only the region's point subset (via `_run_detection` below),
+        # not the whole cloud, so `visibility_evidence`'s free-space-violation
+        # term cannot see anything the region crop excluded and the score is
+        # systematically INFLATED relative to the whole-cloud pass -- measured
+        # identical crop/fit/pose: 0.7714 against its own crop context vs
+        # 0.7205 against the full cloud (see docs/production-readiness-plan.md,
+        # experiments/dino_proposer_pooled_ablation.md). Deliberately not
+        # fixed here: it needs a real SensorContext built ONCE (in
+        # `compute_candidate_sources`, from the whole cloud) and threaded
+        # down to every proposal, not rebuilt per proposal -- rebuilding a
+        # 114k-ray context per region, per refinement iteration, inside the
+        # interactive "compute suggestions" button is a perf problem in its
+        # own right and needs a measured decision, not a reflexive fix.
         proposal_hypotheses = _reject_hypotheses_above_gripper(
-            _run_detection(points[indices], sensor_origin), above_gripper_boxes
+            _run_detection(points[indices], sensor_origin, params), above_gripper_boxes
         )
         for hypothesis in proposal_hypotheses:
             candidates.append(
@@ -329,12 +382,18 @@ def _dino_verifier_views(
     `geometry_only` needs no RGB/checkpoint at all -- it is the same raw
     hypotheses in the band-bounded rank order with no DINO contribution,
     i.e. what `reranked` degrades to whenever DINO evidence is unavailable.
+
+    In both, `SourceCandidate.accepted` means `TraceHypothesis.fate ==
+    "final"`, same as every other source in this module -- never the
+    band/rerank decision (see `SourceCandidate.rank_boosted` for that, on
+    `reranked` only).
     """
     records = [
         {
             "id": h.id,
             "pose": h.pose,
             "geometry_score": float(h.score),
+            "fate": h.fate,
             "dino_contribution": 0.0,
             "dino_abstained": True,
             "dino_reason": "not_scored",
@@ -348,7 +407,13 @@ def _dino_verifier_views(
         [dict(r) for r in records], score_band=score_band, dino_bands=None
     )
     geometry_only = tuple(
-        SourceCandidate(item["id"], item["pose"], item["geometry_score"], True, "geometry_only")
+        SourceCandidate(
+            item["id"],
+            item["pose"],
+            item["geometry_score"],
+            item["fate"] == "final",
+            "geometry_only" if item["fate"] == "final" else item["fate"],
+        )
         for item in geometry_ranked
     )
 
@@ -445,8 +510,19 @@ def _dino_verifier_views(
             item["id"],
             item["pose"],
             item["dino_contribution"],
-            item["geometry_band"] in dino_bands and not item["dino_abstained"],
-            item["dino_reason"],
+            # `accepted` is "the detector accepted this hypothesis", same as
+            # every other source -- NOT the band/rerank decision below. It
+            # used to be `geometry_band in dino_bands and not dino_abstained`,
+            # which meant "DINO evidence was decisive for this band and did
+            # not abstain"; on all 6 snapshots tested that condition was
+            # `False` for every single reranked candidate whenever a
+            # verifier checkpoint was supplied, so auto-promotion silently
+            # dropped to zero. The band/rerank decision itself is real
+            # information, so it survives as `rank_boosted`, not folded back
+            # into `accepted`.
+            item["fate"] == "final",
+            item["fate"] if item["fate"] != "final" else item["dino_reason"],
+            rank_boosted=item["geometry_band"] in dino_bands and not item["dino_abstained"],
         )
         for item in reranked_order
     )
@@ -537,6 +613,7 @@ def compute_candidate_sources(
             dino_proposer_checkpoint,
             sensor_origin,
             above_gripper_boxes,
+            detection_params,
         )
         if proposer_warning is not None:
             warnings.append(proposer_warning)

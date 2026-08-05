@@ -127,8 +127,7 @@ class HybridBlockDetector:
                 fused.point_origins_world[-1]
                 if fused.point_origins_world is not None and len(fused.point_origins_world)
                 else fused.no_return_origins_world[-1]
-                if fused.no_return_origins_world is not None
-                and len(fused.no_return_origins_world)
+                if fused.no_return_origins_world is not None and len(fused.no_return_origins_world)
                 else None
             )
             return (
@@ -199,6 +198,19 @@ class HybridBlockDetector:
     def detect_free(
         self, source: FrameInput, workspace_roi: tuple[np.ndarray, np.ndarray] | None = None
     ) -> QueryResult:
+        """Run free-space block discovery, optionally restricted to a workspace ROI.
+
+        The ROI only restricts which points are handed to clustering/fitting.
+        The SensorContext passed to the C++ detector is always built from the
+        full, pre-ROI point cloud: cropping it to the ROI would delete rays
+        (belonging to out-of-ROI points) that pass through an in-ROI
+        hypothesis and should be charged as free-space violations, which are
+        60% of the hypothesis score. That deletion measurably inflates the
+        score (0.7714 from an ROI-cropped context vs 0.7205 from the full
+        cloud for an identical crop/fit/pose) and, since scores are compared
+        against a fixed min_score threshold, silently changes which blocks
+        get accepted. See docs/production-readiness-plan.md.
+        """
         started = time.perf_counter()
         try:
             points, unavailable, origin, misses, ray_origins, miss_origins = self._points(
@@ -213,6 +225,11 @@ class HybridBlockDetector:
                 else QueryErrorCode.INVALID_INPUT
             )
             return self._failure(started, code, str(exc))
+        # Context built from the FULL cloud, before ROI cropping -- see the
+        # docstring above for why. `roi_points` (below) is the ROI-restricted
+        # set used for clustering; keep the two independent.
+        full_context = self._sensor_context(points, origin, misses, ray_origins, miss_origins)
+        roi_points = points
         if workspace_roi is not None:
             try:
                 low, high = (np.asarray(v, dtype=np.float64) for v in workspace_roi)
@@ -227,13 +244,12 @@ class HybridBlockDetector:
             ):
                 return self._failure(started, QueryErrorCode.INVALID_INPUT, "invalid workspace ROI")
             mask = np.all((points >= low) & (points <= high), axis=1)
-            points = points[mask]
-            if ray_origins is not None:
-                ray_origins = ray_origins[mask]
-        if not len(points):
+            roi_points = points[mask]
+        if not len(roi_points):
             return self._failure(started, QueryErrorCode.EMPTY_ROI, "no points in workspace ROI")
-        context = self._sensor_context(points, origin, misses, ray_origins, miss_origins)
-        result = detect_blocks_detailed_cpp(points, params=self.params, sensor_context=context)
+        result = detect_blocks_detailed_cpp(
+            roi_points, params=self.params, sensor_context=full_context
+        )
         blocks = []
         for pose, diag in zip(result.poses, result.diagnostics, strict=True):
             obs = {
@@ -267,6 +283,7 @@ class HybridBlockDetector:
             "verify_placed is unavailable: its Python implementation was removed; "
             "use detect_free until the C++ placed-verification API is available",
         )
+
     def estimate_gripped(self, source: FrameInput, grasp_prior: BlockPose) -> QueryResult:
         return self._failure(
             time.perf_counter(),

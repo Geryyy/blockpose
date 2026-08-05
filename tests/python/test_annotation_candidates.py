@@ -9,11 +9,13 @@ import pytest
 from blockpose.annotation_candidates import (
     CandidateSourcesResult,
     SourceCandidate,
+    _dino_verifier_views,
     _run_detection,
     compute_candidate_sources,
 )
-from blockpose.core_types import DetectionParameters
+from blockpose.core_types import DetectionParameters, TraceHypothesis
 from blockpose.io import CameraModel
+from blockpose.pose import BLOCK_DIMS, BlockPose
 from blockpose.synth import BlockSpec, SynthParams, generate_scene
 
 
@@ -308,6 +310,66 @@ def test_stubbed_dino_proposer_populates_dino_proposer_field(tmp_path, monkeypat
     assert all(item.id.startswith("dino_proposer:") for item in result.dino_proposer)
 
 
+def test_dino_proposer_threads_the_callers_detection_params(tmp_path, monkeypatch) -> None:
+    """Per-region fits must use the caller's `DetectionParameters`, not a
+    hardcoded default.
+
+    Regression test: `_dino_proposer_candidates` used to run every region's
+    `_run_detection` against `DetectionParameters()` regardless of what the
+    whole-cloud pass (and thus `result.pcl`) was given, so a swept/tuned
+    parameter set silently applied to only 3 of the 4 sources shown side by
+    side in the same GUI session.
+    """
+    from dataclasses import replace
+
+    import blockpose.annotation_candidates as annotation_candidates
+
+    torch = pytest.importorskip("torch")
+    _patch_frozen_backbone(monkeypatch, torch, patch_size=14)
+    from blockpose.rgb_region_proposer import (
+        DinoRegionProposerConfig,
+        DinoRegionProposerHead,
+        save_checkpoint,
+    )
+
+    config = DinoRegionProposerConfig(hidden_dim=4)
+    head = DinoRegionProposerHead(config, device="cpu")
+    head._load()
+    last_conv = list(head.dense_head.children())[-1]
+    with torch.no_grad():
+        last_conv.weight.zero_()
+        last_conv.bias.fill_(10.0)
+    checkpoint_dir = tmp_path / "dino_proposer_ckpt"
+    save_checkpoint(checkpoint_dir, head, config)
+
+    sample, params = _scene()
+    camera, T_world_camera, rgb = _camera_and_rgb(sample, params, np.random.default_rng(5))
+
+    custom_params = replace(DetectionParameters(), cluster_max_extent_xy=3.0)
+    seen_params: list[object] = []
+    real_run_detection = annotation_candidates._run_detection
+
+    def _recording_run_detection(points, sensor_origin, params=None):
+        seen_params.append(params)
+        return real_run_detection(points, sensor_origin, params)
+
+    monkeypatch.setattr(annotation_candidates, "_run_detection", _recording_run_detection)
+
+    result = compute_candidate_sources(
+        sample.points,
+        rgb,
+        T_world_camera,
+        camera,
+        dino_proposer_checkpoint=checkpoint_dir,
+        detection_params=custom_params,
+    )
+
+    assert not any("dino_proposer unavailable" in w for w in result.warnings)
+    # One call for the whole-cloud pass, at least one more per proposal region.
+    assert len(seen_params) >= 2
+    assert all(p is custom_params for p in seen_params)
+
+
 def test_stubbed_dino_verifier_populates_reranked_field(tmp_path, monkeypatch) -> None:
     torch = pytest.importorskip("torch")
     _patch_frozen_backbone(monkeypatch, torch, patch_size=32)
@@ -339,6 +401,195 @@ def test_stubbed_dino_verifier_populates_reranked_field(tmp_path, monkeypatch) -
     # head always predicts a strong positive, confident score.
     assert all(item.reason == "ok" for item in result.dino_verifier_reranked)
     assert all(item.score == pytest.approx(0.2, abs=1e-3) for item in result.dino_verifier_reranked)
+
+
+def test_rgb_edge_prior_accepted_requires_both_fate_final_and_evidence_available(
+    monkeypatch,
+) -> None:
+    """`accepted` must be the intersection of "detector accepted" and "RGB
+    evidence was available", never either alone.
+
+    This used to be `score["available"]` alone, so a hypothesis the detector
+    itself rejected (`fate != "final"`) could still be flagged `accepted`
+    purely because RGB evidence happened to be available for it -- and that
+    flag is exactly what `_promote_accepted_candidates` reads to decide what
+    becomes a ground-truth target.
+    """
+    from blockpose import _core
+
+    if not getattr(_core, "vision_enabled", False):
+        pytest.skip("blockpose._core was built without optional RGB vision support")
+
+    sample, params = _scene()
+    camera, T_world_camera, rgb = _camera_and_rgb(sample, params, np.random.default_rng(9))
+
+    result = compute_candidate_sources(sample.points, rgb, T_world_camera, camera)
+    by_id = {item.id: item for item in result.pcl}
+
+    for candidate in result.rgb_edge_prior:
+        raw = by_id[candidate.id]
+        detector_accepted = raw.accepted
+        if not detector_accepted:
+            assert not candidate.accepted, (
+                "a hypothesis the detector rejected must never read as accepted "
+                "just because RGB evidence was available for it"
+            )
+    # At least one hypothesis must actually be detector-accepted in this
+    # scene, otherwise the assertion above is checking nothing.
+    assert any(item.accepted for item in result.pcl)
+
+
+def _hypothesis(hypothesis_id: str, fate: str, score: float = 0.8) -> TraceHypothesis:
+    """A minimal hypothesis with a chosen `fate`, for the source-semantics tests.
+
+    `_scene()` deliberately contains one clean block and measurably yields
+    exactly one hypothesis, always `fate == "final"`, always with RGB
+    evidence available, so an end-to-end test over it can only ever observe
+    the True/True corner of `accepted` and cannot distinguish the
+    intersection from either half alone. These fabricated hypotheses are the
+    only way to pin the other corners without inventing a scene whose
+    rejections are themselves an unstable detector-tuning artifact.
+    """
+    return TraceHypothesis(
+        hypothesis_id, BlockPose(np.zeros(3), np.eye(3), dims=BLOCK_DIMS), score, "refined", fate
+    )
+
+
+@pytest.mark.parametrize("evidence_available", [True, False])
+def test_rgb_edge_prior_accepted_needs_each_half_of_the_intersection(
+    monkeypatch, evidence_available: bool
+) -> None:
+    """Each half of `accepted` must be able to veto on its own.
+
+    Both halves matter and each has its own failure mode: dropping
+    `fate == "final"` promotes hypotheses the detector rejected; dropping
+    `score["available"]` throws away a measured precision filter
+    (docs/annotation-tool.md: `pcl` 55 accepted/84% precision vs
+    `rgb_edge_prior` 52/88% at equal recall). A test that only ever sees a
+    final hypothesis with available evidence cannot tell any of the three
+    candidate expressions apart, so the scorer and the fates are stubbed here.
+    """
+    from blockpose import _core
+    from blockpose.annotation_candidates import _rgb_edge_prior_candidates
+
+    class _StubScorer:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def score(self, _position, _rotation, _dims):
+            return {"score": 0.7, "available": evidence_available}
+
+    monkeypatch.setattr(_core, "vision_enabled", True, raising=False)
+    monkeypatch.setattr(_core, "RgbEdgePrior", _StubScorer, raising=False)
+
+    camera = CameraModel(
+        K=np.array([[400.0, 0.0, 32.0], [0.0, 400.0, 24.0], [0.0, 0.0, 1.0]]), width=64, height=48
+    )
+    candidates = _rgb_edge_prior_candidates(
+        (_hypothesis("final-hyp", "final"), _hypothesis("rejected-hyp", "rejected_score")),
+        np.zeros((camera.height, camera.width, 3), dtype=np.uint8),
+        np.eye(4),
+        camera,
+    )
+    by_id = {item.id: item for item in candidates}
+
+    # A detector rejection is never promotable, whatever RGB evidence says.
+    assert by_id["rejected-hyp"].accepted is False
+    # And the availability gate survives as the second half of the AND: with
+    # evidence unavailable even the detector-accepted hypothesis is not
+    # promotable.
+    assert by_id["final-hyp"].accepted is evidence_available
+
+
+def test_dino_verifier_geometry_only_accepted_reflects_detector_fate() -> None:
+    """`geometry_only.accepted` must not be hardcoded `True`: it used to be,
+    so a hypothesis the detector rejected still showed up promotable in the
+    geometry-only verifier view.
+    """
+    sample, params = _scene()
+    camera, T_world_camera, rgb = _camera_and_rgb(sample, params, np.random.default_rng(11))
+
+    result = compute_candidate_sources(sample.points, rgb, T_world_camera, camera)
+    by_id = {item.id: item for item in result.pcl}
+
+    assert len(result.dino_verifier_geometry_only) == len(result.pcl)
+    for candidate in result.dino_verifier_geometry_only:
+        assert candidate.accepted == by_id[candidate.id].accepted
+
+
+def test_dino_verifier_geometry_only_marks_a_rejected_fate_unaccepted() -> None:
+    """The half of the previous test `_scene()` cannot reach.
+
+    `_scene()` yields only `fate == "final"` hypotheses, against which the
+    old hardcoded `accepted=True` and the new `fate == "final"` are
+    indistinguishable; a rejected fate is what separates them. No RGB,
+    transform or checkpoint is needed for the geometry-only view -- it is
+    exactly what `reranked` degrades to when DINO evidence is unavailable.
+    """
+    geometry_only, reranked, warning = _dino_verifier_views(
+        (_hypothesis("final-hyp", "final", score=0.9), _hypothesis("dropped-hyp", "below_score")),
+        None,
+        None,
+        None,
+        None,
+        score_band=0.05,
+        dino_margin=0.08,
+    )
+
+    assert reranked == () and warning is not None
+    by_id = {item.id: item for item in geometry_only}
+    assert by_id["final-hyp"].accepted is True
+    assert by_id["dropped-hyp"].accepted is False
+    # The fate stays visible to the operator instead of a blanket "geometry_only".
+    assert by_id["dropped-hyp"].reason == "below_score"
+
+
+def test_dino_verifier_reranked_accepted_is_never_gated_by_the_band_decision(
+    tmp_path, monkeypatch
+) -> None:
+    """Regression test for the zero-promotion bug: `accepted` used to mean
+    "DINO evidence was decisive for this band and did not abstain", which
+    measured `False` for EVERY reranked candidate on all 6 real snapshots
+    tested whenever a verifier checkpoint was supplied -- auto-promotion
+    silently dropped to zero while the status bar kept reporting success.
+
+    `accepted` must equal `fate == "final"` regardless of the band decision;
+    the band decision itself must still be visible, just on `rank_boosted`.
+    """
+    torch = pytest.importorskip("torch")
+    _patch_frozen_backbone(monkeypatch, torch, patch_size=32)
+    from blockpose.rgb_verifier import DinoVerifierConfig, DinoVerifierHead, save_checkpoint
+
+    config = DinoVerifierConfig(hidden_dim=4, max_score_contribution=0.2)
+    head = DinoVerifierHead(config, device="cpu")
+    head._load()
+    # Bias the head to always ABSTAIN (huge uncertainty), the exact condition
+    # that used to force every reranked candidate's `accepted` to `False`
+    # regardless of whether the detector had accepted the underlying
+    # hypothesis.
+    mlp_last = list(head.mlp.children())[-1]
+    with torch.no_grad():
+        mlp_last.weight.zero_()
+        mlp_last.bias[0] = 0.0
+        mlp_last.bias[1] = 10.0
+    checkpoint_dir = tmp_path / "dino_verifier_abstain_ckpt"
+    save_checkpoint(checkpoint_dir, head, config, calibration_temperature=1.0)
+
+    sample, params = _scene()
+    camera, T_world_camera, rgb = _camera_and_rgb(sample, params, np.random.default_rng(13))
+
+    result = compute_candidate_sources(
+        sample.points, rgb, T_world_camera, camera, dino_verifier_checkpoint=checkpoint_dir
+    )
+    by_id = {item.id: item for item in result.pcl}
+
+    assert len(result.dino_verifier_reranked) == len(result.pcl)
+    assert any(item.accepted for item in result.pcl), "scene must produce a real accept"
+    for candidate in result.dino_verifier_reranked:
+        assert candidate.accepted == by_id[candidate.id].accepted
+        # The rigged head never contributes decisive evidence -- confirm the
+        # band decision correctly reads "not boosted" without touching `accepted`.
+        assert candidate.rank_boosted is False
 
 
 def test_run_detection_honours_pinned_parameters_and_defaults_to_shipped() -> None:

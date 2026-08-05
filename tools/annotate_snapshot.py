@@ -34,6 +34,7 @@ from blockpose.annotation_snap import (  # noqa: E402
     snap_block_to_cloud,
 )
 from blockpose.annotation_tool import (  # noqa: E402
+    AUTO_FIT_PROVENANCE_PREFIX,
     VISIBILITIES,
     AnnotationController,
     AnnotationDocument,
@@ -95,6 +96,14 @@ CANDIDATE_SOURCE_COLORS = {
     "dino_proposer": (0.6, 0.2, 0.85, 1.0),
     "dino_verifier_reranked": (0.0, 0.65, 0.65, 1.0),
 }
+# Centre-distance de-dup radius for `_promote_accepted_candidates`, matching
+# the pooling radius already used for the same "same physical block, several
+# candidate ids" problem elsewhere in this repo (`ablate_rgb_proposals.py::
+# _dedupe_poses`'s `minimum_separation_m`, `eval_sam_region_proposals.py`'s
+# and `eval_dino_proposer_pooled.py`'s `--dedup-radius`, both defaulting to
+# 0.25). Block extents are >= 0.6 m, so two accepted candidates this close are
+# never distinct physical blocks.
+CANDIDATE_DEDUP_RADIUS_M = 0.25
 WORKFLOW_SECTION_TITLES = (
     "1. Mask the gripper",
     "2. Auto-fit candidates",
@@ -154,6 +163,30 @@ def discover_snapshot_dirs(root: Path) -> list[Path]:
 def cuboid_corners(position: np.ndarray, rotation: np.ndarray, dimensions) -> np.ndarray:
     offsets = BOX_SIGNS * (np.asarray(dimensions) / 2.0)
     return np.asarray(position, dtype=float) + offsets @ np.asarray(rotation, dtype=float).T
+
+
+def target_provenance_label(target) -> str:
+    """Short human-readable source tag for the target list, e.g. "region proposal".
+
+    The operator otherwise cannot tell an auto-adopted region-sourced
+    (`dino_proposer`) candidate apart from a whole-cloud one: both just show
+    up as another pending target. `dino_proposer` candidate ids are
+    namespaced `dino_proposer:{proposal_index}:{hypothesis.id}` (see
+    `annotation_candidates.py::_dino_proposer_candidates`); every other
+    auto-fit source's id is the bare hypothesis id -- see the ambiguity that
+    fact caused for de-dup in `AnnotatorWindow._promote_accepted_candidates`,
+    which is exactly why a human reviewing pending targets needs this
+    visible. A module-level function, not a method: `AnnotatorWindow` is
+    exercised in tests via a `SimpleNamespace` stand-in that only binds an
+    explicit method list, so a plain function callable without `self` stays
+    usable from `_load_document_widgets` without adding to that list.
+    """
+    if not target.provenance.startswith(AUTO_FIT_PROVENANCE_PREFIX):
+        return "manual"
+    candidate_id = target.provenance.removeprefix(AUTO_FIT_PROVENANCE_PREFIX)
+    if candidate_id.startswith("dino_proposer:"):
+        return "region proposal"
+    return "whole cloud"
 
 
 def draw_projected_edges(
@@ -775,7 +808,10 @@ class AnnotatorWindow:
         self._loading_widgets = True
         document = self.controller.document
         self.target_list.set_items(
-            [f"{item.id}  [{item.review_status}]" for item in document.targets]
+            [
+                f"{item.id}  [{item.review_status}] ({target_provenance_label(item)})"
+                for item in document.targets
+            ]
         )
         if self.controller.selected is not None:
             self.target_list.selected_index = self.controller.selected
@@ -1089,12 +1125,59 @@ class AnnotatorWindow:
         self._refresh_views()
 
     def _promote_accepted_candidates(self) -> list[str]:
-        """Promote every accepted result from the active sources as one undoable action."""
-        unique: dict[str, object] = {}
-        for _key, candidates in self._active_candidate_sources():
+        """Promote every accepted result from the active sources as one undoable action.
+
+        De-duplicates by centre distance (`CANDIDATE_DEDUP_RADIUS_M`), not by
+        `candidate.id` alone: `dino_proposer` candidate ids are namespaced
+        `dino_proposer:{proposal_index}:{hypothesis.id}` (see
+        `annotation_candidates.py::_dino_proposer_candidates`) while the
+        active base source's (pcl/rgb_edge_prior/dino_verifier_reranked) ids
+        are the bare hypothesis id, so a proposer candidate describing the
+        SAME physical block as an already-accepted base candidate never
+        collides by id and both would otherwise get promoted. Measured on 8
+        snapshots: 43 pending targets auto-adopted for ~20 physical blocks;
+        18 of 23 proposer candidates sat within 0.25 m of an
+        already-promoted base candidate, three of them long/short-axis
+        swapped twins (rotation deltas 93.5, 94.4, 95.2 degrees) adopted
+        right beside the correct block.
+
+        Runs against targets already in `self.controller.document`, not just
+        the current batch: `adopted_candidate_ids` only suppresses
+        re-adoption by id, so on a recompute a proposer twin of a previously
+        adopted target would still slip through a batch-local-only check.
+        On a centre-distance tie the base/whole-cloud candidate wins over the
+        region-sourced one -- the region crop is the smaller, less-evidenced
+        context (see the crop-vs-full `SensorContext` TODO in
+        `annotation_candidates.py::_dino_proposer_candidates`).
+        """
+        pending: list[tuple[bool, object]] = []
+        for key, candidates in self._active_candidate_sources():
+            is_region_sourced = key == "dino_proposer"
             for candidate in candidates:
                 if candidate.accepted and candidate.id not in self.controller.adopted_candidate_ids:
-                    unique[candidate.id] = candidate
+                    pending.append((is_region_sourced, candidate))
+        if not pending:
+            return []
+        # Base/whole-cloud candidates first, so a centre-distance tie against
+        # a region-sourced candidate keeps the base one and drops the region
+        # duplicate (stable sort preserves each group's original order).
+        pending.sort(key=lambda item: item[0])
+
+        kept_positions = [
+            np.asarray(target.position, dtype=np.float64)
+            for target in self.controller.document.targets
+        ]
+        unique: dict[str, object] = {}
+        for _is_region_sourced, candidate in pending:
+            position = np.asarray(candidate.pose.position, dtype=np.float64)
+            if any(
+                np.linalg.norm(position - other) <= CANDIDATE_DEDUP_RADIUS_M
+                for other in kept_positions
+            ):
+                continue
+            unique[candidate.id] = candidate
+            kept_positions.append(position)
+
         specs = [
             (candidate.id, candidate.pose.position, candidate.pose.rotation, candidate.pose.dims)
             for candidate in unique.values()

@@ -26,7 +26,12 @@ Pipeline per snapshot:
      reimplemented, per the repo's single-source-of-truth convention.
   4. Run the EXISTING geometric fitter (`annotation_candidates._run_detection`,
      the same internal entry point used per DINO proposal region) on just
-     that mask's points. No new detector, no training.
+     that mask's points, but SCORE the resulting hypothesis against the
+     whole-cloud `SensorContext` by default (`--score-context full`; see
+     `fit_region_scored_against`), not the mask's own crop -- scoring
+     against the crop is available via `--score-context crop` but is known
+     invalid (see that function's docstring) and kept only to reproduce the
+     original, invalid measurement. No new detector, no training.
   5. Pool every SAM-sourced accepted hypothesis with the whole-cloud PCL
      accepted candidates, and de-duplicate by centre distance
      (`--dedup-radius`), keeping the higher-scoring candidate of any pair
@@ -55,9 +60,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from blockpose.annotation_candidates import _run_detection  # noqa: E402
+from blockpose.annotation_candidates import _MIN_POINTS_FOR_DETECTION, _run_detection  # noqa: E402
 from blockpose.annotation_tool import AnnotationDocument, EditableTarget  # noqa: E402
-from blockpose.core_types import DetectionParameters  # noqa: E402
+from blockpose.core_bridge import detect_blocks_detailed_cpp  # noqa: E402
+from blockpose.core_types import DetectionParameters, SensorContext  # noqa: E402
 from blockpose.evaluate import match_detections  # noqa: E402
 from blockpose.experiment_record import (  # noqa: E402
     DEFAULT_MAX_ROTATION_DEG,
@@ -217,6 +223,51 @@ class Sam2GridProposer:
         return best_masks, areas
 
 
+def fit_region_scored_against(
+    region_points: np.ndarray,
+    sensor_context: SensorContext | None,
+    params: DetectionParameters | None,
+):
+    """Fit on `region_points`, but score the result against `sensor_context`.
+
+    Mirrors `annotation_candidates._run_detection` (same min-point guard, same
+    exception handling) except that the SensorContext is supplied by the
+    caller instead of being rebuilt from the region's own points. Ported
+    verbatim from `tools/eval_dino_proposer_pooled.py` -- see that module for
+    the fuller derivation; kept here rather than imported so each tool stays
+    independently runnable, matching this file's existing duplication of
+    `PooledCandidate`/`dedupe_candidates`.
+
+    **This distinction is the whole point of `--score-context`.** The
+    detector's score is 60% ray-based evidence
+    (`evidence.hpp::normalized_evidence_features` features 2/3/4: covered vs
+    expected faces, supported rays vs free-space violations, supported vs
+    incident rays). Every one of those terms is computed against whatever
+    SensorContext it is handed. Build that context from a few-hundred-point
+    region crop instead of the ~114k-point whole cloud and the hypothesis
+    simply cannot accrue the free-space violations the whole cloud would have
+    charged it -- so its score comes out systematically HIGHER than a
+    whole-cloud candidate's, for reasons that have nothing to do with which
+    is the better fit. Measured on one snapshot: identical crop, identical
+    fit, identical pose, score 0.7714 against its own crop context vs 0.7205
+    against the full cloud.
+
+    Pooling two sources and keeping "whichever scored higher" is therefore
+    invalid unless both scores are computed against the SAME context -- which
+    is exactly what `dedupe_candidates` below does (highest raw score wins).
+    """
+    if len(region_points) < _MIN_POINTS_FOR_DETECTION:
+        return ()
+    try:
+        result = detect_blocks_detailed_cpp(
+            region_points, params=params or DetectionParameters(), sensor_context=sensor_context
+        )
+    except (RuntimeError, ValueError):
+        return ()
+    assert result.trace is not None
+    return result.trace.raw_hypotheses
+
+
 def sam_candidates_for_snapshot(
     proposer: Sam2GridProposer,
     points: np.ndarray,
@@ -230,16 +281,24 @@ def sam_candidates_for_snapshot(
     mask_max_area_frac: float,
     mask_params: MaskSelectionParams,
     detection_params: DetectionParameters | None = None,
+    score_context: str = "full",
 ) -> tuple[list[PooledCandidate], dict]:
     """Run the SAM2-grid-proposal -> mask-select -> existing-fitter pipeline.
 
     Returns (accepted candidates, diagnostics). Diagnostics record how many
     masks were generated/survived each filter stage, for the wall-clock and
     grid-density reporting in `experiments/sam_region_proposals.md`.
+
+    `score_context` selects which SensorContext each SAM-sourced fit is
+    SCORED against -- `"full"` (the whole cloud, making scores comparable
+    with the PCL candidates they are pooled against) or `"crop"` (the mask's
+    own selected points, reproducing the original, invalid behaviour). See
+    `fit_region_scored_against`.
     """
     masks, areas = proposer.propose(rgb, grid)
     image_pixels = rgb.shape[0] * rgb.shape[1]
     cache: ProjectionCache = build_projection_cache(points, T_world_camera, camera)
+    full_context = SensorContext.from_points(sensor_origin, points)
 
     survived_area = 0
     survived_projection = 0
@@ -256,7 +315,12 @@ def sam_candidates_for_snapshot(
         if not selection.success:
             continue
         survived_projection += 1
-        hypotheses = _run_detection(points[selection.indices], sensor_origin, detection_params)
+        if score_context == "full":
+            hypotheses = fit_region_scored_against(
+                points[selection.indices], full_context, detection_params
+            )
+        else:
+            hypotheses = _run_detection(points[selection.indices], sensor_origin, detection_params)
         for hypothesis in hypotheses:
             if hypothesis.fate != "final":
                 continue
@@ -352,6 +416,7 @@ def evaluate_snapshot(
     match_dist: float,
     mask_params: MaskSelectionParams,
     detection_params: DetectionParameters | None = None,
+    score_context: str = "full",
 ) -> SnapshotResult:
     d = dataset_root / name
     tf = load_tf_snapshot(d / "tf.yaml")
@@ -386,6 +451,7 @@ def evaluate_snapshot(
         mask_max_area_frac=mask_max_area_frac,
         mask_params=mask_params,
         detection_params=detection_params,
+        score_context=score_context,
     )
     sam_wall_time_s = time.perf_counter() - started
 
@@ -645,6 +711,16 @@ def main() -> int:
         default=DetectionParameters().dbscan_eps,
         help="pinned detector clustering radius",
     )
+    parser.add_argument(
+        "--score-context",
+        choices=("full", "crop"),
+        default="full",
+        help="SensorContext used to SCORE region-sourced fits. 'full' (default) scores them "
+        "against the whole cloud so their scores are comparable with the PCL candidates they "
+        "are pooled against; 'crop' scores each against its own mask's selected points, which "
+        "inflates them (60%% of the score is ray evidence a small crop cannot accrue violations "
+        "against) and is kept only to reproduce the original, invalid measurement.",
+    )
     parser.add_argument("--model-id", type=str, default="facebook/sam2.1-hiera-small")
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument(
@@ -684,6 +760,7 @@ def main() -> int:
                 match_dist=args.match_dist,
                 mask_params=mask_params,
                 detection_params=detection_params,
+                score_context=args.score_context,
             )
         )
 
@@ -695,12 +772,17 @@ def main() -> int:
         mask_min_area_px=args.mask_min_area_px,
         mask_max_area_frac=args.mask_max_area_frac,
         model_id=args.model_id,
+        score_context=args.score_context,
     )
     report = build_report(results, args)
     report = (
         f"<!-- provenance: commit {stamp['git_commit']}, "
         f"cluster_max_extent_xy={detection_params.cluster_max_extent_xy}, "
-        f"dbscan_eps={detection_params.dbscan_eps} -->\n" + report
+        f"dbscan_eps={detection_params.dbscan_eps}, "
+        # score_context belongs in the stamp for the same reason the detector
+        # parameters do: it changes the numbers (43/62 vs 44/62 strict recall,
+        # measured), so a table that does not name it cannot be reproduced.
+        f"score_context={args.score_context} -->\n" + report
     )
     print(report)
     if args.report_out is not None:
