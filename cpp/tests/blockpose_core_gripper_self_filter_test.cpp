@@ -86,10 +86,24 @@ TEST(GripperSelfFilter, AboveGripperExclusionSpansGapAboveBothJawsAndKeepsPayloa
 
   // Top of each jaw box is at z = cross_rail_extent_m / 2 = 0.2; the volume
   // extrudes above_exclusion_height_m (1.0) upward from there, so it is
-  // centred at z = 0.2 + 0.5 = 0.7.  Width spans the 2 m rail-to-rail gap
-  // plus the 0.1 m margin; length matches the jaw boxes' rail length.
+  // centred at z = 0.2 + 0.5 = 0.7.
+  //
+  // The horizontal footprint is the COMBINED extent of the two jaw boxes plus
+  // the margin -- see the derivation comment on
+  // make_pzs100_above_gripper_exclusion_box ("the combined horizontal extent
+  // of both jaw boxes along each axis, so the volume covers whatever the
+  // gripper actually occupies rather than a reconstruction from rail
+  // geometry").  Transverse: the jaws straddle a 2 m gap and each reaches
+  // outward_extent_m (0.3) beyond its own centreline, so 2.0 + 0.3 + 0.3 plus
+  // the 0.1 m margin = 2.7.  Along the rails: parent->rail length 1.0 plus the
+  // margin = 1.1.
+  //
+  // This expectation read (1.0, 2.1, 1.0) until now -- the rail-geometry
+  // reconstruction that predates the footprint change.  It was never updated
+  // because GTest was not installable in the dev image, so this whole suite
+  // was unrunnable; see docs/ENVIRONMENT.md's C++ build prerequisites.
   EXPECT_TRUE(above.center.isApprox(Point(0.5, -1.0, 0.7), 1e-9));
-  EXPECT_TRUE(above.size.isApprox(Point(1.0, 2.1, 1.0), 1e-9));
+  EXPECT_TRUE(above.size.isApprox(Point(1.1, 2.7, 1.0), 1e-9));
   EXPECT_TRUE(above.rotation.col(2).isApprox(Point::UnitZ(), 1e-9));
 
   // A point squarely above the gap between the jaws must be inside the
@@ -149,23 +163,34 @@ TEST(GripperSelfFilter, AboveGripperExclusionResolvesUpOnATiltedGripper)
   const Pzs100SelfFilterParameters parameters{0.3, 0.4, 0.0, 1.0, 0.1};
   const auto above = make_pzs100_above_gripper_exclusion_box({left, right}, parameters);
 
-  // "Up" must follow the tilted rig's true vertical, not world +Z.
-  EXPECT_TRUE(above.rotation.col(2).isApprox(up_expected, 1e-9));
+  // "Up" is world +Z -- gravity -- NOT the tilted rig's own vertical.  This
+  // assertion is inverted from what it originally checked, deliberately: the
+  // structural-axis convention it used to encode is what made the old
+  // 60-degree guard reject an ordinary upright gripper, so the axis was
+  // re-anchored to gravity.  The equivalent Python test documents the same
+  // contract ("`Up` is world +Z rather than the rig's own tilted up",
+  // tests/python/test_pzs100_annotation_filter.py) and has been green
+  // throughout; only this C++ suite went stale, because it was unrunnable.
+  EXPECT_TRUE(above.rotation.col(2).isApprox(Point::UnitZ(), 1e-9));
+  // `tilt` is still what places the rails; it just no longer decides "up".
+  (void)up_expected;
 
-  // Same safety property as the level case, expressed in the tilted rig's
-  // own frame and then rotated into world coordinates: below the jaws
-  // survives, above the jaws is excluded.
-  const Point payload_world = tilt * Point(0.5, -1.0, -0.5);
-  const Point above_world = tilt * Point(0.5, -1.0, 0.5);
-  EXPECT_FALSE(point_inside_oriented_box(payload_world, above));
-  EXPECT_TRUE(point_inside_oriented_box(above_world, above));
+  // Same safety property as the level case, but expressed in WORLD vertical,
+  // because world vertical is now what decides which side of the jaws a point
+  // is on.  The payload hangs below the gripper and must survive however the
+  // rig is tilted; the boom above it must be excluded.
+  EXPECT_FALSE(point_inside_oriented_box(Point(0.5, -1.0, -0.5), above));
+  EXPECT_FALSE(point_inside_oriented_box(Point(0.5, -1.0, 0.0), above));
+  EXPECT_TRUE(point_inside_oriented_box(Point(0.5, -1.0, 0.7), above));
 }
 
 namespace {
 // Builds a two-rail pair tilted by `angle` about the shared rail axis (world
 // X), mirroring the construction used by AboveGripperExclusionResolvesUpOnATiltedGripper
-// above, so the resolved "up" direction can be checked at specific tilts
-// relative to the 60-degree (|dot| >= 0.5) resolution limit.
+// above, so behaviour can be checked at specific tilts.  The 60-degree
+// (|dot| >= 0.5) resolution limit these angles were originally chosen around
+// no longer exists; they are kept because they still bracket the interesting
+// range, including past vertical.
 std::vector<Pzs100RailPose> TiltedRailPair(double angle)
 {
   Eigen::Matrix3d tilt;
@@ -187,49 +212,37 @@ std::vector<Pzs100RailPose> TiltedRailPair(double angle)
 }
 }  // namespace
 
-TEST(GripperSelfFilter, AboveGripperExclusionAcceptsUpToSixtyDegreesTiltAndRefusesBeyondIt)
+// Replaces AboveGripperExclusionAcceptsUpToSixtyDegreesTiltAndRefusesBeyondIt,
+// whose entire premise -- a 60-degree tilt limit, beyond which building the
+// volume must throw -- was deliberately removed.  That guard existed to stop a
+// structural "up" axis from resolving backwards and driving the exclusion
+// volume down through the payload; once "up" was re-anchored to gravity there
+// is no sign to resolve, so there is nothing to guard and the limit only ever
+// rejected legitimate grippers.  The old test asserted EXPECT_THROW at 61 and
+// 90.01 degrees; both now build correctly, which is the intended behaviour.
+TEST(GripperSelfFilter, AboveGripperExclusionResolvesUpAtAnyTiltAndRefusesOnlyStackedRails)
 {
   const Pzs100SelfFilterParameters parameters{0.3, 0.4, 0.0, 1.0, 0.1};
 
-  // Just below the 60-degree limit: must resolve "up" correctly, matching
-  // the tilted rig's true vertical, exactly like the 20-degree case above.
-  {
-    const double angle = 59.0 * kDegToRad;
-    const auto rails = TiltedRailPair(angle);
-    Eigen::Matrix3d tilt;
-    tilt << 1.0, 0.0, 0.0,
-      0.0, std::cos(angle), -std::sin(angle),
-      0.0, std::sin(angle), std::cos(angle);
-    const Point up_expected = tilt * Point::UnitZ();
+  // Tilt no longer bounds the volume: "up" is gravity at every angle, well
+  // past the 60 degrees the removed guard refused, and past vertical too.
+  for (const double degrees : {20.0, 59.0, 60.0, 61.0, 89.0, 90.01}) {
+    const auto rails = TiltedRailPair(degrees * kDegToRad);
+    ASSERT_NO_THROW(make_pzs100_above_gripper_exclusion_box(rails, parameters))
+      << "tilt " << degrees << " deg";
     const auto above = make_pzs100_above_gripper_exclusion_box(rails, parameters);
-    EXPECT_TRUE(above.rotation.col(2).isApprox(up_expected, 1e-9));
+    EXPECT_TRUE(above.rotation.col(2).isApprox(Point::UnitZ(), 1e-9)) << "tilt " << degrees
+                                                                     << " deg";
   }
 
-  // Exactly at the 60-degree limit (|dot| == 0.5): the boundary is
-  // inclusive, so this must still resolve rather than throw.
-  {
-    const double angle = 60.0 * kDegToRad;
-    const auto rails = TiltedRailPair(angle);
-    EXPECT_NO_THROW(make_pzs100_above_gripper_exclusion_box(rails, parameters));
-  }
-
-  // Just beyond the 60-degree limit: per the reproduced defect, letting the
-  // dot-product sign check run here would resolve "up" backwards and drive
-  // the exclusion volume through the payload instead of the boom. The fix
-  // must refuse to build the volume at all instead of inverting it.
-  {
-    const double angle = 61.0 * kDegToRad;
-    const auto rails = TiltedRailPair(angle);
-    EXPECT_THROW(make_pzs100_above_gripper_exclusion_box(rails, parameters), std::invalid_argument);
-  }
-
-  // Reproduction values from the field defect report: tilt past 90 degrees
-  // must never silently invert onto the payload -- it must throw.
-  {
-    const double angle = 90.01 * kDegToRad;
-    const auto rails = TiltedRailPair(angle);
-    EXPECT_THROW(make_pzs100_above_gripper_exclusion_box(rails, parameters), std::invalid_argument);
-  }
+  // The one genuinely degenerate tilt, and it fails for a different reason
+  // than the old guard did: at exactly 90 degrees the two rail centrelines
+  // stack vertically, leaving no horizontal gap for the volume to span.  This
+  // is a statement about the geometry being unrepresentable, not about the
+  // rig being too tilted to trust.
+  EXPECT_THROW(
+    make_pzs100_above_gripper_exclusion_box(TiltedRailPair(90.0 * kDegToRad), parameters),
+    std::invalid_argument);
 }
 
 TEST(GripperSelfFilter, AboveGripperExclusionThrowsOnDegenerateOrDisagreeingRails)
