@@ -93,6 +93,8 @@ ROS-style consumer OK
 Geometry-only: point-cloud clustering, plane fitting and gating in
 `cpp/include/blockpose/core/`. No RGB, no GPU, no learned model in the
 default runtime path (see section 5 for what is explicitly excluded and why).
+[`detection-pipeline.md`](detection-pipeline.md) walks the stages and the
+output contract in full; this section covers only what it is measured at.
 
 | Metric | Definition | Measured value |
 | --- | --- | --- |

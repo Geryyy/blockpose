@@ -10,6 +10,9 @@ trains and evaluates optional RGB evidence modules against captured rosbags.
 - [`docs/STATUS.md`](docs/STATUS.md) — **read this first.** Current measured
   state, what ships, what is deliberately excluded, and the pick-up point for
   ROS 2 integration.
+- [`docs/detection-pipeline.md`](docs/detection-pipeline.md) — how the geometry
+  detector actually works: what happens to a point cloud at every stage, and
+  what `DetectionResult` contains.
 - [`docs/dino-rgb-prior-ros-integration.md`](docs/dino-rgb-prior-ros-integration.md)
   is the authoritative architecture and integration contract for the optional
   DINO RGB proposer and verifier. **Its `ScoreRgbCandidates` contract is known
