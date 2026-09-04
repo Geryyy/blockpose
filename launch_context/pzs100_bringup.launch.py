@@ -1,10 +1,14 @@
+from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PathSubstitution, PythonExpression
+from launch.substitutions import (
+    LaunchConfiguration,
+    PathJoinSubstitution,
+    PathSubstitution,
+    PythonExpression,
+)
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
-
-from launch import LaunchDescription
 
 
 def generate_launch_description():
@@ -71,15 +75,6 @@ def generate_launch_description():
                 default_value="True",
                 description="Start the q9 gripper grasp detector for PZS100 Gazebo runs.",
             ),
-            # Spawn the PZS100 joint-state adapter that publishes
-            # /joint_states_rviz with the per-rail-corrected EPSCOPE q9.
-            Node(
-                package="concrete_block_behavior_tree",
-                executable="pzs100_rviz_joint_state_adapter.py",
-                name="pzs100_rviz_joint_state_adapter",
-                parameters=[{"use_sim_time": True}],
-                arguments=["--ros-args", "--log-level", "WARN"],
-            ),
             Node(
                 package="concrete_block_behavior_tree",
                 executable="gripper_grasp_detector",
@@ -122,7 +117,6 @@ def generate_launch_description():
                     )
                     / "rviz"
                     / "cbs.rviz",
-                    "joint_states_topic": "joint_states_rviz",
                     "gui": LaunchConfiguration("gui"),
                     "gazebo_world_file": LaunchConfiguration("gazebo_world_file"),
                 }.items(),
