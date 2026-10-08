@@ -14,6 +14,8 @@ from blockpose.pose import BlockPose, quat_xyzw_to_rotmat
 
 # Default path relative to repo root (two levels up from tools/, one up from python/)
 _REPO_ROOT = Path(__file__).parent.parent.parent
+# Named for pose 1 (what data/ was recorded at) but valid for the launches'
+# current default pose 2 too -- see its `reference.applies_to`.
 _DEFAULT_TRANSFORM_CONFIG = _REPO_ROOT / "config" / "transforms_pzs100_initial_pose_1.yaml"
 _DEFAULT_CAMERA_CALIB = _REPO_ROOT / "config" / "calibration" / "calib_blackfly_to_seyond.yaml"
 
@@ -125,9 +127,7 @@ class TFSnapshot:
         if len(matches) == 1:
             return self.transforms[matches[0]]
         if len(matches) > 1:
-            raise KeyError(
-                f"TF lookup for {parent!r} -> {child!r} is ambiguous: {sorted(matches)}"
-            )
+            raise KeyError(f"TF lookup for {parent!r} -> {child!r} is ambiguous: {sorted(matches)}")
         raise KeyError(f"{name} not found in tf snapshot (have: {sorted(self.transforms)})")
 
     @property

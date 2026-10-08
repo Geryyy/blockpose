@@ -222,4 +222,7 @@ rpy_deg: [0.0, 0.0, 180.0]
 
 Do not insert this spawn mapping into the ROS TF tree. The reference
 `T_world_seyond` in `config/transforms_pzs100_initial_pose_1.yaml` is derived
-from the URDF and `config/initialization/initialization_horizontal.yaml`.
+from the URDF and `config/initialization/initialization_horizontal.yaml` — and
+holds unchanged for `initialization_outside.yaml` (`initial_pose:=2`), which the
+Gazebo launches default to since issue 235. See that file's
+`reference.applies_to` for why, and which poses it does not cover.

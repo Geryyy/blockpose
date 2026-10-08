@@ -5,13 +5,12 @@
 #     gazebo:=false load_ros2_control:=false rigid:=true sim_hydraulics:=false \
 #     initial_pose:=1 tool:=pzs100_description post_setup:=134
 #
-# Dynamic joint assumption for the world_* reference transforms:
-#   epsilon_crane_description/config/initialization_horizontal.yaml
-#   theta1_0 = 0.785 rad
-#
 # Convention:
 #   T_parent_child maps points from child coordinates into parent coordinates.
 #   rpy is roll, pitch, yaw in radians.
+#
+# The file name says pose 1 because that is what the annotated snapshots under
+# data/ were recorded at; the numbers cover pose 2 as well, see applies_to.
 
 reference:
   ros_world_frame: world
@@ -19,8 +18,37 @@ reference:
   default_pzs100_launches:
     - concrete_block_behavior_tree/launch/gazebo_wall_assembly_pzs100.launch.py
     - concrete_block_behavior_tree/launch/gazebo_basic_pick_and_place_pzs100.launch.py
-  default_initial_pose_id: 1
-  initial_pose_file: initialization_horizontal.yaml
+  # Issue 235 moved both launches 1 -> 2: pose 1's arm is outside crane_model's
+  # control-safe box, so crane_planner refuses the first move from it.
+  default_initial_pose_id: 2
+  initial_pose_file: initialization_outside.yaml
+  # One transform set, both poses: of everything in dynamic_chain_to_seyond
+  # below, only these four initialization values reach a world_* transform, and
+  # the two files agree on all four. Verified by
+  # tests/python/test_start_pose_transforms.py.
+  #
+  # Caveat for whoever adds a third pose: only three of the four are joint
+  # *states* that a type scan can find. truck_pitch_clearance is baked into the
+  # truck_pitch joint's own origin (epsilon_crane_description/urdf/
+  # truck.urdf.xacro:45, unconditionally), so a pose that lifts the truck off the
+  # ground shifts every world_* z by that much with nothing structural to notice
+  # it -- hence it is listed here, where the test does compare it.
+  #
+  # The pose-independence is a property of the *gazebo:=false* description, which
+  # is what urdf/pzs100_initial_pose_1.urdf is and what publishes the live TF
+  # tree (epsilon_crane_bringup_sim's robot_state_publisher_rviz). Do not reuse
+  # the argument for gazebo:=true: there theta1_0 and q4_0 *are* baked into joint
+  # origins and limits (urdf/joints/theta1_slewing_joint.urdf.xacro:8-12), and
+  # the joint value is the offset-corrected one instead.
+  applies_to:
+    1: initialization_horizontal.yaml
+    2: initialization_outside.yaml
+  # Keys as the initialization yamls spell them.
+  dynamic_joint_assumption:
+    theta1_0: 0.785
+    truck_roll: 0.0
+    truck_pitch: 0.0
+    truck_pitch_clearance: 0.0
 
 transforms:
   - name: T_world_K0_mounting_base
@@ -103,4 +131,3 @@ dynamic_chain_to_seyond:
   - theta1_slewing_joint
   - root_sensor_to_konsole
   - seyond_joint
-
