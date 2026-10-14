@@ -1,0 +1,4 @@
+concrete_block_detector:
+  ros__parameters:
+    modules:
+      gripper_self_filter: {enabled: false}

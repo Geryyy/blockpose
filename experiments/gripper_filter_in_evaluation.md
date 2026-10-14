@@ -1,5 +1,8 @@
 # The evaluation was measuring the detector without the gripper self-filter
 
+> Superseded for the deployed detector by `detection_eval_deployed.md`: these numbers come from
+> the Python `_run_detection` defaults, never the shipped config.
+
 **Result: precision was understated by ~9 points, and it changes the verdict on
 the RGB proposer.**
 
