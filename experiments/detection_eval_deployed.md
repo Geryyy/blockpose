@@ -99,6 +99,20 @@ Run C by subgroup (centre / strict / n):
 
 Both false positives are real blocks placed 0.31 / 0.42 m off; none come from the gripper or pallets.
 
+## Runtime
+
+The run-C command repeated 10 times over the same 23 scans, `OMP_NUM_THREADS=1`, waited for
+`loadavg < 1.0` first. `runtime_ms` of the 230 detections (nearest-rank percentiles):
+
+| p50 | p90 | max | min | mean | > 100 ms |
+|---|---|---|---|---|---|
+| 65.3 | 101.1 | 140.4 | 38.6 | 69.4 | 27/230 |
+
+The 10 runs are in [`detector_timing/`](detector_timing/) — `det_{1..10}.json`, one object per
+scan under `snapshots[]`, `runtime_ms` each; `detector_git_revision` 44f523b, `fk_prior_enabled`
+true. This is the snapshot runner, so it excludes point-cloud transport, the TF lookups and the
+service round trip the deployed node pays on top.
+
 ## Caveats
 
 - Rail/TCP TF is grafted, Δt ≤ 0.6 s, TCP speed ≤ 0.53 m/s; 1783429000_seq7, 1783429007_seq4 and
