@@ -132,18 +132,46 @@ inline Points voxel_downsample(const Points & input, double voxel_size)
 
 inline std::vector<Points> split_connected_row(const Points & cluster, const DetectionParameters & params)
 {
+  if (cluster.empty()) {return {cluster};}
   const auto e = extent(cluster); const std::size_t axis = e[0] >= e[1] ? 0U : 1U;
-  const double width = params.block_dims[axis]; const int count = static_cast<int>(std::llround(e[axis] / width));
-  if (count < 2 || count > 8 || std::abs(e[axis] - count * width) > .12) {return {cluster};}
-  double low = std::numeric_limits<double>::infinity(); for (const auto & point : cluster) {low = std::min(low, point[static_cast<Eigen::Index>(axis)]);}
+  // Beam smear past an end face inflates the raw extent by up to 8 cm, enough to push a
+  // real two-block row past the budget below (lab-day hedge: raw 1.85-1.93 m against a
+  // 1.80 m row). Measure the run between its 1st and 99th percentile instead.
+  const auto trimmed = [&cluster](std::size_t index, double * begin) {
+      std::vector<double> values; values.reserve(cluster.size());
+      for (const auto & point : cluster) {
+        values.push_back(point[static_cast<Eigen::Index>(index)]);
+      }
+      const double low = percentile_linear(values, 1.);
+      if (begin != nullptr) {*begin = low;}
+      return percentile_linear(std::move(values), 99.) - low;
+    };
+  double low = 0.; const double width = params.block_dims[axis], span = trimmed(axis, &low);
+  const int count = static_cast<int>(std::llround(span / width));
+  if (count < 2 || count > 8 || std::abs(span - count * width) > .12) {return {cluster};}
+  // Abutting blocks leave no density valley at the seam (lab-day hedge: a flat
+  // x-histogram across a 1.87 m two-block strip), so the test below cannot see them.
+  // A run that is whole block lengths long, no wider than one block and one course
+  // high is that row, and there the extent carries the seam on its own. The width and
+  // height are upper bounds only: a row is routinely seen less than 0.6 m deep
+  // (0.42-0.55 m on the lab-day clouds, the far side cropped) and ground removal eats
+  // the bottom 0.15 m. Both keep out what must not be tiled -- a pile with a block
+  // lying across it, and a second course, whose blocks straddle the seams below them
+  // so the cuts would run through them. `width` is block_dims[axis] with axis a world
+  // axis, so this reaches a row along world x only; along y the valley still rules.
+  const bool abutting_row = width == params.block_dims[0] &&
+    trimmed(1U - axis, nullptr) <= params.block_dims[1] + .12 &&
+    trimmed(2U, nullptr) <= params.block_dims[2] + .12;
   const double valley_half = std::max(params.voxel_size * 1.5, .04), shoulder = std::max(params.voxel_size * 3., .08);
-  for (int section = 1; section < count; ++section) {
+  for (int section = 1; section < count && !abutting_row; ++section) {
     const double boundary = low + section * width; std::size_t valley = 0, left = 0, right = 0;
     for (const auto & point : cluster) {const double value = point[static_cast<Eigen::Index>(axis)]; if (std::abs(value - boundary) <= valley_half) {++valley;} if (value >= boundary - shoulder - valley_half && value < boundary - valley_half) {++left;} if (value > boundary + valley_half && value <= boundary + shoulder + valley_half) {++right;}}
     const double expected = static_cast<double>(left + right) * valley_half / shoulder;
     if (expected <= 0.0 || valley > .45 * expected) {return {cluster};}
   }
-  std::vector<Points> result; for (int section = 0; section < count; ++section) {const double begin = low + section * width, end = low + (section + 1) * width; Points region; for (const auto & point : cluster) {const double value = point[static_cast<Eigen::Index>(axis)]; if (value >= begin - 1e-6 && (value <= end + (section == count - 1 ? 1e-6 : 0.0))) {region.push_back(point);}} if (region.size() >= params.cluster_min_size) {result.push_back(std::move(region));}}
+  // The trimmed run starts inside the cloud, so the outer sections keep what it cut.
+  constexpr double kUnbounded = std::numeric_limits<double>::infinity();
+  std::vector<Points> result; for (int section = 0; section < count; ++section) {const double begin = section == 0 ? -kUnbounded : low + section * width, end = section == count - 1 ? kUnbounded : low + (section + 1) * width; Points region; for (const auto & point : cluster) {const double value = point[static_cast<Eigen::Index>(axis)]; if (value >= begin && value <= end) {region.push_back(point);}} if (region.size() >= params.cluster_min_size) {result.push_back(std::move(region));}}
   return result.size() == static_cast<std::size_t>(count) ? result : std::vector<Points>{cluster};
 }
 
@@ -288,25 +316,82 @@ inline DetectionResult detect_without_refinement(
       RegionPairingDiagnostics region_pairing; region_pairing.proposal_component = proposal_index; region_pairing.region = region_index; region_pairing.dims_index = dims_index;
       const auto pairs = candidate_plane_sets(planes, params, result.ground, dims, &region_pairing.planes);
       result.pairing_diagnostics.push_back(std::move(region_pairing));
-      for (const auto & pair : pairs) {
-        Points local_support = region;
-        if (pair.second != nullptr) {local_support = pair.first->points; local_support.insert(local_support.end(), pair.second->points.begin(), pair.second->points.end());}
-        const auto pose = canonicalize_pose(synthesize_pose(*pair.first, pair.second, local_support, dims)); const std::size_t support = pair.first->points.size() + (pair.second == nullptr ? 0U : pair.second->points.size()); auto hypothesis = make_hypothesis(pose, support, result.ground, pair.second == nullptr ? 1U : 2U, sensor_context); hypothesis.prior_match = best_prior_match(pose.position, pose.rotation, pose.dims, priors);
-        const double top_height = result.ground.height(pair.first->centroid); const bool supported = !(top_height <= dims[2] * 1.1 && std::abs(hypothesis.support_height_m) > .135);
-        const std::size_t top_index = static_cast<std::size_t>(pair.first - planes.data());
-        const std::optional<std::size_t> side_index = pair.second == nullptr ? std::nullopt : std::optional<std::size_t>(static_cast<std::size_t>(pair.second - planes.data()));
+      for (const auto & set : pairs) {
+        const double top_ground_height = result.ground.height(set.top->centroid);
+        Points local_support;
+        if (set.side != nullptr) {
+          local_support = set.top->points;
+          local_support.insert(
+            local_support.end(), set.side->points.begin(), set.side->points.end());
+        } else {
+          // The top-only yaw is the dominant axis of this footprint, so it must not
+          // see the blocks a stack holds below this one: there it reads their row.
+          const double band_floor = top_ground_height - dims[2] * .9;
+          for (const auto & point : region) {
+            if (result.ground.height(point) >= band_floor) {local_support.push_back(point);}
+          }
+        }
+        auto pose = canonicalize_pose(synthesize_pose(*set.top, set.side, local_support, dims));
+        // Same face, one whole block height down per level (see PlaneSet), and one
+        // face of evidence like any other single-face fit.
+        if (set.level > 0U) {
+          pose.position -= pose.rotation.col(2) * (static_cast<double>(set.level) * dims[2]);
+          pose.confidence = .5;
+        }
+        std::size_t support =
+          set.top->points.size() + (set.side == nullptr ? 0U : set.side->points.size());
+        // A level's own support is the shared face's returns in its own height band.
+        if (set.level > 0U) {
+          support = static_cast<std::size_t>(std::count_if(
+            set.side->points.begin(), set.side->points.end(), [&pose, &dims](const Point & point) {
+              return std::abs((point - pose.position).dot(pose.rotation.col(2))) <= dims[2] / 2.;
+            }));
+        }
+        auto hypothesis = make_hypothesis(pose, support, result.ground, set.side == nullptr || set.level > 0U ? 1U : 2U, sensor_context); hypothesis.prior_match = best_prior_match(pose.position, pose.rotation, pose.dims, priors);
+        const double top_height = top_ground_height - static_cast<double>(set.level) * dims[2]; const bool supported = !(top_height <= dims[2] * 1.1 && std::abs(hypothesis.support_height_m) > .135);
+        const std::size_t top_index = static_cast<std::size_t>(set.top - planes.data());
+        const std::optional<std::size_t> side_index = set.side == nullptr ? std::nullopt : std::optional<std::size_t>(static_cast<std::size_t>(set.side - planes.data()));
         RawHypothesisLineage lineage;
-        lineage.id = "component-" + std::to_string(proposal_index) + "/region-" + std::to_string(region_index) + "/dims-" + std::to_string(dims_index) + "/top-" + std::to_string(top_index) + "/side-" + (side_index ? std::to_string(*side_index) : "none");
+        lineage.id = "component-" + std::to_string(proposal_index) + "/region-" + std::to_string(region_index) + "/dims-" + std::to_string(dims_index) + "/top-" + std::to_string(top_index) + "/side-" + (side_index ? std::to_string(*side_index) : "none") + (set.level > 0U ? "/level-" + std::to_string(set.level) : "");
         lineage.proposal_component = proposal_index; lineage.region = region_index; lineage.top_plane = top_index; lineage.side_plane = side_index;
-        lineage.top_normal = pair.first->normal; lineage.top_centroid = pair.first->centroid;
-        if (pair.second != nullptr) {lineage.side_normal = pair.second->normal; lineage.side_centroid = pair.second->centroid;}
-        lineage.candidate_dims = dims; lineage.top_only = pair.second == nullptr; lineage.synthesized_pose = pose; lineage.evidence = hypothesis.evidence; lineage.top_support_height_m = top_height;
-        lineage.top_patch_inliers = pair.first->points.size();
+        lineage.top_normal = set.top->normal; lineage.top_centroid = set.top->centroid;
+        if (set.side != nullptr) {lineage.side_normal = set.side->normal; lineage.side_centroid = set.side->centroid;}
+        lineage.candidate_dims = dims; lineage.top_only = set.side == nullptr; lineage.synthesized_pose = pose; lineage.evidence = hypothesis.evidence; lineage.top_support_height_m = top_height;
+        lineage.top_patch_inliers = set.top->points.size();
         patch_in_plane_extents(
-          *pair.first, pose.rotation.col(0), pose.rotation.col(1),
+          *set.top, pose.rotation.col(0), pose.rotation.col(1),
           &lineage.top_patch_extent_major_m, &lineage.top_patch_extent_minor_m,
           &lineage.top_patch_extent_local_x_m, &lineage.top_patch_extent_local_y_m);
-        lineage.accepted_to_raw = top_height >= dims[2] * .70 && supported;
+        // Dims siblings share their patches and differ by 90 degrees, so what those
+        // patches measure is the only quantity that can say which axis is the 0.9 m
+        // one -- the evidence cannot, both siblings explain the same returns. Keep
+        // whichever the support overhangs less; support too big for either says
+        // nothing and keeps both. Without this the crosswise block of a pile is an
+        // exact tie, and the loser is a 90 degree yaw error refinement cannot undo.
+        const auto support_span = [&local_support](const Point & axis) {
+            std::vector<double> values; values.reserve(local_support.size());
+            for (const auto & point : local_support) {values.push_back(point.dot(axis));}
+            const double high = percentile_linear(values, 98.);
+            return high - percentile_linear(std::move(values), 2.);
+          };
+        const auto overhang = [](double span, double side) {
+            return std::max(0., span - side - .12);
+          };
+        const double along = support_span(pose.rotation.col(0));
+        const double across = support_span(pose.rotation.col(1));
+        // Only when the support says so by more than it is itself worth: the margin
+        // keeps an ambiguous patch -- a block half covered by the gripper holding it --
+        // a tie both siblings survive, as before, and it also keeps the two siblings'
+        // tests exact complements, which a bare `<=` on two roundings of one real
+        // number does not (a 1 ulp skew would drop both).
+        const bool fits_better_than_rotated =
+          overhang(along, pose.dims[0]) + overhang(across, pose.dims[1]) <=
+          overhang(across, pose.dims[0]) + overhang(along, pose.dims[1]) + .12;
+        // A level is a block nothing has a top face for, so the shared side face has
+        // to have measured it: an empty band is a gap in the stack, not a block.
+        const bool level_measured = set.level == 0U || support >= params.refine_min_points;
+        lineage.accepted_to_raw = top_height >= dims[2] * .70 && supported &&
+          fits_better_than_rotated && level_measured;
         lineage.fate = lineage.accepted_to_raw ? "raw" : "geometric_rejected";
         result.raw_lineage.push_back(std::move(lineage));
         if (result.raw_lineage.back().accepted_to_raw) {

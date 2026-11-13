@@ -56,10 +56,10 @@ input Points
   ├─ 4  dbscan_proposals ───────────────► ≤ 8 ranked components
   │        └─ per component:
   ├─ 5      density_scaled_parameters (range-compensated gates)
-  ├─ 6      split_connected_row (density-valley tiling)
+  ├─ 6      split_connected_row (extent tiling, density valley or abutting row)
   ├─ 7      wide-proposal skip
   ├─ 8      fit_planes  (≤ 5 sequential RANSAC patches, then in-plane splitting)
-  ├─ 9      candidate_plane_sets  (top ⨯ best side, per dims variant)
+  ├─ 9      candidate_plane_sets  (top ⨯ best side ⨯ level, per dims variant)
   ├─ 10     synthesize_pose + make_hypothesis  → evidence score
   ├─ 11  score threshold → conflict alternatives → ground bounds
   │                                    [detect_without_refinement returns here]
@@ -157,14 +157,23 @@ detector contract.
 
 `split_connected_row` handles the case where several abutting blocks form one
 connected component. Along the longer horizontal axis it computes
-`count = round(extent / block width)` and only proceeds if `count` is 2…8 and
-the extent is within 0.12 m of `count × width`.
+`count = round(run / block width)` and only proceeds if `count` is 2…8 and the
+run is within 0.12 m of `count × width`. The run is the 1st…99th percentile
+span, not the raw extent: beam smear past an end face adds up to 8 cm, enough to
+push a real two-block row out of that budget.
 
 It then requires *observable* boundaries: at each interior boundary it counts
 points in a narrow valley band versus the shoulders either side, and demands the
 valley be sparser than 45% of what the shoulder density predicts. If any
 boundary fails, the component is returned whole. This is deliberately
 conservative — a seamless long object must not get tiled into imaginary blocks.
+
+Blocks that physically abut have no valley to find (a 1.87 m lab-day hedge strip
+histograms flat across the seam), so one case is exempt from it: a run that tiles
+at the block **length** and is no wider across than one block carries its seams on
+the extent alone. The width bound is one-sided — a row is routinely seen less than
+0.6 m deep — and excludes a pile with a block lying across it, which must not be
+tiled: the cut would run through the block on top.
 
 ### 7. Wide-proposal skip
 
@@ -210,14 +219,22 @@ four gates, and the best survivor is chosen by `gap + |drop - height/2|`:
 
 | Gate | Condition |
 | --- | --- |
-| drop range | 0.15 m < (top height − side centroid height) < `dims[2]` − 0.1 m |
+| drop range | 0.15 m < (top height − side centroid height) < `dims[2]` − 0.1 m, *or* the side covers a whole block height below (see levels) |
 | support band | side spans the band from 0.30 m to 0.15 m below the top |
 | tangential overlap | ≥ 0.15 m of shared extent along the top×side tangent |
 | gap | top points lie within 0.1 m of the side plane |
 
-A top with no acceptable side still emits a pair with a null side. Top-only
+A top with no acceptable side still emits a set with a null side. Top-only
 hypotheses are a normal output, not a failure path — they just carry
 `confidence = 0.5` and one observed face instead of two.
+
+**Levels.** A block under the one this top plane belongs to has no top face of
+its own, so no pairing can reach it — the bottom of a stack was invisible. The
+stack's side face is flush and reaches down past it, so each whole block height
+it covers below the top block (at least halfway, and only for a face that is a
+block's own width across) emits one more set at that level: the same patches,
+the box lowered by `level × dims[2]`. Its support is the side points in that
+box's own height band, and it reports one observed face.
 
 ### 10. Pose synthesis and evidence
 
@@ -227,11 +244,18 @@ hypotheses are a normal output, not a failure path — they just carry
 - local **X** is the side normal projected into the top plane, signed to point
   away from the side patch. With no side, it is the dominant PCA axis of the
   cluster's world-XY footprint — taken in XY rather than in the top plane
-  because on a real stacked cluster those two differed by 34° of yaw;
+  because on a real stacked cluster those two differed by 34° of yaw. That
+  footprint is the region cut to the top plane's own block band, so a stack does
+  not hand the block on top the axis of the row underneath it;
 - local **Y** completes the right-handed frame;
 - position starts at `top.centroid - Z × dims[2]/2` (i.e. the top face defines
   the centre height), then, when a side exists, slides along X so the side face
   sits exactly `dims[0]/2` from the centre.
+
+The two dims siblings explain the same returns, so no evidence can separate
+them; what their shared patches measure can. A hypothesis is dropped when its
+support overhangs the dims it claims more than it would the 90°-rotated ones.
+Support too big for either keeps both, so at most one sibling is ever dropped.
 
 `canonicalize_pose` rotates the (0.6, 0.9, 0.6) variant 90° about local Z so
 every emitted pose carries the canonical 0.9 × 0.6 × 0.6 dims. **Poses are

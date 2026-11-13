@@ -376,23 +376,54 @@ struct RegionPairingDiagnostics
   std::vector<PairingDiagnostics> planes;
 };
 
-inline std::vector<std::pair<const PlanePatch *, const PlanePatch *>> candidate_plane_sets(
+// One hypothesis seed: a top plane, the side plane that fixes its yaw and its
+// along-length position (or none), and how many whole block heights below that
+// top plane the box sits. `level` is non-zero only for a block whose own top face
+// is covered by the block above it -- the stack's side face runs down past it,
+// and nothing else in the cloud locates it.
+struct PlaneSet
+{
+  const PlanePatch * top{nullptr};
+  const PlanePatch * side{nullptr};
+  std::size_t level{0};
+};
+
+inline std::vector<PlaneSet> candidate_plane_sets(
   const std::vector<PlanePatch> & planes, const DetectionParameters & params, const GroundPlane & ground,
   const std::array<double, 3> & dims, std::vector<PairingDiagnostics> * diagnostics_out = nullptr)
 {
   const Point up = ground.normal.normalized(); const double top_cos = std::cos(params.top_plane_angle_deg * M_PI / 180.0), side_sin = std::sin(params.side_plane_angle_deg * M_PI / 180.0); std::vector<const PlanePatch *> tops, sides;
   if (diagnostics_out != nullptr) {diagnostics_out->clear(); diagnostics_out->resize(planes.size());}
   for (std::size_t plane_index = 0; plane_index < planes.size(); ++plane_index) {const auto & patch = planes[plane_index]; const bool is_top = std::abs(patch.normal.dot(up)) > top_cos; const bool is_side = std::abs(patch.normal.dot(up)) < side_sin; if (is_top) {tops.push_back(&patch);} if (is_side) {sides.push_back(&patch);} if (diagnostics_out != nullptr) {(*diagnostics_out)[plane_index].plane_index = plane_index; (*diagnostics_out)[plane_index].is_top = is_top; (*diagnostics_out)[plane_index].is_side = is_side;}}
-  std::sort(tops.begin(), tops.end(), [&up](const auto * a, const auto * b) {return a->centroid.dot(up) > b->centroid.dot(up);}); std::vector<std::pair<const PlanePatch *, const PlanePatch *>> output;
+  std::sort(tops.begin(), tops.end(), [&up](const auto * a, const auto * b) {return a->centroid.dot(up) > b->centroid.dot(up);}); std::vector<PlaneSet> output;
   for (const auto * top : tops) {
     const PlanePatch * best = nullptr; double best_score = std::numeric_limits<double>::infinity(), top_height = top->centroid.dot(up);
+    const PlanePatch * stacked = nullptr; std::size_t stacked_levels = 0U;
+    // A block with no top face of its own is only explicable as part of a stack
+    // standing on the ground, so this plane has to sit a whole number of block
+    // heights above it, and that number bounds how many blocks can be under it.
+    // Without it a cap with a long face below -- a gripper over the block it
+    // carries -- founds blocks in mid-air.
+    const double courses = std::round(ground.height(top->centroid) / dims[2]);
+    const double levels_to_ground =
+      std::abs(ground.height(top->centroid) - courses * dims[2]) <= .15 ? courses - 1. : 0.;
     const std::size_t top_index = static_cast<std::size_t>(top - planes.data());
     for (const auto * side : sides) {
       Point n = side->normal - side->normal.dot(up) * up; if (n.norm() < 1e-8) {continue;} n.normalize();
       double low = std::numeric_limits<double>::infinity(), high = -low; for (const auto & point : side->points) {const double h = point.dot(up); low = std::min(low, h); high = std::max(high, h);}
       const double drop = top_height - side->centroid.dot(up);
+      // A face shared by a whole stack reaches this top plane but has its centroid a
+      // block or more below it, so the drop range alone would drop it. It is still
+      // this block's own face, and the only evidence for the blocks under it.
+      // 2nd..98th percentile, as every other span here: three stray inliers
+      // coplanar with the face but below it would otherwise invent a level.
+      std::vector<double> heights; heights.reserve(side->points.size());
+      for (const auto & point : side->points) {heights.push_back(point.dot(up));}
+      const double face_low = percentile_linear(heights, 2.);
+      const double covered_levels =
+        std::min(std::floor((top_height - face_low) / dims[2] - .5), levels_to_ground);
       const bool drop_range_ok = !(drop < .15 || drop > dims[2] - .1), support_band_ok = !(high < top_height - .15 || low > top_height - .3);
-      if (!drop_range_ok || !support_band_ok) {
+      if (!support_band_ok) {
         if (diagnostics_out != nullptr) {const std::size_t side_index = static_cast<std::size_t>(side - planes.data()); (*diagnostics_out)[top_index].side_attempts.push_back({side_index, drop, 0.0, 0.0, drop_range_ok, support_band_ok, false, false, false});}
         continue;
       }
@@ -407,10 +438,32 @@ inline std::vector<std::pair<const PlanePatch *, const PlanePatch *>> candidate_
       }
       const double score = gap + std::abs(drop - dims[2] / 2.0); const bool gap_ok = gap <= .1;
       if (diagnostics_out != nullptr) {const std::size_t side_index = static_cast<std::size_t>(side - planes.data()); (*diagnostics_out)[top_index].side_attempts.push_back({side_index, drop, gap, overlap, drop_range_ok, support_band_ok, overlap_ok, gap_ok, false});}
-      if (gap_ok && (score < best_score || (score == best_score && best != nullptr && canonical_less(side->centroid, best->centroid)))) {best = side; best_score = score;}
+      if (!gap_ok) {continue;}
+      // A face that is not a block's own width across is not a block's: without
+      // that an ordinary wall would found a stack of them. Spans are trimmed for
+      // the same reason as the heights above.
+      std::vector<double> across; across.reserve(side->points.size());
+      for (const auto & point : side->points) {across.push_back(point.dot(tangent));}
+      const double face_width = percentile_linear(across, 98.) - percentile_linear(across, 2.);
+      const bool block_wide =
+        std::min(std::abs(face_width - dims[0]), std::abs(face_width - dims[1])) <= .12;
+      // Every whole block height such a face covers below the top block is another block.
+      // Only the levels below use it: letting it stand in as this top plane's own side
+      // would pair a plate with the long face under it -- a gripper with its rail, over
+      // the block it carries -- and that pairing outscores the carried block itself.
+      const bool multi_level = covered_levels >= 1. && covered_levels <= 4. && block_wide;
+      if (drop_range_ok &&
+        (score < best_score || (score == best_score && best != nullptr &&
+        canonical_less(side->centroid, best->centroid)))) {best = side; best_score = score;}
+      if (multi_level && static_cast<std::size_t>(covered_levels) > stacked_levels) {
+        stacked = side; stacked_levels = static_cast<std::size_t>(covered_levels);
+      }
     }
     if (diagnostics_out != nullptr && best != nullptr) {const std::size_t best_side_index = static_cast<std::size_t>(best - planes.data()); (*diagnostics_out)[top_index].chosen_side_plane_index = best_side_index; for (auto & attempt : (*diagnostics_out)[top_index].side_attempts) {if (attempt.side_plane_index == best_side_index) {attempt.selected = true;}}}
-    output.emplace_back(top, best);
+    output.push_back({top, best, 0U});
+    for (std::size_t level = 1U; level <= stacked_levels; ++level) {
+      output.push_back({top, stacked, level});
+    }
   }
   return output;
 }
