@@ -238,8 +238,15 @@ inline DetectionResult detect_without_refinement(
     }
   }
   stage_started = std::chrono::steady_clock::now();
+  const auto anchors_end_face = [&params](const PosePrior & prior) {
+      return prior.may_anchor_end_face && prior.weight > 0.0 && prior.dims == params.block_dims;
+    };
+  std::vector<Points> end_face_components;
+  const bool collect_end_faces = priors != nullptr &&
+    std::any_of(priors->begin(), priors->end(), anchors_end_face);
   const auto proposals = dbscan_proposals(
-    proposal_seed, params, &result.ground, &result.proposal_diagnostics, sensor_context);
+    proposal_seed, params, &result.ground, &result.proposal_diagnostics, sensor_context,
+    collect_end_faces ? &end_face_components : nullptr);
   result.timings.proposals = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - stage_started).count();
   result.counts.proposal_components = proposals.size();
   stage_started = std::chrono::steady_clock::now();
@@ -312,6 +319,31 @@ inline DetectionResult detect_without_refinement(
       result.timings.hypothesis_generation_evidence += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - hypothesis_started).count();
     }
   }
+  // Prior-anchored end-face recovery, for the components the xy extent gate drops.
+  // It is a fit on measured points, not a seeded belief, so it joins `raw` and faces
+  // the same score gate, selection, refinement and NMS as any plane fit.
+  if (collect_end_faces) {
+    for (std::size_t prior_index = 0; prior_index < priors->size(); ++prior_index) {
+      const auto & prior = (*priors)[prior_index];
+      if (!anchors_end_face(prior)) {continue;}
+      for (std::size_t component = 0; component < end_face_components.size(); ++component) {
+        const auto pose = end_face_pose(end_face_components[component], prior, params);
+        // Outside the request's own acceptance window the caller reads a detection as a
+        // different block, so a box the face puts out there is not worth proposing.
+        // Negated rather than `>` so a non-finite pose is rejected, not accepted.
+        if (!pose ||
+          !((pose->position - prior.position).norm() <= prior.translation_tolerance_m)) {continue;}
+        auto hypothesis = make_hypothesis(
+          *pose, end_face_components[component].size(), result.ground, 1U, sensor_context);
+        hypothesis.prior_match =
+          best_prior_match(pose->position, pose->rotation, pose->dims, priors);
+        hypothesis.trace_id = "end_face/" + std::to_string(prior_index) + "/component-" +
+          std::to_string(component);
+        hypothesis.source = "end_face";
+        raw.push_back(std::move(hypothesis));
+      }
+    }
+  }
   result.timings.plane_hypotheses = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - stage_started).count();
   result.counts.raw_hypotheses = raw.size(); stage_started = std::chrono::steady_clock::now(); std::vector<CuboidHypothesis> thresholded; for (const auto & hypothesis : raw) {if (hypothesis.evidence.score >= params.min_score) {thresholded.push_back(hypothesis); if (hypothesis.lineage_index) {auto & lineage = result.raw_lineage[*hypothesis.lineage_index]; lineage.passed_score_threshold = true; lineage.fate = "score_passed";}} else if (hypothesis.lineage_index) {result.raw_lineage[*hypothesis.lineage_index].fate = "score_rejected";}}
   if (visual_scorer != nullptr) {for (auto & hypothesis : thresholded) {hypothesis.visual_evidence = (*visual_scorer)(hypothesis.pose);}}
@@ -357,13 +389,15 @@ inline DetectionResult detect(
   std::vector<CuboidHypothesis> thresholded_before_refinement;
   DetectionResult result = detect_without_refinement(
     input, params, sensor_context, priors, visual_scorer, &thresholded_before_refinement);
-  // A prior is allowed to seed refinement only when the current cloud verifies
-  // it with nearby cuboid-surface returns. This recovers gripped/occluded
-  // blocks that never formed a DBSCAN proposal without manufacturing a block.
+  // A prior whose caller allows it (may_seed_refinement, never a label) is allowed
+  // to seed refinement only when the current cloud verifies it with nearby
+  // cuboid-surface returns. This recovers gripped/occluded blocks that never formed
+  // a DBSCAN proposal without manufacturing a block.
   if (priors != nullptr) {
     for (std::size_t prior_index = 0; prior_index < priors->size(); ++prior_index) {
       const auto & prior = (*priors)[prior_index];
-      if (prior.source != "fk" || prior.weight <= 0.0 || prior.dims != params.block_dims) {continue;}
+      if (!prior.may_seed_refinement || prior.weight <= 0.0 ||
+        prior.dims != params.block_dims) {continue;}
       CuboidPose seed; seed.position = prior.position; seed.rotation = prior.rotation; seed.dims = prior.dims;
       // Refine the FK initialization against only the points its surface owns.
       // Its tolerance is deliberately the configured FK tolerance, rather than

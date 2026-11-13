@@ -260,7 +260,11 @@ inline std::vector<Points> dbscan_label_components(const Points & input, const D
 inline std::vector<Points> dbscan_proposals(
   const Points & input, const DetectionParameters & params, const GroundPlane * ground = nullptr,
   std::vector<ProposalComponentDiagnostics> * diagnostics_out = nullptr,
-  const SensorContext * sensor_context = nullptr)
+  const SensorContext * sensor_context = nullptr,
+  // Points of every component that passed all gates but the xy extent -- the
+  // signature of a block seen only end-on.  Non-null only when a prior may
+  // anchor one (see end_face_pose below); nothing else here changes.
+  std::vector<Points> * extent_xy_rejected_out = nullptr)
 {
   std::vector<Points> components = dbscan_label_components(input, params);
   if (diagnostics_out != nullptr) {diagnostics_out->clear(); diagnostics_out->reserve(components.size());}
@@ -280,6 +284,8 @@ inline std::vector<Points> dbscan_proposals(
       diag.size_gate_ok = size_ok; diag.extent_xy_gate_ok = extent_xy_ok; diag.extent_z_gate_ok = extent_z_ok; diag.center_z_gate_ok = center_z_ok; diag.gate_passed = valid && center_z_ok;
       diagnostics_out->push_back(std::move(diag));
     }
+    if (extent_xy_rejected_out != nullptr && size_ok && extent_z_ok && center_z_ok &&
+      !extent_xy_ok) {extent_xy_rejected_out->push_back(proposal);}
     if (!valid) {continue;} if (ground != nullptr && center_height > params.cluster_max_center_z) {continue;}
     accepted_labels.push_back(component_label); accepted.push_back(std::move(proposal));
   }
@@ -416,6 +422,76 @@ inline std::vector<std::pair<const PlanePatch *, const PlanePatch *>> candidate_
 inline Pose synthesize_pose(const PlanePatch & top, const PlanePatch * side, const Points & cluster, const std::array<double, 3> & dims)
 {
   Point z = top.normal.normalized(); if (z.z() < 0.0) {z = -z;} Point x; if (side != nullptr) {x = side->normal - side->normal.dot(z) * z; if (x.norm() < 1e-8) {x = Point::UnitX() - Point::UnitX().dot(z) * z;} x.normalize(); if ((centroid(cluster) - side->centroid).dot(x) < 0.0) {x = -x;}} else {Eigen::Vector2d center = Eigen::Vector2d::Zero(); for (const auto & point : cluster) {center += point.head<2>();} if (!cluster.empty()) {center /= static_cast<double>(cluster.size());} Eigen::Matrix2d covariance = Eigen::Matrix2d::Zero(); for (const auto & point : cluster) {const Eigen::Vector2d offset = point.head<2>() - center; covariance.noalias() += offset * offset.transpose();} Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d> solve(covariance); const Eigen::Vector2d dominant = solve.info() == Eigen::Success ? Eigen::Vector2d(solve.eigenvectors().col(1)) : Eigen::Vector2d::UnitX(); x = Point(dominant.x(), dominant.y(), 0.0); if (x.norm() < 1e-8) {x = Point::UnitX();} else {x.normalize();} x -= x.dot(z) * z; if (x.norm() < 1e-8) {x = Point::UnitX() - Point::UnitX().dot(z) * z;} x.normalize();} Point y = z.cross(x).normalized(); Pose pose; pose.rotation.col(0) = x; pose.rotation.col(1) = y; pose.rotation.col(2) = z; pose.position = top.centroid - z * (dims[2] / 2.0); pose.dims = dims; pose.confidence = side == nullptr ? .5 : 1.; if (side != nullptr) {pose.position += x * (dims[0] / 2.0 - (pose.position - side->centroid).dot(x));} return canonicalize_pose(pose);
+}
+
+// A block lying with its long axis radial to the lidar returns one end face plus a
+// few cm of top, too thin on that axis for cluster_min_extent_xy, so it never forms
+// a proposal at all (326).  A prior's yaw makes it recoverable without guessing:
+// the box keeps the prior's rotation, its end face goes on the measured face plane,
+// and the lateral centre and top height come from the same points.  Deliberately
+// not synthesize_pose on the patch centroid -- that puts a 0.9 m box on a 0.17 m
+// patch and lands ~0.35 m along the length, at the edge of the request window.
+// nullopt unless the component really is just this block's end face: thin along the
+// prior's own length axis, and as wide across it as the block.
+inline std::optional<Pose> end_face_pose(
+  const Points & component, const PosePrior & prior, const DetectionParameters & params)
+{
+  if (component.size() < 3U || !prior.position.allFinite() || !prior.rotation.allFinite()) {
+    return std::nullopt;
+  }
+  // Taken as given, not re-normalized, so the axes are the columns of the pose's own
+  // rotation below and a prior that is not a rotation cannot make the two disagree.
+  const Point length_axis = prior.rotation.col(0);
+  const Point lateral_axis = prior.rotation.col(1);
+  const Point up_axis = prior.rotation.col(2);
+  std::vector<double> along, lateral, up;
+  along.reserve(component.size()); lateral.reserve(component.size()); up.reserve(component.size());
+  for (const auto & point : component) {
+    const Point offset = point - prior.position;
+    along.push_back(offset.dot(length_axis));
+    lateral.push_back(offset.dot(lateral_axis));
+    up.push_back(offset.dot(up_axis));
+  }
+  // 2nd..98th percentile spans, as patch_in_plane_extents: a few beam-smeared
+  // returns past an edge must not decide where the face is.
+  const auto low = [](const std::vector<double> & v) {return percentile_linear(v, 2.0);};
+  const auto high = [](const std::vector<double> & v) {return percentile_linear(v, 98.0);};
+  const double along_low = low(along), along_high = high(along);
+  // A patch that is not the block's own width across is not its end face.  This is what
+  // keeps out a wall, a formwork panel and a face with half its width occluded -- the
+  // last of which would otherwise come back with up to dims[1]/2 of lateral error.  The
+  // slack is for beam smear past an edge, and `region_max_extent_xy` is no help here: a
+  // component wider than it also arrives as an xy-extent rejection.
+  constexpr double kFaceWidthSlack = 0.12;
+  if (along_high - along_low >= params.cluster_min_extent_xy ||
+    std::abs(high(lateral) - low(lateral) - prior.dims[1]) > kFaceWidthSlack)
+  {
+    return std::nullopt;
+  }
+  // Which end carries the face is measured, not believed: the face is the dense planar
+  // side, the few cm of top trailing off it are not.  Taking the sign from the prior
+  // instead puts the box 0.74 m out as soon as the prior leads the block by more than
+  // half its length, and at a distance from the prior the window below still accepts.
+  std::size_t near_low = 0U, near_high = 0U;
+  for (const double value : along) {
+    if (value <= along_low + params.voxel_size) {++near_low;}
+    if (value >= along_high - params.voxel_size) {++near_high;}
+  }
+  // Comparable densities mean the thin direction is not a face seen from one side.
+  if (std::max(near_high, near_low) < 2U * std::min(near_high, near_low)) {return std::nullopt;}
+  const bool positive = near_high > near_low;
+  const double face = positive ? along_high : along_low;
+  Pose pose;
+  pose.rotation = prior.rotation;
+  pose.dims = prior.dims;
+  pose.confidence = .5;  // one face, as a top-only plane fit
+  pose.position = prior.position +
+    length_axis * (face - (positive ? 1.0 : -1.0) * prior.dims[0] / 2.0) +
+    lateral_axis * ((high(lateral) + low(lateral)) / 2.0) +
+    // Top, not the face centre: ground removal has already eaten the face's
+    // bottom 0.15 m, which would bias a centred estimate high.
+    up_axis * (high(up) - prior.dims[2] / 2.0);
+  return pose;
 }
 
 template<typename GroundModel>

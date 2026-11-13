@@ -29,6 +29,13 @@ struct PosePrior
   double weight{0.0};
   double translation_tolerance_m{0.30};
   double orientation_tolerance_rad{0.70};
+  // What the caller lets this prior do beyond resolving ambiguity -- capabilities,
+  // not a source label.  Seeding trusts the prior's whole pose where the cloud
+  // proposed nothing (a block in the jaws, one just set down); anchoring trusts
+  // only its yaw and reads the position off measured end-face points.  A
+  // pre-descent refine may therefore anchor but never seed (303).
+  bool may_seed_refinement{false};
+  bool may_anchor_end_face{false};
 };
 
 struct PriorMatch
