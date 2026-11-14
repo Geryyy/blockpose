@@ -1,7 +1,9 @@
 #pragma once
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -279,6 +281,110 @@ inline std::size_t split_touching_rows(
   return tiles.size();
 }
 
+// Is the box-local slab [low, high] along `axis` hidden behind something in front of the box?
+// Counts returns whose ray crosses the slab: in front of it and outside the box itself
+// (shadowed), or past it (free). No rays at all, e.g. past the edge of the scan, is not shadow.
+inline bool slab_shadowed(
+  const Pose & pose, Eigen::Index axis, double low, double high, const SensorContext & context)
+{
+  constexpr double kTolerance = 0.06;  // = visibility_evidence's
+  const Point half(pose.dims[0] / 2.0, pose.dims[1] / 2.0, pose.dims[2] / 2.0);
+  Point centre = Point::Zero(), slab_half = half;
+  centre[axis] = (low + high) / 2.0;
+  slab_half[axis] = (high - low) / 2.0;
+  std::size_t shadowed = 0U, other = 0U;
+  for (std::size_t i = 0; i < context.ray_directions.size(); ++i) {
+    const Point origin = pose.rotation.transpose() * (context.ray_origins[i] - pose.position);
+    const Point direction = pose.rotation.transpose() * context.ray_directions[i];
+    double enter = 0.0, leave = std::numeric_limits<double>::infinity();
+    bool crosses = true;
+    for (int a = 0; a < 3 && crosses; ++a) {
+      const double o = origin[a] - centre[a];
+      if (std::abs(direction[a]) <= 1e-12) {crosses = std::abs(o) <= slab_half[a]; continue;}
+      double t0 = (-slab_half[a] - o) / direction[a], t1 = (slab_half[a] - o) / direction[a];
+      if (t0 > t1) {std::swap(t0, t1);}
+      enter = std::max(enter, t0);
+      leave = std::min(leave, t1);
+      crosses = leave > enter;
+    }
+    if (!crosses) {continue;}
+    const double range = context.ranges[i];
+    const Point hit = origin + range * direction;
+    const bool in_box = ((hit.cwiseAbs() - half).array() <= kTolerance).all();
+    if (range < enter - kTolerance && !in_box) {++shadowed;} else {++other;}
+  }
+  return shadowed >= 5U && shadowed > other;
+}
+
+// A block cut sideways by an occluder -- the empty gripper over it, the carried block -- shows
+// two faces but only part of its length or width, and the fixed-size box centres on the visible
+// patch, 12-25 cm off along the cut axis with full confidence. Free space cannot locate the
+// hidden end: the occluder blocks those rays. So where a box's observed extent on an in-plane
+// axis is clearly short and a missing side is shadowed, that coordinate is unobserved: the
+// matching request prior supplies it, clamped so the box still holds its observed points.
+// Without such a prior the pose stays and the evidence says so.
+inline void anchor_unobserved_axes(
+  DetectionResult & detection, const SensorContext * sensor_context, const PosePriors & priors,
+  std::size_t request_prior_count)
+{
+  if (sensor_context == nullptr || detection.hypotheses.empty()) {return;}
+  constexpr double kBand = 0.05;  // point-to-box slack when collecting a box's own points
+  constexpr double kMinShortfall = 0.10;  // observed extent this much below the block side
+  const SensorContext context = validate_sensor_context(*sensor_context);
+  const std::size_t count = std::min(request_prior_count, priors.size());
+  for (auto & hypothesis : detection.hypotheses) {
+    auto & pose = hypothesis.pose;
+    const Point half(pose.dims[0] / 2.0, pose.dims[1] / 2.0, pose.dims[2] / 2.0);
+    std::array<std::vector<double>, 2> along;
+    for (const auto & point : detection.above_support_points) {
+      const Point local = pose.rotation.transpose() * (point - pose.position);
+      if (((local.cwiseAbs() - half).array() <= kBand).all()) {
+        along[0].push_back(local.x());
+        along[1].push_back(local.y());
+      }
+    }
+    for (Eigen::Index axis = 0; axis < 2; ++axis) {
+      auto & values = along[static_cast<std::size_t>(axis)];
+      if (values.size() < 20U) {continue;}
+      std::sort(values.begin(), values.end());
+      const std::size_t trim = values.size() / 100U;
+      const double low = values[trim], high = values[values.size() - 1U - trim];
+      const double length = pose.dims[static_cast<std::size_t>(axis)];
+      const double missing = length - (high - low);
+      // the box must already hold its points (a seed walked off a cropped block does not)
+      if (missing < kMinShortfall || high > length / 2.0 || low < -length / 2.0 ||
+        (!slab_shadowed(pose, axis, low - missing, low, context) &&
+        !slab_shadowed(pose, axis, high, high + missing, context)))
+      {
+        continue;
+      }
+      hypothesis.evidence.axis_unobserved = true;
+      for (std::size_t index = 0; index < count; ++index) {
+        const auto & prior = priors[index];
+        if (prior.weight <= 0.0 || prior.dims != pose.dims ||
+          cuboid_orientation_error_rad(pose.rotation, prior.rotation) >
+          prior.orientation_tolerance_rad)
+        {
+          continue;
+        }
+        const Point direction = pose.rotation.col(axis);
+        const double offset = std::clamp(
+          direction.dot(prior.position - pose.position), high - length / 2.0, low + length / 2.0);
+        const Point moved = pose.position + offset * direction;
+        if ((moved - prior.position).norm() > prior.translation_tolerance_m) {continue;}
+        pose.position = moved;
+        break;
+      }
+    }
+  }
+  detection.poses.clear();
+  for (const auto & hypothesis : detection.hypotheses) {detection.poses.push_back(hypothesis.pose);}
+  for (auto & hypothesis : detection.hypotheses) {
+    hypothesis.prior_match = best_prior_match(
+      hypothesis.pose.position, hypothesis.pose.rotation, hypothesis.pose.dims, &priors);
+  }
+  populate_diagnostics(detection);
+}
 
 struct RequestOptions
 {
@@ -309,6 +415,7 @@ inline RequestResult detect_request(
     detect_without_refinement(points, result.parameters, sensor_context, &priors, visual_scorer);
   result.row_split_blocks = split_touching_rows(
     result.detection, result.parameters, options.touching_row_split, sensor_context, &priors);
+  anchor_unobserved_axes(result.detection, sensor_context, priors, request_prior_count);
   return result;
 }
 

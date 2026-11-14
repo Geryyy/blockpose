@@ -624,6 +624,7 @@ nb::dict evidence_to_dict(const blockpose::core::HypothesisEvidence & evidence)
   result["supported_rays"] = evidence.supported_rays;
   result["observed_geometry_faces"] = evidence.observed_geometry_faces;
   result["incident_rays"] = evidence.incident_rays;
+  result["axis_unobserved"] = evidence.axis_unobserved;
   return result;
 }
 
