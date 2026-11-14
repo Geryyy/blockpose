@@ -13,6 +13,7 @@ detector + evaluator flow runs on synthetic and real data unchanged.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from functools import lru_cache
 from typing import Iterator
 
 import numpy as np
@@ -108,6 +109,11 @@ class SynthParams:
     ground_roughness: float = 0.0
     ground_cell: float = 0.5  # heightfield triangle size (m)
     dims: tuple[float, float, float] = BLOCK_DIMS
+    # Recorded scan pattern (CSV Time/s,Azimuth/deg,Zenith/deg, as gz sim casts it) and the
+    # sensor's world rotation, row-major 3x3; replaces the grid fan, so look_at/fov/ang_res and
+    # the grid-only artefacts (stripe dropout, mixed pixels) do nothing
+    ray_pattern: str | None = None
+    sensor_rotation: tuple[float, ...] | None = None
 
 
 def seyond_measured(**overrides) -> SynthParams:
@@ -146,6 +152,9 @@ class ClutterParams:
     near_field_boxes: int = 0
     near_field_offset: float = 0.9
     near_field_dims: tuple[float, float, float] = (0.72, 0.48, 0.75)
+    # (center xyz, dims xyz, yaw_deg) boxes of the crane itself; hits labelled -2 so a bench
+    # can drop them like the gripper self-filter does
+    robot_boxes: tuple = ()
 
 
 @dataclass
@@ -380,8 +389,19 @@ def _resting_center_z(R: np.ndarray, dims: tuple[float, float, float]) -> float:
     return -float(np.min((R @ corners.T).T[:, 2]))
 
 
+@lru_cache(maxsize=4)
+def _pattern_directions(path: str) -> np.ndarray:
+    azimuth, zenith = np.radians(np.loadtxt(path, delimiter=",", skiprows=1, usecols=(1, 2)).T)
+    return np.column_stack(
+        [np.sin(zenith) * np.cos(azimuth), np.sin(zenith) * np.sin(azimuth), np.cos(zenith)]
+    )
+
+
 def _ray_directions(sensor_pos: np.ndarray, target: np.ndarray, params: SynthParams) -> np.ndarray:
     """Pinhole-style ray fan from sensor toward target -> (M, 3) unit directions."""
+    if params.ray_pattern is not None:
+        rotation = np.asarray(params.sensor_rotation, dtype=np.float64).reshape(3, 3)
+        return _pattern_directions(params.ray_pattern) @ rotation.T
     forward = target - sensor_pos
     forward /= np.linalg.norm(forward)
     world_up = np.array([0.0, 0.0, 1.0])
@@ -525,9 +545,15 @@ def generate_scene(
             )
         )
 
+    robot_geometry_ids: list[int] = []
     if clutter is not None:
         for mesh in _build_clutter(clutter, (cx, cy), rng):
             scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(mesh))
+        for center, dims, yaw_deg in clutter.robot_boxes:
+            mesh = _box_mesh(np.asarray(center, dtype=np.float64), _rotation(yaw_deg, 0, 0), dims)
+            robot_geometry_ids.append(
+                scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(mesh))
+            )
 
     if params.look_at is not None:
         target = np.asarray(params.look_at, dtype=np.float64)
@@ -598,6 +624,7 @@ def generate_scene(
     instance_ids = np.full(len(t), -1, dtype=np.int64)
     for instance_id, geometry_id in enumerate(block_geometry_ids):
         instance_ids[geometry_ids == geometry_id] = instance_id
+    instance_ids[np.isin(geometry_ids, robot_geometry_ids)] = -2
     face_ids = np.where(instance_ids >= 0, primitive_ids // 2, -1)
     # A mixed pixel lies off every real surface, so it carries no instance label.
     instance_ids[mixed_mask[hit]] = -1

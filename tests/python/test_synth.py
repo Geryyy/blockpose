@@ -203,3 +203,28 @@ def test_full_stripe_dropout_removes_every_azimuth_column() -> None:
 def test_invalid_block_specs_raise_before_mesh_construction(spec: BlockSpec) -> None:
     with pytest.raises(ValueError, match=r"blocks\[0\]"):
         generate_scene([spec], SynthParams(), np.random.default_rng(1))
+
+
+def test_robot_box_shades_the_block_and_is_labelled_minus_two() -> None:
+    spec = [BlockSpec(x=0.0, y=0.0)]
+    gripper = ClutterParams(
+        trees=False, container=False, logs=False,
+        robot_boxes=(((-2.5, 0.0, 2.2), (1.2, 0.8, 0.5), 0.0),),
+    )
+    bare = generate_scene(spec, _WIDE, np.random.default_rng(0))
+    shaded = generate_scene(spec, _WIDE, np.random.default_rng(0), gripper)
+    assert np.any(shaded.instance_ids == -2)
+    assert (shaded.instance_ids == 0).sum() < (bare.instance_ids == 0).sum()
+
+
+def test_ray_pattern_is_cast_from_the_sensor_rotation(tmp_path) -> None:
+    pattern = tmp_path / "pattern.csv"
+    pattern.write_text("Time/s,Azimuth/deg,Zenith/deg\n0,0,90\n0,0,100\n")  # sensor +x, tilted
+    yaw_180 = (-1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0)
+    params = SynthParams(
+        sensor_pos=(0.0, 0.0, 1.0), ray_pattern=str(pattern), sensor_rotation=yaw_180,
+        range_noise_std=0.0,
+    )
+    sample = generate_scene([], params, np.random.default_rng(0))
+    assert len(sample.points) == 1  # the level ray never hits the ground
+    assert sample.points[0][0] < 0.0 and abs(sample.points[0][2]) < 0.03

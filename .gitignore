@@ -13,6 +13,7 @@ build/
 /install/
 /log/
 /out/
+/runs/
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
