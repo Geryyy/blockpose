@@ -870,6 +870,78 @@ nb::dict discover_with_context(
   }
   return result_to_dict(detection);
 }
+// A prior as concrete_block_detector's prior_from_json reads it: {source (capability prefixes
+// included), position, quat_xyzw, dims, weight, translation_tolerance_m,
+// orientation_tolerance_rad}; missing dims = params.block_dims
+blockpose::core::PosePrior prior_from_dict(
+  const nb::dict & value, const std::array<double, 3> & block_dims)
+{
+  const auto number = [&](const char * key, double fallback) {
+      return value.contains(key) ? nb::cast<double>(value[key]) : fallback;
+    };
+  const auto p = nb::cast<std::array<double, 3>>(value["position"]);
+  const auto q = nb::cast<std::array<double, 4>>(value["quat_xyzw"]);
+  const Eigen::Quaterniond orientation(q[3], q[0], q[1], q[2]);
+  blockpose::core::PosePrior prior;
+  prior.weight = number("weight", 0.20);
+  prior.translation_tolerance_m = number("translation_tolerance_m", 0.35);
+  prior.orientation_tolerance_rad = number("orientation_tolerance_rad", 0.70);
+  if (!std::isfinite(prior.weight) || !std::isfinite(prior.translation_tolerance_m) ||
+    !std::isfinite(prior.orientation_tolerance_rad) || orientation.norm() <= 1.0e-9)
+  {
+    throw std::invalid_argument("pose prior has non-finite values or a zero quaternion");
+  }
+  prior.source =
+    blockpose::core::take_prior_capabilities(nb::cast<std::string>(value["source"]), prior);
+  prior.position = blockpose::core::Point(p[0], p[1], p[2]);
+  prior.rotation = orientation.normalized().toRotationMatrix();
+  prior.dims = value.contains("dims") ? nb::cast<std::array<double, 3>>(value["dims"]) : block_dims;
+  return prior;
+}
+
+// The node's request path; every prior counts as a request prior (no FK prior from TF here).
+nb::dict detect_request_from_numpy(
+  const nb::ndarray<nb::numpy, double, nb::ndim<2>, nb::c_contig> & input,
+  const blockpose::core::DetectionParameters & params, const nb::object & context,
+  const nb::list & priors, bool refine_enabled, double elevated_cluster_max_center_z,
+  bool touching_row_split, double seam_gap_m, double extent_tolerance_m)
+{
+  validate_detection_parameters(params);
+  const blockpose::core::Points points = points_from_numpy(input);
+  blockpose::core::PosePriors parsed;
+  for (const auto prior : priors) {
+    parsed.push_back(prior_from_dict(nb::cast<nb::dict>(prior), params.block_dims));
+  }
+  blockpose::core::RequestOptions options;
+  options.refine_enabled = refine_enabled;
+  options.elevated_cluster_max_center_z = elevated_cluster_max_center_z;
+  options.touching_row_split = {touching_row_split, seam_gap_m, extent_tolerance_m};
+  blockpose::core::RequestResult request;
+  if (context.is_none()) {
+    nb::gil_scoped_release release;
+    request = blockpose::core::detect_request(
+      points, params, options, nullptr, parsed, parsed.size());
+  } else {
+    const auto sensor_context = nb::cast<blockpose::core::SensorContext>(context);
+    nb::gil_scoped_release release;
+    request = blockpose::core::detect_request(
+      points, params, options, &sensor_context, parsed, parsed.size());
+  }
+  nb::dict result = result_to_dict(request.detection);
+  nb::list matches;  // per pose: the prior it matched, "" if none
+  for (const auto & hypothesis : request.detection.hypotheses) {
+    nb::dict match;
+    match["source"] = hypothesis.prior_match.source;
+    match["score"] = hypothesis.prior_match.score;
+    match["translation_error_m"] = hypothesis.prior_match.translation_error_m;
+    match["orientation_error_rad"] = hypothesis.prior_match.orientation_error_rad;
+    matches.append(match);
+  }
+  result["prior_match"] = std::move(matches);
+  result["row_split_blocks"] = request.row_split_blocks;
+  result["cluster_max_center_z"] = request.parameters.cluster_max_center_z;
+  return result;
+}
 }  // namespace
 
 NB_MODULE(_core, module)
@@ -932,6 +1004,11 @@ NB_MODULE(_core, module)
     "Run discovery with typed parameters and optional validated SensorContext.");
   module.def("discover", &discover_with_context<double>, nb::arg("points"), nb::arg("params"), nb::arg("sensor_context"),
     "Run discovery with typed parameters and optional validated SensorContext.");
+  module.def("detect_request", &detect_request_from_numpy, nb::arg("points"), nb::arg("params"),
+    nb::arg("sensor_context").none(), nb::arg("priors"), nb::arg("refine_enabled") = true,
+    nb::arg("elevated_cluster_max_center_z") = 3.0, nb::arg("touching_row_split") = false,
+    nb::arg("seam_gap_m") = 0.12, nb::arg("extent_tolerance_m") = 0.12,
+    "The detector node's request path: priors (dicts) in, detections out.");
   module.def("refine_pose", &refine_pose_from_numpy, nb::arg("points"), nb::arg("position"),
     nb::arg("rotation"), nb::arg("dims"), nb::arg("huber_scale") = 0.05,
     nb::arg("max_translation") = 0.15, nb::arg("max_rotation_deg") = 20.0,

@@ -10,3 +10,4 @@
 #include <blockpose/core/priors.hpp>
 #include <blockpose/core/proposals.hpp>
 #include <blockpose/core/refine.hpp>
+#include <blockpose/core/request.hpp>
