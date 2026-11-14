@@ -198,10 +198,15 @@ inline std::size_t split_touching_rows(
       }
     }
     const auto count = static_cast<std::size_t>(std::llround(strip / length));
-    if (count < 2U || count > kMaxBlocks ||
+    if (count < 2U) {
+      kept.push_back(parent);
+      continue;
+    }
+    // A box on a run of several blocks that does not tile lands anywhere along it: dropped.
+    if (count > kMaxBlocks ||
       std::abs(strip - static_cast<double>(count) * length) > config.extent_tolerance_m)
     {
-      kept.push_back(parent);
+      replaced_trace_ids.push_back(parent.trace_id);
       continue;
     }
     // A tile's long axis follows the row, whichever way the parent was fitted.
@@ -255,13 +260,13 @@ inline std::size_t split_touching_rows(
       }
     }
     if (!accepted) {
-      kept.push_back(parent);
+      replaced_trace_ids.push_back(parent.trace_id);
       continue;
     }
     replaced_trace_ids.push_back(parent.trace_id);
     tiles.insert(tiles.end(), row.begin(), row.end());
   }
-  if (tiles.empty()) {return 0U;}
+  if (replaced_trace_ids.empty()) {return 0U;}
   kept.insert(kept.end(), tiles.begin(), tiles.end());
   detection.hypotheses = select_hypotheses(std::move(kept));
   std::sort(
