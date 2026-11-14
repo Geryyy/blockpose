@@ -18,6 +18,7 @@ import subprocess
 import sys
 import time
 import zlib
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -32,6 +33,13 @@ from blockpose.scenario_matrix import request_families, world_model_prior  # noq
 DETECTOR_YAML = REPO_ROOT.parent / "concrete_block_detector/config/detector.yaml"
 TOLERANCE_M, YAW_TOLERANCE_RAD, MIN_CONFIDENCE = 0.35, 0.70, 0.25  # world model defaults
 WRONG_FIT_M = 0.10
+# REFINE_BLOCK prior per family as perception_orchestrator_services.cpp sends it: TASK_FREE
+# pre-descent anchors only; TASK_PLACED (just set down) may also seed
+REQUEST_PRIOR = {
+    "pickup_touching_row": ("endface+registered_block:target", 0.20),
+    "placed_beside_neighbour": ("seed+endface+registered_block:target", 0.35),
+    "occluded_by_gripper": ("endface+registered_block:target", 0.20),
+}
 FACE_MIN_RETURNS = 20  # = refine_min_points; fewer returns is not a visible face
 
 _STATE: dict = {}
@@ -73,12 +81,47 @@ def select_refine_match(poses, prior_xyz, prior_yaw) -> int:
     return best
 
 
-def _init(detector_yaml: str, stale_share: float) -> None:
+def _near(position, truth, radius: float = TOLERANCE_M) -> bool:
+    return float(np.linalg.norm(np.asarray(position) - truth)) <= radius
+
+
+def failure_stage(result: dict, match: int, truth: np.ndarray) -> str | None:
+    """Where the requested block was lost, or which hypothesis source made the wrong fit."""
+    trace = result["refined_candidate_trace"]
+    if match >= 0:
+        pose = result["poses"][match]["position"]
+        final = [t for t in trace if t["fate"] == "final"]
+        src = [t["source"] for t in final if _near(t["pose"]["position"], pose, 0.02)]
+        split = "row_split" if result["row_split_blocks"] else "untraced"
+        return "fit:" + (src[0] if src else split)
+    if any(_near(p["position"], truth) for p in result["poses"]):
+        return "miss:association"
+    near = [t["fate"] for t in trace if _near(t["pose"]["position"], truth)]
+    if near:
+        return "miss:candidate_" + near[0]
+    raw = [
+        r["fate"] for r in result["raw_lineage"] if _near(r["synthesized_pose"]["position"], truth)
+    ]
+    if raw:
+        return "miss:raw_" + raw[0]
+    gated = [
+        d for d in result["proposal_diagnostics"]
+        if not d["gate_passed"] and _near(d["centroid"], truth, 2.5)
+    ]
+    if gated:
+        d = max(gated, key=lambda d: d["point_count"])  # the one that holds the block
+        gates = ("size_gate_ok", "extent_xy_gate_ok", "extent_z_gate_ok", "center_z_gate_ok")
+        return "miss:component_" + next((g[:-8] for g in gates if not d[g]), "truncated")
+    return "miss:no_component"
+
+
+def _init(detector_yaml: str, stale_share: float, use_priors: bool) -> None:
     cores = sorted(os.sched_getaffinity(0))  # one core per worker: no thread oversubscription
     worker = multiprocessing.current_process()._identity[0] - 1
     os.sched_setaffinity(0, {cores[worker % len(cores)]})
     params, _, _, bounds = load_detector(Path(detector_yaml))
-    _STATE.update(families=request_families(), params=params, bounds=bounds, stale=stale_share)
+    _STATE.update(families=request_families(), params=params, bounds=bounds, stale=stale_share,
+                  priors=use_priors)
 
 
 def run_request(task: tuple[str, int, int]) -> dict:
@@ -102,10 +145,16 @@ def run_request(task: tuple[str, int, int]) -> dict:
         np.ascontiguousarray(sample.ranges),
         np.zeros((0, 3)),
     )
-    # PRIORS PLUG IN HERE (after 353): replace discover with the request-path binding, fed
-    # the prior "endface+registered_block:<id>" at prior_xyz/prior_yaw. Until then the
-    # prior only selects among plain scene-discovery detections.
-    result = _core.discover(np.ascontiguousarray(points), _STATE["params"], context)
+    source, weight = REQUEST_PRIOR[family]
+    prior = {
+        "source": source, "position": tuple(prior_xyz), "weight": weight,
+        "quat_xyzw": (0.0, 0.0, np.sin(prior_yaw / 2), np.cos(prior_yaw / 2)),
+    }
+    # the node's request path; no node FK prior (it names the jaws, never the target)
+    result = _core.detect_request(
+        np.ascontiguousarray(points), _STATE["params"], context,
+        [prior] if _STATE["priors"] else [], touching_row_split=True,  # as detector.yaml
+    )
     t2 = time.perf_counter()
 
     poses = result["poses"]
@@ -125,6 +174,7 @@ def run_request(task: tuple[str, int, int]) -> dict:
             (float(np.linalg.norm(np.asarray(p["position"]) - truth.position)) for p in poses),
             default=None,
         ),
+        "stage": None,
         "raycast_s": t1 - t0,
         "detect_s": t2 - t1,
     }
@@ -139,7 +189,17 @@ def run_request(task: tuple[str, int, int]) -> dict:
         )
     else:
         out.update(error_m=None, fit_faces=None, wrong_fit=False, miss=out["faces_visible"] >= 1)
+    if out["wrong_fit"] or out["miss"]:
+        out["stage"] = failure_stage(result, match, truth.position)
     return out
+
+
+def stage_counts(outcomes: list[dict]) -> str:
+    rows = []
+    for family in dict.fromkeys(o["family"] for o in outcomes):
+        stages = Counter(o["stage"] for o in outcomes if o["family"] == family and o["stage"])
+        rows.append(f"{family}: " + ", ".join(f"{k} {v}" for k, v in stages.most_common(6)))
+    return "\n".join(rows)
 
 
 def table(outcomes: list[dict]) -> str:
@@ -184,6 +244,7 @@ def main() -> None:
     parser.add_argument("--scenes", type=int, default=None, help="first N scenes per family")
     parser.add_argument("--jobs", type=int, default=16)
     parser.add_argument("--stale-share", type=float, default=0.1, help="priors 0.15 m off")
+    parser.add_argument("--no-priors", action="store_true", help="request path, prior withheld")
     parser.add_argument("--detector-yaml", type=Path, default=DETECTOR_YAML)
     parser.add_argument("--out", type=Path, default=REPO_ROOT / "runs/bench")
     args = parser.parse_args()
@@ -197,7 +258,8 @@ def main() -> None:
     ]
     started = time.time()
     spawn = multiprocessing.get_context("spawn")  # fork deadlocks once Open3D is loaded
-    with spawn.Pool(args.jobs, _init, (str(args.detector_yaml), args.stale_share)) as pool:
+    init = (str(args.detector_yaml), args.stale_share, not args.no_priors)
+    with spawn.Pool(args.jobs, _init, init) as pool:
         outcomes = sorted(
             pool.imap_unordered(run_request, tasks, chunksize=4),
             key=lambda o: (args.families.index(o["family"]), o["scene"], o["seed"]),
@@ -206,7 +268,7 @@ def main() -> None:
 
     args.out.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    report = table(outcomes)
+    report = table(outcomes) + "\n\nfailure stages\n" + stage_counts(outcomes)
     run = {
         "git_rev": git_rev(),
         "argv": sys.argv[1:],
@@ -216,7 +278,8 @@ def main() -> None:
         "detector_params": used,
         "detector_keys_not_applied": skipped,
         "scene_bounds": bounds,
-        "request_path": "discover+sensor_context, world-model association (no priors binding)",
+        "request_path": "detect_request, touching_row_split on, "
+        + ("no prior" if args.no_priors else "orchestrator REFINE_BLOCK prior"),
         "table": report,
         "requests": outcomes,
     }
