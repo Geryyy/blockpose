@@ -412,7 +412,8 @@ inline DetectionResult detect_without_refinement(
       const auto & prior = (*priors)[prior_index];
       if (!anchors_end_face(prior)) {continue;}
       for (std::size_t component = 0; component < end_face_components.size(); ++component) {
-        const auto pose = end_face_pose(end_face_components[component], prior, params);
+        const auto pose = end_face_pose(
+          end_face_components[component], prior, params, sensor_context);
         // Outside the request's own acceptance window the caller reads a detection as a
         // different block, so a box the face puts out there is not worth proposing.
         // Negated rather than `>` so a non-finite pose is rejected, not accepted.

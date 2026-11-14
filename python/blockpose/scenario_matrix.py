@@ -309,16 +309,20 @@ def _row(n: int, pitch: float, view: str, angle_deg: float, z: float = 0.3, shif
     centre = np.array([SENSOR_POS[0] - VIEWS[view], SENSOR_POS[1]])
     u = np.array([np.cos(np.radians(180 + angle_deg)), np.sin(np.radians(180 + angle_deg))])
     return tuple(
-        BlockSpec(*(centre + ((i - (n - 1) / 2) * pitch + shift) * u), z=z,
-                  yaw_deg=180.0 + angle_deg)
+        BlockSpec(
+            *(centre + ((i - (n - 1) / 2) * pitch + shift) * u), z=z, yaw_deg=180.0 + angle_deg
+        )
         for i in range(n)
     )
 
 
 def _site_params(view: str) -> SynthParams:
     return seyond_measured(
-        sensor_pos=SENSOR_POS, sensor_rotation=SENSOR_ROTATION, ray_pattern=ROBIN_W_PATTERN,
-        range_noise_std=0.008, range_noise_slope=0.0,  # as gz sim
+        sensor_pos=SENSOR_POS,
+        sensor_rotation=SENSOR_ROTATION,
+        ray_pattern=ROBIN_W_PATTERN,
+        range_noise_std=0.008,
+        range_noise_slope=0.0,  # as gz sim
     )
 
 
@@ -351,8 +355,16 @@ def request_families() -> dict[str, tuple[RequestCase, ...]]:
                     placed.append(RequestCase(scenario, len(specs) - 1))  # the fresh block
     occluded = []
     # (where, fraction of the line of sight, sideways offset m); centred it hides the block whole
-    spots = (("los50", 0.5, 0.4), ("los50", 0.5, 0.8), ("los75", 0.75, 0.3),
-             ("los75", 0.75, 0.6), ("hover", None, 0.0))
+    # hover: gripper bottom 0.4 m over the block top; hover<cm>: higher, as at the pickup hover
+    spots = (
+        ("los50", 0.5, 0.4),
+        ("los50", 0.5, 0.8),
+        ("los75", 0.75, 0.3),
+        ("los75", 0.75, 0.6),
+        ("hover", None, 0.0),
+        ("hover150", None, 0.0),
+        ("hover290", None, 0.0),
+    )
     for n in (1, 3):
         for carrying in (False, True):
             for where, fraction, offset in spots:
@@ -362,8 +374,9 @@ def request_families() -> dict[str, tuple[RequestCase, ...]]:
                         target = specs[n // 2]
                         sensor = np.array(_site_params(view).sensor_pos)
                         los = np.array([target.x, target.y, 0.3]) - sensor
-                        if fraction is None:  # pre-descent, 0.4 m over the block top
-                            p = np.array([target.x, target.y, 1.3 if carrying else 1.25])
+                        if fraction is None:  # pre-descent, over the block top
+                            lift = int(where[5:] or 40) / 100 - 0.4
+                            p = np.array([target.x, target.y, lift + (1.3 if carrying else 1.25)])
                         else:
                             side = np.array([-los[1], los[0], 0.0]) / np.linalg.norm(los[:2])
                             p = sensor + fraction * los + offset * side
@@ -371,10 +384,17 @@ def request_families() -> dict[str, tuple[RequestCase, ...]]:
                         boxes = ((tuple(gripper), (1.2, 0.8, 0.5), target.yaw_deg),)  # PZS100
                         if carrying:
                             specs += (BlockSpec(*p, yaw_deg=target.yaw_deg),)
-                        name = (f"occluded_n{n}_{'carry' if carrying else 'empty'}_{where}"
-                                f"_off{round(offset * 100)}_a{angle}_{view}")
-                        scenario = Scenario(name, "occluded_by_gripper", specs,
-                                            _site_params(view), _no_clutter(robot_boxes=boxes))
+                        name = (
+                            f"occluded_n{n}_{'carry' if carrying else 'empty'}_{where}"
+                            f"_off{round(offset * 100)}_a{angle}_{view}"
+                        )
+                        scenario = Scenario(
+                            name,
+                            "occluded_by_gripper",
+                            specs,
+                            _site_params(view),
+                            _no_clutter(robot_boxes=boxes),
+                        )
                         occluded.append(RequestCase(scenario, n // 2))
     return {
         "pickup_touching_row": tuple(pickup),

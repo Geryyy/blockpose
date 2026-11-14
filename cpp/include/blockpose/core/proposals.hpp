@@ -487,7 +487,8 @@ inline Pose synthesize_pose(const PlanePatch & top, const PlanePatch * side, con
 // nullopt unless the component really is just this block's end face: thin along the
 // prior's own length axis, and as wide across it as the block.
 inline std::optional<Pose> end_face_pose(
-  const Points & component, const PosePrior & prior, const DetectionParameters & params)
+  const Points & component, const PosePrior & prior, const DetectionParameters & params,
+  const SensorContext * sensor_context = nullptr)
 {
   if (component.size() < 3U || !prior.position.allFinite() || !prior.rotation.allFinite()) {
     return std::nullopt;
@@ -530,9 +531,15 @@ inline std::optional<Pose> end_face_pose(
     if (value <= along_low + params.voxel_size) {++near_low;}
     if (value >= along_high - params.voxel_size) {++near_high;}
   }
-  // Comparable densities mean the thin direction is not a face seen from one side.
-  if (std::max(near_high, near_low) < 2U * std::min(near_high, near_low)) {return std::nullopt;}
-  const bool positive = near_high > near_low;
+  // Comparable densities: a bare face, no top trailing off it (top too sparse to join at
+  // range). The block then lies behind it as seen from the sensor.
+  const bool bare = std::max(near_high, near_low) < 2U * std::min(near_high, near_low);
+  if (bare && (sensor_context == nullptr || !sensor_context->origin.allFinite())) {
+    return std::nullopt;
+  }
+  const bool positive = bare ?
+    (sensor_context->origin - prior.position).dot(length_axis) > (along_low + along_high) / 2.0 :
+    near_high > near_low;
   const double face = positive ? along_high : along_low;
   Pose pose;
   pose.rotation = prior.rotation;
