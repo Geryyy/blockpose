@@ -281,18 +281,22 @@ inline std::size_t split_touching_rows(
   return tiles.size();
 }
 
-// Is the box-local slab [low, high] along `axis` hidden behind something in front of the box?
-// Counts returns whose ray crosses the slab: in front of it and outside the box itself
-// (shadowed), or past it (free). No rays at all, e.g. past the edge of the scan, is not shadow.
-inline bool slab_shadowed(
-  const Pose & pose, Eigen::Index axis, double low, double high, const SensorContext & context)
+constexpr double kSlabTolerance = 0.06;  // = visibility_evidence's
+
+// Returns whose ray crosses the box-local slab [low, high] along `axis`, `shrink` smaller on
+// every side: back in front of it and outside the box itself (shadowed), back from behind it
+// (free), or from inside it.
+struct SlabRays {std::size_t shadowed{0U}, free{0U}, inside{0U};};
+
+inline SlabRays slab_rays(
+  const Pose & pose, Eigen::Index axis, double low, double high, const SensorContext & context,
+  double shrink = 0.0)
 {
-  constexpr double kTolerance = 0.06;  // = visibility_evidence's
   const Point half(pose.dims[0] / 2.0, pose.dims[1] / 2.0, pose.dims[2] / 2.0);
-  Point centre = Point::Zero(), slab_half = half;
+  Point centre = Point::Zero(), slab_half = (half.array() - shrink).max(1e-3);
   centre[axis] = (low + high) / 2.0;
-  slab_half[axis] = (high - low) / 2.0;
-  std::size_t shadowed = 0U, other = 0U;
+  slab_half[axis] = std::max((high - low) / 2.0 - shrink, 1e-3);
+  SlabRays out;
   for (std::size_t i = 0; i < context.ray_directions.size(); ++i) {
     const Point origin = pose.rotation.transpose() * (context.ray_origins[i] - pose.position);
     const Point direction = pose.rotation.transpose() * context.ray_directions[i];
@@ -310,10 +314,26 @@ inline bool slab_shadowed(
     if (!crosses) {continue;}
     const double range = context.ranges[i];
     const Point hit = origin + range * direction;
-    const bool in_box = ((hit.cwiseAbs() - half).array() <= kTolerance).all();
-    if (range < enter - kTolerance && !in_box) {++shadowed;} else {++other;}
+    const bool in_box = ((hit.cwiseAbs() - half).array() <= kSlabTolerance).all();
+    if (range < enter - kSlabTolerance && !in_box) {
+      ++out.shadowed;
+    } else if (range > leave + kSlabTolerance - shrink) {
+      ++out.free;
+    } else {
+      ++out.inside;
+    }
   }
-  return shadowed >= 5U && shadowed > other;
+  return out;
+}
+
+// No rays at all, e.g. past the edge of the scan, is neither shadow nor free space.
+inline bool shadowed(const SlabRays & rays)
+{
+  return rays.shadowed >= 5U && rays.shadowed > rays.free + rays.inside;
+}
+inline bool seen_through(const SlabRays & rays)
+{
+  return rays.free >= 5U && rays.free > 2U * (rays.shadowed + rays.inside);
 }
 
 // A block cut sideways by an occluder -- the empty gripper over it, the carried block -- shows
@@ -322,7 +342,9 @@ inline bool slab_shadowed(
 // hidden end: the occluder blocks those rays. So where a box's observed extent on an in-plane
 // axis is clearly short and a missing side is shadowed, that coordinate is unobserved: the
 // matching request prior supplies it, clamped so the box still holds its observed points.
-// Without such a prior the pose stays and the evidence says so.
+// Without such a prior the pose stays and the evidence says so. The same holds where the box
+// reaches past its points into space the sensor sees through: a far block whose sparse top
+// fell apart, fitted from its end-face component alone (i358 w3, 15 cm past the end face).
 inline void anchor_unobserved_axes(
   DetectionResult & detection, const SensorContext * sensor_context, const PosePriors & priors,
   std::size_t request_prior_count)
@@ -330,6 +352,7 @@ inline void anchor_unobserved_axes(
   if (sensor_context == nullptr || detection.hypotheses.empty()) {return;}
   constexpr double kBand = 0.05;  // point-to-box slack when collecting a box's own points
   constexpr double kMinShortfall = 0.10;  // observed extent this much below the block side
+  constexpr double kMinOverhang = 0.08;  // box end this far past its last point
   const SensorContext context = validate_sensor_context(*sensor_context);
   const std::size_t count = std::min(request_prior_count, priors.size());
   for (auto & hypothesis : detection.hypotheses) {
@@ -351,14 +374,17 @@ inline void anchor_unobserved_axes(
       const double low = values[trim], high = values[values.size() - 1U - trim];
       const double length = pose.dims[static_cast<std::size_t>(axis)];
       const double missing = length - (high - low);
-      // the box must already hold its points (a seed walked off a cropped block does not)
-      if (missing < kMinShortfall || high > length / 2.0 || low < -length / 2.0 ||
-        (!slab_shadowed(pose, axis, low - missing, low, context) &&
-        !slab_shadowed(pose, axis, high, high + missing, context)))
-      {
-        continue;
-      }
-      hypothesis.evidence.axis_unobserved = true;
+      if (missing < kMinShortfall) {continue;}
+      const bool cut = shadowed(slab_rays(pose, axis, low - missing, low, context)) ||
+        shadowed(slab_rays(pose, axis, high, high + missing, context));
+      // the box reaches past its points into space the sensor sees through
+      const bool overhang =
+        (low + length / 2.0 >= kMinOverhang &&
+        seen_through(slab_rays(pose, axis, -length / 2.0, low, context, kSlabTolerance))) ||
+        (length / 2.0 - high >= kMinOverhang &&
+        seen_through(slab_rays(pose, axis, high, length / 2.0, context, kSlabTolerance)));
+      if (!cut && !overhang) {continue;}
+      hypothesis.evidence.axis_unobserved = hypothesis.evidence.axis_unobserved || cut;
       for (std::size_t index = 0; index < count; ++index) {
         const auto & prior = priors[index];
         if (prior.weight <= 0.0 || prior.dims != pose.dims ||
@@ -368,10 +394,12 @@ inline void anchor_unobserved_axes(
           continue;
         }
         const Point direction = pose.rotation.col(axis);
-        const double offset = std::clamp(
-          direction.dot(prior.position - pose.position), high - length / 2.0, low + length / 2.0);
+        const double wanted = direction.dot(prior.position - pose.position);
+        const double offset = std::clamp(wanted, high - length / 2.0, low + length / 2.0);
         const Point moved = pose.position + offset * direction;
-        if ((moved - prior.position).norm() > prior.translation_tolerance_m) {continue;}
+        // only toward the prior (a seed walked off a cropped block would be pushed away)
+        if (std::abs(wanted - offset) >= std::abs(wanted) ||
+          (moved - prior.position).norm() > prior.translation_tolerance_m) {continue;}
         pose.position = moved;
         break;
       }
